@@ -15,23 +15,39 @@ class TranscriptionService:
     def __init__(self, model_size: str = "small") -> None:
         self._model_size = model_size
         self._model = None
+        self._model_failed = False
         self._lock = asyncio.Lock()
 
-    async def _ensure_local_model(self) -> object:
+    async def _ensure_local_model(self) -> object | None:
+        from src.config import settings
+        if settings.disable_local_transcription:
+            return None
+        if self._model_failed:
+            return None
         if self._model is not None:
             return self._model
         async with self._lock:
-            if self._model is None:
+            if self._model is not None:
+                return self._model
+            if self._model_failed:
+                return None
+            try:
                 from faster_whisper import WhisperModel
 
                 def _load() -> object:
                     return WhisperModel(self._model_size, device="auto", compute_type="auto")
 
                 self._model = await asyncio.to_thread(_load)
+            except Exception:
+                logger.exception("Failed to load faster-whisper model, local transcription disabled")
+                self._model_failed = True
+                self._model = None
         return self._model
 
     async def _transcribe_local(self, path: Path, language: str | None) -> str:
         model = await self._ensure_local_model()
+        if model is None:
+            raise RuntimeError("Local transcription unavailable (model not loaded)")
 
         def _run() -> str:
             segments, _info = model.transcribe(str(path), language=language)

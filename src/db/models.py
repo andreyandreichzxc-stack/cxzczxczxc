@@ -47,7 +47,7 @@ class UserSettings(Base):
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")  # IANA tz, например Europe/Moscow
     digest_time: Mapped[str] = mapped_column(String(5), default="09:00")  # HH:MM в timezone юзера
     digest_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    transcription_mode: Mapped[str] = mapped_column(String(16), default="local")  # local | api | hybrid
+    transcription_mode: Mapped[str] = mapped_column(String(16), default="api")  # local | api | hybrid
     transcription_api_provider: Mapped[str] = mapped_column(String(16), default="openai")  # openai | gemini | mistral
     auto_reply_cooldown_min: Mapped[int] = mapped_column(Integer, default=30)
     auto_reply_mode: Mapped[str] = mapped_column(String(8), default="static")  # static | smart

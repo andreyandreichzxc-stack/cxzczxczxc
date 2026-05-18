@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     encryption_key: str = Field(..., description="Fernet-ключ (base64)")
     database_url: str = Field("sqlite+aiosqlite:///data/app.db")
     proxy_url: str = Field("", description="Прокси для aiogram и Telethon (socks5://ip:port или http://ip:port)")
+    disable_local_transcription: bool = Field(False, description="Полностью отключить faster-whisper (для VDS с малым RAM)")
 
     @property
     def data_dir(self) -> Path:
