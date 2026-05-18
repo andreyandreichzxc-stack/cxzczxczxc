@@ -1,0 +1,25 @@
+.env
+.env.local
+.env.*.local
+data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.session
+*.session-journal
+
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.idea/
+.vscode/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS
+.DS_Store
+Thumbs.db

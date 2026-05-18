@@ -1,0 +1,19 @@
+services:
+  assistant:
+    build: .
+    container_name: telegram-assistant
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # переопределяем путь к БД, чтобы лежал в смонтированном томе
+      DATABASE_URL: sqlite+aiosqlite:////app/data/app.db
+      TZ: UTC
+    volumes:
+      - ./data:/app/data
+    # лог-ротация, чтобы не разрастался диск
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

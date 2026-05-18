@@ -1,0 +1,24 @@
+aiogram>=3.13
+telethon>=1.36
+SQLAlchemy[asyncio]>=2.0.36
+aiosqlite>=0.20
+pydantic>=2.9
+pydantic-settings>=2.6
+cryptography>=43.0
+python-dotenv>=1.0
+openai>=1.54
+google-genai>=0.3
+httpx>=0.27
+
+# Транскрипция
+faster-whisper>=1.0
+
+# Документы
+pypdf>=5.0
+python-docx>=1.1
+
+# Векторный поиск
+qdrant-client>=1.12
+
+# Fuzzy matching контактов
+rapidfuzz>=3.10
