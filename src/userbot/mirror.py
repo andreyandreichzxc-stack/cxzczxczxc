@@ -27,6 +27,24 @@ def _classify(msg: TgMessage) -> str:
         return "document"
     if msg.photo:
         return "photo"
+    if msg.video:
+        return "video"
+    if msg.sticker:
+        return "sticker"
+    if msg.video_note:
+        return "video_note"
+    if msg.poll:
+        return "poll"
+    if msg.geo:
+        return "geo"
+    if msg.venue:
+        return "venue"
+    if msg.contact:
+        return "contact"
+    if msg.game:
+        return "game"
+    if msg.invoice:
+        return "invoice"
     if msg.text:
         return "text"
     return "other"
@@ -69,6 +87,7 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
             text = msg.text or msg.message or None
             sender_name = await _sender_label(msg)
 
+            # ===== SESSION 1: только быстрые DB-операции =====
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_telegram_id)
 
@@ -142,100 +161,103 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                         owner.absence_status = status
                         owner.absence_message = message_text or msg.text[:100]
 
-                # Urgent notification
-                if not msg.out and msg.text:
-                    if owner.settings.urgent_notify_enabled:
-                        from src.core.urgency_classifier import classify_urgency
+            # ===== SESSION CLOSED — медленные LLM-вызовы вне сессии =====
+
+            # Urgent notification (LLM)
+            if not msg.out and msg.text:
+                _urgent_enabled = False
+                _urgency_provider = None
+                async with get_session() as _qs:
+                    _o = await get_or_create_user(_qs, owner_telegram_id)
+                    if _o.settings.urgent_notify_enabled:
                         from src.llm.router import build_provider
 
-                        provider = await build_provider(session, owner)
-                        urgency = await classify_urgency(
-                            msg.text, provider=provider, sender_name=sender_name
+                        _urgency_provider = await build_provider(_qs, _o)
+                        _urgent_enabled = True
+                if _urgent_enabled and _urgency_provider:
+                    from src.core.urgency_classifier import classify_urgency
+
+                    urgency = await classify_urgency(
+                        msg.text, provider=_urgency_provider, sender_name=sender_name
+                    )
+                    if urgency == "urgent":
+                        sender_name_local = sender_name or str(peer_id)
+                        await notifier.notify(
+                            f"🔴 <b>СРОЧНОЕ от {sender_name_local}!</b>\n\n"
+                            f"<i>{msg.text[:300]}</i>"
                         )
-                        if urgency == "urgent":
-                            sender_name_local = sender_name or str(peer_id)
-                            await notifier.notify(
-                                f"🔴 <b>СРОЧНОЕ от {sender_name_local}!</b>\n\n"
-                                f"<i>{msg.text[:300]}</i>"
-                            )
-                        if urgency != "urgent":
-                            # для отладки: логируем что LLM сказал про сообщение
-                            logger.debug(
-                                "Message from %s classified as %s: %s",
-                                sender_name,
-                                urgency,
-                                msg.text[:80],
-                            )
+                    else:
+                        # для отладки: логируем что LLM сказал про сообщение
+                        logger.debug(
+                            "Message from %s classified as %s: %s",
+                            sender_name,
+                            urgency,
+                            msg.text[:80],
+                        )
 
-                # Draft suggestion
-                if not msg.out and msg.text:
-                    try:
-                        _draft_sender = await event.get_sender()
-                        _sender_is_bot = bool(getattr(_draft_sender, "bot", False))
-                    except Exception:
-                        _sender_is_bot = False
-                    if not _sender_is_bot:
-                        async with get_session() as inner_session:
-                            inner_owner = await get_or_create_user(
-                                inner_session, owner_telegram_id
-                            )
-                            from src.core.draft_suggester import (
-                                should_suggest,
-                                suggest_draft,
-                            )
-                            from src.bot.handlers.draft_actions import (
-                                draft_keyboard,
-                                store_draft,
-                            )
-                            from src.core.text_sanitizer import sanitize_html
-                            from src.llm.router import build_provider as _build_provider
+            # Draft suggestion (LLM)
+            if not msg.out and msg.text:
+                try:
+                    _draft_sender = await event.get_sender()
+                    _sender_is_bot = bool(getattr(_draft_sender, "bot", False))
+                except Exception:
+                    _sender_is_bot = False
+                if not _sender_is_bot:
+                    async with get_session() as _ds:
+                        _ds_owner = await get_or_create_user(_ds, owner_telegram_id)
+                        from src.core.draft_suggester import (
+                            should_suggest,
+                            suggest_draft,
+                        )
+                        from src.bot.handlers.draft_actions import (
+                            draft_keyboard,
+                            store_draft,
+                        )
+                        from src.core.text_sanitizer import sanitize_html
+                        from src.llm.router import build_provider as _build_provider
 
-                            _provider = await _build_provider(
-                                inner_session, inner_owner
-                            )
+                        _provider = await _build_provider(_ds, _ds_owner)
 
-                            if await should_suggest(
-                                inner_owner.settings,
-                                inner_owner.id,
-                                msg.text,
-                                provider=_provider,
-                            ):
-                                if _provider:
-                                    from src.db.repo import (
-                                        fetch_chat_messages,
-                                        get_contact,
+                        if await should_suggest(
+                            _ds_owner.settings,
+                            _ds_owner.id,
+                            msg.text,
+                            provider=_provider,
+                        ):
+                            if _provider:
+                                from src.db.repo import (
+                                    fetch_chat_messages,
+                                    get_contact,
+                                )
+
+                                contact = await get_contact(_ds, _ds_owner, peer_id)
+                                if contact:
+                                    recent = await fetch_chat_messages(
+                                        _ds,
+                                        _ds_owner,
+                                        peer_id,
+                                        limit=10,
                                     )
-
-                                    contact = await get_contact(
-                                        inner_session, inner_owner, peer_id
+                                    draft = await suggest_draft(
+                                        _provider,
+                                        _ds_owner.id,
+                                        peer_id,
+                                        contact,
+                                        msg.text,
+                                        sender_name or str(peer_id),
+                                        recent,
                                     )
-                                    if contact:
-                                        recent = await fetch_chat_messages(
-                                            inner_session,
-                                            inner_owner,
-                                            peer_id,
-                                            limit=10,
+                                    if draft:
+                                        draft_hash = store_draft(draft)
+                                        safe_draft = sanitize_html(draft)[:400]
+                                        await notifier.notify(
+                                            f"💬 <b>{sender_name or peer_id}:</b>"
+                                            f" <i>{msg.text[:200]}</i>\n\n"
+                                            f"→ <b>Черновик:</b> {safe_draft}",
+                                            reply_markup=draft_keyboard(
+                                                peer_id, draft_hash
+                                            ),
                                         )
-                                        draft = await suggest_draft(
-                                            _provider,
-                                            inner_owner.id,
-                                            peer_id,
-                                            contact,
-                                            msg.text,
-                                            sender_name or str(peer_id),
-                                            recent,
-                                        )
-                                        if draft:
-                                            draft_hash = store_draft(draft)
-                                            safe_draft = sanitize_html(draft)[:400]
-                                            await notifier.notify(
-                                                f"💬 <b>{sender_name or peer_id}:</b>"
-                                                f" <i>{msg.text[:200]}</i>\n\n"
-                                                f"→ <b>Черновик:</b> {safe_draft}",
-                                                reply_markup=draft_keyboard(
-                                                    peer_id, draft_hash
-                                                ),
-                                            )
         except Exception:
             logger.exception("mirror handler failed")
 

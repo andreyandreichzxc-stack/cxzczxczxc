@@ -1,8 +1,8 @@
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import select, text as sql_text
+from sqlalchemy import func, select, text as sql_text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -229,11 +229,15 @@ async def upsert_message(
         index_elements=["user_id", "peer_id", "message_id"],
         set_={
             "text": stmt.excluded.text,
-            "transcript": stmt.excluded.transcript,
-            "extracted_text": stmt.excluded.extracted_text,
-            "media_path": stmt.excluded.media_path,
+            "transcript": func.coalesce(stmt.excluded.transcript, Message.transcript),
+            "extracted_text": func.coalesce(
+                stmt.excluded.extracted_text, Message.extracted_text
+            ),
+            "media_path": func.coalesce(stmt.excluded.media_path, Message.media_path),
             "kind": stmt.excluded.kind,
-            "sender_name": stmt.excluded.sender_name,
+            "sender_name": func.coalesce(
+                stmt.excluded.sender_name, Message.sender_name
+            ),
         },
     )
     await session.execute(stmt)
@@ -481,14 +485,21 @@ async def create_pending_action(
 
 
 async def get_pending_action(
-    session: AsyncSession, action_id: int
+    session: AsyncSession, action_id: int, user: User
 ) -> PendingAction | None:
-    return await session.get(PendingAction, action_id)
+    result = await session.execute(
+        select(PendingAction).where(
+            PendingAction.id == action_id, PendingAction.user_id == user.id
+        )
+    )
+    return result.scalar_one_or_none()
 
 
-async def delete_pending_action(session: AsyncSession, action_id: int) -> None:
+async def delete_pending_action(
+    session: AsyncSession, action_id: int, user: User
+) -> None:
     pa = await session.get(PendingAction, action_id)
-    if pa is not None:
+    if pa is not None and pa.user_id == user.id:
         await session.delete(pa)
 
 
@@ -615,7 +626,7 @@ async def get_agent_cache(session: AsyncSession, cache_key: str) -> str | None:
     )
     row = result.scalar_one_or_none()
     if row:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         age = (now - row.created_at).total_seconds()
         if age < row.ttl_seconds:
             return row.result_json
@@ -636,7 +647,7 @@ async def upsert_agent_cache(
     row = result.scalar_one_or_none()
     if row:
         row.result_json = result_json
-        row.created_at = datetime.utcnow()
+        row.created_at = datetime.now(timezone.utc)
         row.ttl_seconds = ttl_seconds
     else:
         session.add(

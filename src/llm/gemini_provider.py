@@ -24,7 +24,7 @@ class GeminiProvider:
     name = "gemini"
 
     def __init__(self, api_key: str) -> None:
-        self._client = genai.Client(api_key=api_key)
+        self._client = genai.Client(api_key=api_key, http_options={"timeout": 60000})
 
     async def validate_key(self) -> bool:
         def _check() -> bool:
@@ -38,7 +38,9 @@ class GeminiProvider:
         return await asyncio.to_thread(_check)
 
     async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
-        model = LLMDefaults.GEMINI_CHAT_HEAVY if heavy else LLMDefaults.GEMINI_CHAT_LIGHT
+        model = (
+            LLMDefaults.GEMINI_CHAT_HEAVY if heavy else LLMDefaults.GEMINI_CHAT_LIGHT
+        )
         system, contents = _to_gemini_contents(messages)
 
         def _call() -> str:

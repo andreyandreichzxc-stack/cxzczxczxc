@@ -81,13 +81,15 @@ async def _check_and_track_offline(
         return False
 
 
-async def _recently_replied(owner_id: int, peer_id: int) -> bool:
-    threshold = datetime.utcnow() - timedelta(minutes=COOLDOWN_MINUTES)
+async def _recently_replied(owner_telegram_id: int, peer_id: int) -> bool:
     async with get_session() as session:
+        owner = await get_or_create_user(session, owner_telegram_id)
+        cooldown = getattr(owner.settings, "auto_reply_cooldown_min", None) or 30
+        threshold = datetime.utcnow() - timedelta(minutes=cooldown)
         result = await session.execute(
             select(AutoReplyLog)
             .where(
-                AutoReplyLog.user_id == owner_id,
+                AutoReplyLog.user_id == owner.id,
                 AutoReplyLog.peer_id == peer_id,
                 AutoReplyLog.created_at >= threshold,
             )
@@ -218,7 +220,7 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
 
                 if not await _check_and_track_offline(client, session, owner):
                     return
-            if await _recently_replied(owner.id, sender.id):
+            if await _recently_replied(owner_telegram_id, sender.id):
                 return
 
             incoming_text = msg.text or msg.message or ""
@@ -267,10 +269,13 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
 
 
 def attach_auto_reply(client: TelegramClient, owner_telegram_id: int) -> None:
+    _handler_cache = None
 
     async def _wrapper(event):
-        h = await _make_handler(client, owner_telegram_id)
-        await h(event)
+        nonlocal _handler_cache
+        if _handler_cache is None:
+            _handler_cache = await _make_handler(client, owner_telegram_id)
+        await _handler_cache(event)
 
     client.add_event_handler(_wrapper, events.NewMessage(incoming=True))
     logger.info("Auto-reply handler attached for user %s", owner_telegram_id)

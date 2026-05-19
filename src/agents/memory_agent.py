@@ -57,8 +57,8 @@ async def extract_facts(provider, messages_text: str) -> dict[str, Any]:
     )
     raw = raw.strip()
     if raw.startswith("```"):
-        lines = raw.split("\n")
-        raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
+        raw = re.sub(r"\n?\s*```\s*$", "", raw)
     try:
         m = re.search(r"\{[\s\S]*\}", raw)
         if m:
@@ -104,8 +104,8 @@ async def recall(provider, query: str, facts: list[str]) -> dict[str, Any]:
     )
     raw = raw.strip()
     if raw.startswith("```"):
-        lines = raw.split("\n")
-        raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
+        raw = re.sub(r"\n?\s*```\s*$", "", raw)
     try:
         m = re.search(r"\{[\s\S]*\}", raw)
         if m:

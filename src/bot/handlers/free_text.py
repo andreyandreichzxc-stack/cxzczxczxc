@@ -16,7 +16,7 @@ from src.core.agent import route_intent
 from src.core.chat_service import load_chat
 from src.core.maestro import run_pipeline
 from src.core.commitment_extractor import extract_and_save_commitments
-from src.core.contact_resolver import resolve
+from src.core.contact_resolver import resolve, resolve_with_llm
 from src.core.news import build_news_digest
 from src.core.summarizer import catchup, draft_reply, summarize_chat
 from src.core import conversation_context as ctx_store
@@ -826,8 +826,6 @@ async def _exec_add_reminder(intent, message, *, tz_name: str) -> None:
             else None
         )
         if client is not None:
-            from src.core.contact_resolver import resolve
-
             async with get_session() as session:
                 owner = await get_or_create_user(session, message.from_user.id)
             cands = await resolve(client, owner, peer_query)
@@ -1120,9 +1118,9 @@ async def cb_mem_ok(callback: CallbackQuery) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         memories = await list_memories(session, owner)
-    for m in memories:
-        if m.id == mid:
-            m.sentiment = "neutral"
+        for m in memories:
+            if m.id == mid:
+                m.sentiment = "neutral"
     if callback.message:
         await callback.message.edit_text(
             f"✅ {callback.message.text}\n\n<i>Понял, память обновлена.</i>"

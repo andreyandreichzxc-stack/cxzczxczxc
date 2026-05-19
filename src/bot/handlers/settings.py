@@ -71,6 +71,16 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         InlineKeyboardButton(text="🔄 Авто-ответ", callback_data="set:sec:auto_reply"),
     )
     kb.row(
+        InlineKeyboardButton(text="🌅 Дайджест", callback_data="set:sec:digest"),
+        InlineKeyboardButton(text="⏰ Напоминания", callback_data="set:sec:reminders"),
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="📊 Smart-дайджест", callback_data="set:sec:smart_digest"
+        ),
+        InlineKeyboardButton(text="📰 Новости", callback_data="set:sec:news"),
+    )
+    kb.row(
         InlineKeyboardButton(text="🤖 LLM", callback_data="set:sec:llm"),
         InlineKeyboardButton(
             text="🎤 Транскрипция", callback_data="set:sec:transcription"
@@ -78,6 +88,10 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
     )
     kb.row(
         InlineKeyboardButton(text="✍️ Черновики", callback_data="set:sec:drafts"),
+        InlineKeyboardButton(text="🔒 Приватность", callback_data="set:sec:privacy"),
+    )
+    kb.row(
+        InlineKeyboardButton(text="🔄 Синхронизация", callback_data="set:sec:sync"),
         InlineKeyboardButton(text="🔑 API-ключи", callback_data="set:sec:keys"),
     )
     kb.row(InlineKeyboardButton(text="❌ Закрыть", callback_data="set:close"))
@@ -130,6 +144,8 @@ BOOL_KEYS = {
     "include_saved_messages",
     "draft_suggestions_enabled",
     "draft_only_important",
+    "smart_digest_enabled",
+    "urgent_notify_enabled",
 }
 
 CHOICE_KEYS = {
@@ -145,6 +161,7 @@ NUMERIC_KEYS = {
     "news_window_hours",
     "auto_sync_interval_sec",
     "draft_max_per_hour",
+    "smart_digest_interval_min",
 }
 
 

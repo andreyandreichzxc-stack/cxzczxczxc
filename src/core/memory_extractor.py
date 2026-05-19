@@ -1,4 +1,5 @@
 """LLM-извлечение фактов-воспоминаний о контакте из переписки."""
+
 import json
 import logging
 
@@ -79,15 +80,18 @@ async def extract_and_save_memories(
     saved: list[dict] = []
     async with get_session() as session:
         # Подтягиваем User по telegram_id
-        result = await session.execute(
-            select(User).where(User.id == user_id)
-        )
+        result = await session.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
         if user is None:
             logger.warning("Memory extraction: user %s not found", user_id)
             return []
 
+        if not isinstance(items, list):
+            logger.warning("LLM returned non-list for memory extraction: %s", items)
+            return saved
         for item in items:
+            if not isinstance(item, dict):
+                continue  # пропустить строки/не-словари
             fact = (item.get("fact") or "").strip()
             if not fact:
                 continue
@@ -105,5 +109,10 @@ async def extract_and_save_memories(
             saved.append(item)
 
     if saved:
-        logger.info("Saved %d memories for user %d, contact %s", len(saved), user_id, contact.display_name)
+        logger.info(
+            "Saved %d memories for user %d, contact %s",
+            len(saved),
+            user_id,
+            contact.display_name,
+        )
     return saved

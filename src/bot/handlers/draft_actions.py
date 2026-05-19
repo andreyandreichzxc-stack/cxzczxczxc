@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -26,14 +27,24 @@ router.message.filter(OwnerOnly())
 router.callback_query.filter(OwnerOnly())
 
 
-# in-memory store: draft_hash -> full draft text
-_draft_texts: dict[str, str] = {}
+# in-memory store: draft_hash -> (timestamp, full draft text)
+_draft_texts: dict[str, tuple[float, str]] = {}
+DRAFT_TTL_SECONDS = 30 * 60  # 30 минут
+
+
+def _draft_cleanup() -> None:
+    """Удаляет черновики старше DRAFT_TTL_SECONDS."""
+    now = time.time()
+    stale = [k for k, (ts, _) in _draft_texts.items() if now - ts > DRAFT_TTL_SECONDS]
+    for k in stale:
+        del _draft_texts[k]
 
 
 def store_draft(draft_text: str) -> str:
     """Сохраняет черновик и возвращает hash-ключ для callback'ов."""
     draft_hash = hashlib.sha256(draft_text.encode()).hexdigest()[:8]
-    _draft_texts[draft_hash] = draft_text
+    _draft_texts[draft_hash] = (time.time(), draft_text)
+    _draft_cleanup()
     return draft_hash
 
 
@@ -70,9 +81,13 @@ async def cb_draft_send(callback: CallbackQuery) -> None:
     peer_id = int(parts[2])
     draft_hash = parts[3]
 
-    draft_text = _draft_texts.pop(draft_hash, None)
-    if draft_text is None:
+    draft_data = _draft_texts.pop(draft_hash, None)
+    if draft_data is None:
         await callback.answer("Черновик устарел или не найден", show_alert=True)
+        return
+    ts, draft_text = draft_data
+    if time.time() - ts > DRAFT_TTL_SECONDS:
+        await callback.answer("Черновик устарел", show_alert=True)
         return
 
     client = (
@@ -89,12 +104,18 @@ async def cb_draft_send(callback: CallbackQuery) -> None:
         if callback.message:
             await callback.message.edit_text("✅ Отправлено")
     except ValueError as e:
-        await callback.message.edit_text(f"❌ Ошибка: {e}")
+        if callback.message:
+            await callback.message.edit_text(f"❌ Ошибка: {e}")
+        else:
+            await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
     except Exception as e:
         from telethon.errors import FloodWaitError
 
         if isinstance(e, FloodWaitError):
-            await callback.message.edit_text(f"❌ Flood wait: {e.seconds}с")
+            if callback.message:
+                await callback.message.edit_text(f"❌ Flood wait: {e.seconds}с")
+            else:
+                await callback.answer(f"❌ Flood wait: {e.seconds}с", show_alert=True)
         else:
             await callback.answer(f"❌ Ошибка отправки: {e}", show_alert=True)
     await callback.answer()

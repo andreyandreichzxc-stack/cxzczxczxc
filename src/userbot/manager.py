@@ -47,7 +47,9 @@ class UserbotManager:
                     continue
                 api_id, api_hash, session_string = creds
                 client = TelegramClient(
-                    StringSession(session_string), api_id, api_hash,
+                    StringSession(session_string),
+                    api_id,
+                    api_hash,
                     proxy=parse_telethon_proxy(settings.proxy_url),
                 )
                 try:
@@ -55,17 +57,29 @@ class UserbotManager:
                     if await client.is_user_authorized():
                         self._clients[user.telegram_id] = client
                         from src.userbot.auto_reply import attach_auto_reply
-                        from src.userbot.dialog_events import attach_dialog_event_handlers
+                        from src.userbot.dialog_events import (
+                            attach_dialog_event_handlers,
+                        )
                         from src.userbot.mirror import attach_mirror
+
                         attach_auto_reply(client, user.telegram_id)
                         attach_dialog_event_handlers(client, user.telegram_id)
                         attach_mirror(client, user.telegram_id)
-                        logger.info("Restored Telethon client for user %s", user.telegram_id)
+                        logger.info(
+                            "Restored Telethon client for user %s", user.telegram_id
+                        )
                     else:
                         await client.disconnect()
-                        logger.warning("Saved session for %s is not authorized anymore", user.telegram_id)
+                        logger.warning(
+                            "Saved session for %s is not authorized anymore",
+                            user.telegram_id,
+                        )
                 except Exception:
-                    logger.exception("Failed to restore client for user %s", user.telegram_id)
+                    logger.exception(
+                        "Failed to restore client for user %s", user.telegram_id
+                    )
+                    if client.is_connected():
+                        await client.disconnect()
 
     def get_client(self, telegram_id: int) -> TelegramClient | None:
         return self._clients.get(telegram_id)
@@ -75,6 +89,7 @@ class UserbotManager:
         from src.userbot.auto_reply import attach_auto_reply
         from src.userbot.dialog_events import attach_dialog_event_handlers
         from src.userbot.mirror import attach_mirror
+
         attach_auto_reply(client, telegram_id)
         attach_dialog_event_handlers(client, telegram_id)
         attach_mirror(client, telegram_id)
@@ -91,9 +106,13 @@ class UserbotManager:
             except Exception:
                 pass
 
-    def start_pending(self, telegram_id: int, api_id: int, api_hash: str) -> PendingLogin:
+    def start_pending(
+        self, telegram_id: int, api_id: int, api_hash: str
+    ) -> PendingLogin:
         client = TelegramClient(
-            StringSession(), api_id, api_hash,
+            StringSession(),
+            api_id,
+            api_hash,
             proxy=parse_telethon_proxy(settings.proxy_url),
         )
         pending = PendingLogin(client=client, api_id=api_id, api_hash=api_hash)

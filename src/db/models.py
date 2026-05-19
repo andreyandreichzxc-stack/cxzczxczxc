@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger,
@@ -26,7 +26,9 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
     last_seen_online: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     absence_status: Mapped[str | None] = mapped_column(
         String(16), nullable=True
@@ -125,7 +127,9 @@ class TelegramSession(Base):
     session_string_enc: Mapped[str] = mapped_column(Text)
     phone: Mapped[str] = mapped_column(String(32))
     account_label: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
     user: Mapped[User] = relationship(back_populates="session")
 
@@ -226,7 +230,9 @@ class Commitment(Base):
     status: Mapped[str] = mapped_column(
         String(16), default="open"
     )  # open | done | cancelled | reminded
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class AutoReplyLog(Base):
@@ -243,7 +249,7 @@ class AutoReplyLog(Base):
     incoming_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     reply_text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, index=True
+        DateTime, default=lambda: datetime.now(timezone.utc), index=True
     )
 
 
@@ -261,7 +267,9 @@ class IndexJob(Base):
     )
     peer_id: Mapped[int] = mapped_column(BigInteger, index=True)
     last_indexed_message_id: Mapped[int] = mapped_column(BigInteger, default=0)
-    last_indexed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_indexed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class TranscriptionCache(Base):
@@ -272,7 +280,9 @@ class TranscriptionCache(Base):
     file_id: Mapped[str] = mapped_column(String(256), primary_key=True)
     text: Mapped[str] = mapped_column(Text)
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class PendingAction(Base):
@@ -286,7 +296,9 @@ class PendingAction(Base):
     )
     kind: Mapped[str] = mapped_column(String(32))  # send_message | catchup_reply | ...
     payload: Mapped[str] = mapped_column(Text)  # JSON
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class NewsTopic(Base):
@@ -301,7 +313,9 @@ class NewsTopic(Base):
     topic: Mapped[str] = mapped_column(String(256))
     hours: Mapped[int] = mapped_column(Integer, default=24)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class Memory(Base):
@@ -321,9 +335,13 @@ class Memory(Base):
         String(16), nullable=True
     )  # positive, negative, neutral
     source: Mapped[str] = mapped_column(String(16), default="chat")  # chat, user, auto
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
     )
 
 
@@ -334,5 +352,7 @@ class AgentCache(Base):
 
     cache_key: Mapped[str] = mapped_column(String(128), primary_key=True)
     result_json: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
     ttl_seconds: Mapped[int] = mapped_column(Integer, default=0)

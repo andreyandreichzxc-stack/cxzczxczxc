@@ -191,33 +191,35 @@ async def resolve_with_llm(
         )
         raw = raw.strip()
         if raw.startswith("```"):
-            lines = raw.split("\n")
-            raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+            raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
+            raw = re.sub(r"\n?\s*```\s*$", "", raw)
         m = re.search(r"\{[\s\S]*\}", raw)
         if m:
             parsed = json.loads(m.group(0))
             idx = parsed.get("selected_index", -1)
             if isinstance(idx, int) and 0 <= idx < len(candidates):
                 confidence = parsed.get("confidence", "medium")
-            if confidence == "ambiguous":
-                # Несколько кандидатов с похожими именами — не выбираем,
-                # возвращаем всех, пусть пользователь выберет
-                logger.info("LLM ambiguous for %r: %s", query, parsed.get("reason", ""))
-            else:
-                logger.info(
-                    "LLM selected %r for query %r (confidence=%s)",
-                    candidates[idx].display_name,
-                    query,
-                    confidence,
-                )
-                # Поднимаем score выбранного кандидата — чтобы гарантированно прошёл авто-приём
-                if confidence == "high":
-                    candidates[idx].score = max(candidates[idx].score, 95)
-                elif confidence == "medium":
-                    candidates[idx].score = max(candidates[idx].score, 85)
-                # Перемещаем выбранного на первое место
-                selected = candidates.pop(idx)
-                candidates.insert(0, selected)
+                if confidence == "ambiguous":
+                    # Несколько кандидатов с похожими именами — не выбираем,
+                    # возвращаем всех, пусть пользователь выберет
+                    logger.info(
+                        "LLM ambiguous for %r: %s", query, parsed.get("reason", "")
+                    )
+                else:
+                    logger.info(
+                        "LLM selected %r for query %r (confidence=%s)",
+                        candidates[idx].display_name,
+                        query,
+                        confidence,
+                    )
+                    # Поднимаем score выбранного кандидата — чтобы гарантированно прошёл авто-приём
+                    if confidence == "high":
+                        candidates[idx].score = max(candidates[idx].score, 95)
+                    elif confidence == "medium":
+                        candidates[idx].score = max(candidates[idx].score, 85)
+                    # Перемещаем выбранного на первое место
+                    selected = candidates.pop(idx)
+                    candidates.insert(0, selected)
     except Exception:
         logger.exception("LLM disambiguation failed for query %r", query)
 

@@ -62,8 +62,8 @@ async def build_digest(provider, messages_data: list[dict]) -> dict[str, Any]:
     )
     raw = raw.strip()
     if raw.startswith("```"):
-        lines = raw.split("\n")
-        raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
+        raw = re.sub(r"\n?\s*```\s*$", "", raw)
 
     try:
         m = re.search(r"\{[\s\S]*\}", raw)

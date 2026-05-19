@@ -43,9 +43,12 @@ async def summarize_chat(
         f"Собеседник: {contact.display_name}\n\n"
         f"Переписка (последние {len(messages)} сообщений):\n{transcript}"
     )
+    system = SUMMARY_SYSTEM
+    if global_style:
+        system = system + "\n\n" + global_style
     raw = await provider.chat(
         [
-            ChatMessage(role="system", content=SUMMARY_SYSTEM),
+            ChatMessage(role="system", content=system),
             ChatMessage(role="user", content=user_prompt),
         ],
         heavy=heavy,

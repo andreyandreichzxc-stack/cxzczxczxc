@@ -51,10 +51,8 @@ async def run_agent(
             # Очистка от markdown
             raw = raw.strip()
             if raw.startswith("```"):
-                lines = raw.split("\n")
-                raw = "\n".join(
-                    lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
-                )
+                raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
+                raw = re.sub(r"\n?\s*```\s*$", "", raw)
             if raw.startswith("{"):
                 data = json.loads(raw)
             else:

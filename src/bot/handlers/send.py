@@ -58,10 +58,14 @@ def _parse_json(text: str) -> dict:
 def _confirm_keyboard(action_id: int):
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="✅ Отправить", callback_data=f"send:confirm:{action_id}"),
+        InlineKeyboardButton(
+            text="✅ Отправить", callback_data=f"send:confirm:{action_id}"
+        ),
         InlineKeyboardButton(text="✏ Изменить", callback_data=f"send:edit:{action_id}"),
     )
-    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"send:cancel:{action_id}"))
+    kb.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"send:cancel:{action_id}")
+    )
     return kb.as_markup()
 
 
@@ -70,10 +74,12 @@ def _candidates_keyboard(candidates: list[ContactCandidate], message_text: str):
     Action создаётся уже после выбора, поэтому здесь храним сообщение в коротком кэше через FSM-data."""
     kb = InlineKeyboardBuilder()
     for c in candidates:
-        kb.row(InlineKeyboardButton(
-            text=f"{c.label()} · {c.score}",
-            callback_data=f"send:pick:{c.peer_id}",
-        ))
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{c.label()} · {c.score}",
+                callback_data=f"send:pick:{c.peer_id}",
+            )
+        )
     kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="send:cancel:0"))
     return kb.as_markup()
 
@@ -110,7 +116,9 @@ async def cmd_send(
             owner = await get_or_create_user(session, message.from_user.id)
             provider = await build_provider(session, owner)
         if provider is None:
-            await message.answer("Нужен LLM-ключ для NL-парсинга. Добавь в /settings или используй формат «получатель | текст».")
+            await message.answer(
+                "Нужен LLM-ключ для NL-парсинга. Добавь в /settings или используй формат «получатель | текст»."
+            )
             return
         parsed_raw = await provider.chat(
             [
@@ -133,13 +141,19 @@ async def cmd_send(
         owner = await get_or_create_user(session, message.from_user.id)
     candidates = await resolve(client, owner, recipient_query)
     if not candidates:
-        await message.answer(f"Не нашёл контакт «{recipient_query}». Запусти /sync и попробуй снова.")
+        await message.answer(
+            f"Не нашёл контакт «{recipient_query}». Запусти /sync и попробуй снова."
+        )
         return
 
     if len(candidates) == 1 or candidates[0].score >= 90:
-        await _create_and_confirm(message, owner_telegram_id=message.from_user.id,
-                                  peer_id=candidates[0].peer_id, text=text,
-                                  label=candidates[0].label())
+        await _create_and_confirm(
+            message,
+            owner_telegram_id=message.from_user.id,
+            peer_id=candidates[0].peer_id,
+            text=text,
+            label=candidates[0].label(),
+        )
         return
 
     await state.set_data({"send_text": text})
@@ -160,12 +174,12 @@ async def _create_and_confirm(
     payload = json.dumps({"peer_id": peer_id, "text": text}, ensure_ascii=False)
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
-        action = await create_pending_action(session, user_id=owner.id, kind="send_message", payload=payload)
+        action = await create_pending_action(
+            session, user_id=owner.id, kind="send_message", payload=payload
+        )
 
     await message.answer(
-        f"🤔 <b>Готов отправить</b>\n\n"
-        f"→ <b>Кому:</b> {label}\n"
-        f"→ <b>Текст:</b>\n{text}",
+        f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{text}",
         reply_markup=_confirm_keyboard(action.id),
     )
 
@@ -186,7 +200,9 @@ async def cb_pick(callback: CallbackQuery, state: FSMContext) -> None:
     payload = json.dumps({"peer_id": peer_id, "text": text}, ensure_ascii=False)
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
-        action = await create_pending_action(session, user_id=owner.id, kind="send_message", payload=payload)
+        action = await create_pending_action(
+            session, user_id=owner.id, kind="send_message", payload=payload
+        )
 
     await state.clear()
     if callback.message:
@@ -205,7 +221,8 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     action_id = int(parts[2]) if len(parts) > 2 else 0
     if action_id:
         async with get_session() as session:
-            await delete_pending_action(session, action_id)
+            user = await get_or_create_user(session, callback.from_user.id)
+            await delete_pending_action(session, action_id, user)
     await state.clear()
     if callback.message:
         await callback.message.edit_text("❌ Отправка отменена.")
@@ -230,7 +247,8 @@ async def step_edit(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     action_id = data.get("action_id")
     async with get_session() as session:
-        action = await get_pending_action(session, action_id)
+        user = await get_or_create_user(session, message.from_user.id)
+        action = await get_pending_action(session, action_id, user)
         if action is None:
             await state.clear()
             await message.answer("Сессия отправки потеряна. Запусти /send заново.")
@@ -261,14 +279,17 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
         return
 
     async with get_session() as session:
-        action = await get_pending_action(session, action_id)
+        user = await get_or_create_user(session, callback.from_user.id)
+        action = await get_pending_action(session, action_id, user)
         if action is None:
-            await callback.answer("Действие не найдено или уже выполнено", show_alert=True)
+            await callback.answer(
+                "Действие не найдено или уже выполнено", show_alert=True
+            )
             return
         payload = json.loads(action.payload)
         peer_id = payload["peer_id"]
         text = payload["text"]
-        await delete_pending_action(session, action_id)
+        await delete_pending_action(session, action_id, user)
 
     try:
         entity = await client.get_entity(peer_id)
@@ -277,7 +298,9 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
         logger.exception("send_message failed")
         await callback.answer("Ошибка при отправке", show_alert=True)
         if callback.message:
-            await callback.message.edit_text(f"❌ Не удалось отправить: <code>{e}</code>")
+            await callback.message.edit_text(
+                f"❌ Не удалось отправить: <code>{e}</code>"
+            )
         return
 
     if callback.message:
