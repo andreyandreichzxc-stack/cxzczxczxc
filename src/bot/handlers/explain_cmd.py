@@ -28,6 +28,7 @@ def _build_explain_output(
     distill_facts: list,
     conflicts: list,
     graph_nodes: list,
+    recall_result=None,
 ) -> str:
     """Форматирует объяснение: дистилляция → факты → конфликты → граф."""
     lines: list[str] = []
@@ -69,32 +70,16 @@ def _build_explain_output(
             lines.append(f"«{c['fact_negative'][:60]}» → «{c['fact_positive'][:60]}»")
         lines.append("")
 
-    # Explainability — метаданные о recall
-    lines.append("")
-    lines.append("<b>🔍 Почему эти факты в ответе:</b>")
-    if active:
-        top_facts = sorted(
-            active,
-            key=lambda m: (m.pinned, m.use_count, m.confidence, m.importance),
-            reverse=True,
-        )[:5]
-        for f in top_facts:
-            reasons = []
-            if f.pinned:
-                reasons.append("📌 закреплён")
-            if f.use_count and f.use_count > 0:
-                reasons.append(f"🔄 использован {f.use_count} раз(а)")
-            if f.confidence and f.confidence > 0.7:
-                reasons.append(f"🎯 confidence={f.confidence:.2f}")
-            if f.importance and f.importance > 0.7:
-                reasons.append(f"⭐ важность={f.importance:.2f}")
-            if f.temporal_layer:
-                layer_emoji = {"recent": "🔥", "medium": "🌗", "longterm": "🏛️"}.get(
-                    f.temporal_layer, ""
-                )
-                reasons.append(f"{layer_emoji} слой={f.temporal_layer}")
-            reason_str = " · ".join(reasons) if reasons else "базовый recall"
-            lines.append(f"• <i>{f.fact[:60]}</i> — {reason_str}")
+    # Explainability — recall
+    if recall_result and recall_result.facts:
+        lines.append("")
+        lines.append("<b>🔍 Логика отбора фактов:</b>")
+        for rf in recall_result.facts[:5]:
+            lines.append(f"• {rf.reason} → «{rf.fact[:80]}»")
+        if recall_result.meta:
+            lines.append(
+                f"<i>Всего активно: {recall_result.meta.get('total_active', '?')} → показано: {len(recall_result.facts)}</i>"
+            )
 
     return "\n".join(lines)
 
@@ -183,12 +168,28 @@ async def build_explain_text(
                 nodes = await get_memory_graph(s, owner, m.id, max_depth=2, max_nodes=8)
                 graph_nodes.extend(nodes)
 
+    # 4. Recall причины
+    from src.core.memory_recall import recall
+
+    try:
+        explain_result = await recall(
+            owner_id,
+            contact_id=contact_id,
+            limit=8,
+            include_self=True,
+            include_pinned=True,
+            include_tasks=True,
+        )
+    except Exception:
+        explain_result = None
+
     return _build_explain_output(
         contact_label=contact_label,
         active=active,
         distill_facts=distill_facts,
         conflicts=contact_conflicts,
         graph_nodes=graph_nodes,
+        recall_result=explain_result,
     )
 
 

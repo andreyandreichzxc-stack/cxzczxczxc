@@ -25,7 +25,7 @@ from src.core.style_profile import style_profile_as_prompt_hint
 from src.core.timeutil import now_in_tz
 from src.core.vector_store import vector_store
 from src.db.models import AutoReplyLog, User
-from src.core.temporal_layers import get_prompt_facts
+from src.core.memory_recall import recall, format_recall_for_prompt
 from src.db.repo import (
     add_auto_reply_log,
     get_contact,
@@ -141,21 +141,23 @@ async def _build_reply_text(
         provider = await build_provider(session, owner)
         contact = await get_contact(session, owner, peer_id)
 
-        # Загрузка фактов памяти с учётом временных слоёв
+        # Загрузка фактов памяти через единый сервис MemoryRecallService
         relevant_facts = []
         try:
-            facts = await get_prompt_facts(
-                session, owner, contact_id=peer_id, total_limit=8
+            result = await recall(
+                owner_telegram_id,
+                contact_id=peer_id,
+                query=incoming_text[:200],
+                limit=8,
+                include_self=True,
+                include_pinned=True,
+                include_tasks=False,
             )
-            for f in facts:
-                relevant_facts.append((f.confidence, f.fact))
+            relevant_facts = [(rf.confidence, rf.fact) for rf in result.facts]
             relevant_facts.sort(key=lambda x: x[0], reverse=True)
+            memory_context = format_recall_for_prompt(result)
         except Exception:
-            logger.warning("get_prompt_facts failed, skipping memory context")
-
-        if relevant_facts:
-            memory_lines = [f"- {f}" for _, f in relevant_facts[:5]]
-            memory_context = "Релевантные факты из памяти:\n" + "\n".join(memory_lines)
+            logger.warning("recall failed, skipping memory context")
 
         # Contact Archetype — вычисляем если ещё не задан
         if contact and contact.archetype is None:

@@ -28,6 +28,7 @@ from src.db.repo import (
     list_memories,
 )
 from src.core.temporal_layers import get_prompt_facts
+from src.core.memory_checker import _run_decay_and_validation
 
 OWNER_TG_ID = 123456789
 
@@ -201,10 +202,50 @@ async def test_get_prompt_facts_is_active():
             session, owner2, fact="Неактивный", source="chat", importance=0.5
         )
         mems = await list_memories(session, owner2)
-        mems[1].is_active = False  # деактивируем второй
+        inactive = next(m for m in mems if m.fact == "Неактивный")
+        inactive.is_active = False
 
     async with get_session() as session:
         owner3 = await get_or_create_user(session, OWNER_TG_ID)
         facts = await get_prompt_facts(session, owner3, total_limit=10)
         assert len(facts) == 1
         assert facts[0].fact == "Активный"
+
+
+@pytest.mark.asyncio
+async def test_get_prompt_facts_skips_expired_and_tracks_usage():
+    """get_prompt_facts() пропускает expired и отмечает использованные факты."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, OWNER_TG_ID)
+        await add_memory(session, owner, fact="Свежий факт", source="chat")
+        await add_memory(session, owner, fact="Истекший факт", source="chat")
+        mems = await list_memories(session, owner)
+        expired = next(m for m in mems if m.fact == "Истекший факт")
+        expired.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, OWNER_TG_ID)
+        facts = await get_prompt_facts(session, owner, total_limit=10)
+        assert [m.fact for m in facts] == ["Свежий факт"]
+        assert facts[0].use_count == 1
+        assert facts[0].last_used_at is not None
+
+
+@pytest.mark.asyncio
+async def test_decay_processes_all_expired_without_offset_skip():
+    """Decay keyset-проход не пропускает строки при деактивации."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, OWNER_TG_ID)
+        for idx in range(3):
+            await add_memory(session, owner, fact=f"Временный факт {idx}", source="chat")
+        mems = await list_memories(session, owner)
+        for mem in mems:
+            mem.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+
+    _decayed, closed = await _run_decay_and_validation(OWNER_TG_ID)
+    assert closed == 3
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, OWNER_TG_ID)
+        mems = await list_memories(session, owner)
+        assert all(not m.is_active for m in mems)

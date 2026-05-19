@@ -39,11 +39,23 @@ LAYER_CONFIG = {
 }
 
 
+def utc_naive(dt: datetime) -> datetime:
+    """Return a UTC-naive datetime compatible with SQLite DateTime columns."""
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def utcnow_naive() -> datetime:
+    """Current UTC time as a naive datetime for DB comparisons."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def classify_layer(created_at: datetime, now: datetime | None = None) -> str:
     """Определяет временной слой факта по дате создания."""
     if now is None:
-        now = datetime.now(timezone.utc)
-    age_days = (now - created_at).days
+        now = utcnow_naive()
+    age_days = (utc_naive(now) - utc_naive(created_at)).days
     if age_days <= 7:
         return "recent"
     elif age_days <= 30:
@@ -62,7 +74,7 @@ async def update_temporal_layers(owner_id: int) -> int:
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
         memories = await list_memories(session, owner)
-        now = datetime.now(timezone.utc)
+        now = utcnow_naive()
         updated = 0
         for m in memories:
             if m.created_at and m.is_active:
@@ -88,7 +100,7 @@ async def get_layer_stats(owner_id: int) -> dict:
             "longterm": 0,
             "total": len(active),
         }
-        now = datetime.now(timezone.utc)
+        now = utcnow_naive()
         for m in active:
             layer = m.temporal_layer or (
                 classify_layer(m.created_at, now) if m.created_at else "recent"
@@ -122,7 +134,7 @@ async def get_prompt_facts(
     Возвращает факты для инжекции в промпт с учётом слоёв.
     Приоритет: recent (5) > medium (3) > longterm (2). Всего до total_limit.
     """
-    now = datetime.now(timezone.utc)
+    now = utcnow_naive()
     conditions = [
         Memory.user_id == owner.id,
         Memory.is_active == True,
@@ -153,7 +165,7 @@ async def get_prompt_facts(
             break
     for m in picked[:total_limit]:
         m.use_count = (m.use_count or 0) + 1
-        m.last_used_at = datetime.now(timezone.utc)
+        m.last_used_at = utcnow_naive()
     if picked:
         await session.flush()
     return picked[:total_limit]

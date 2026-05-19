@@ -3,11 +3,15 @@
 import asyncio
 import logging
 import math
-from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from src.core.temporal_layers import classify_layer, get_layer_config
+from src.core.temporal_layers import (
+    classify_layer,
+    get_layer_config,
+    utc_naive,
+    utcnow_naive,
+)
 from src.core.timeutil import now_in_tz
 from src.db.models import Memory
 from src.db.repo import get_or_create_user
@@ -46,37 +50,43 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
     """
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
-        now_utc = datetime.now(timezone.utc)
+        now_utc = utcnow_naive()
 
         decayed_count = 0
         closed_count = 0
         total_processed = 0
-        offset = 0
+        last_id = 0
 
         while True:
             result = await session.execute(
                 select(Memory)
-                .where(Memory.user_id == owner.id, Memory.is_active == True)
+                .where(
+                    Memory.user_id == owner.id,
+                    Memory.is_active == True,
+                    Memory.id > last_id,
+                )
                 .order_by(Memory.id)
-                .offset(offset)
                 .limit(_CHUNK)
             )
             chunk = list(result.scalars().all())
             if not chunk:
                 break
+            last_id = chunk[-1].id
 
             for mem in chunk:
                 if mem.pinned:
                     continue  # закреплённые не decayятся
                 # Принудительная деактивация по expires_at
-                if mem.expires_at and mem.expires_at < now_utc:
+                if mem.expires_at and utc_naive(mem.expires_at) < now_utc:
                     mem.is_active = False
                     mem.validity_end = now_utc
                     closed_count += 1
                     continue
                 # Decay
                 if mem.validity_start and mem.decay_rate:
-                    days = (now_utc - mem.validity_start).total_seconds() / 86400
+                    days = (
+                        now_utc - utc_naive(mem.validity_start)
+                    ).total_seconds() / 86400
                     if days > 0:
                         layer = mem.temporal_layer or classify_layer(mem.created_at)
                         cfg = get_layer_config(layer)
@@ -122,7 +132,6 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
 
             await session.commit()
             total_processed += len(chunk)
-            offset += _CHUNK
 
         if closed_count > 0:
             # Уведомление о ночной очистке

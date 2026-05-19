@@ -122,35 +122,25 @@ async def process(
         except Exception:
             logger.debug("RAG search non-critical fail", exc_info=True)
 
-    # --- Memory recall: подтягиваем релевантные факты о пользователе ---
+    # --- Memory recall via unified service ---
     memory_recall_context = ""
     if owner_id is not None:
         try:
-            from src.db.repo import get_or_create_user, list_memories
-            from src.db.session import get_session
+            from src.core.memory_recall import recall, format_recall_for_prompt
 
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_id)
-                memories = await list_memories(session, owner)
-                if memories:
-                    query_embedding = await provider.embed(user_text)
-                    similar = await vector_store.search_similar_memories(
-                        user_id=owner_id,
-                        embedding=query_embedding,
-                        threshold=0.5,
-                        limit=5,
-                    )
-                    if similar:
-                        memory_lines = [
-                            f"- {m['fact']} (confidence: {m.get('confidence', 0):.0%})"
-                            for m in similar[:5]
-                        ]
-                        memory_recall_context = (
-                            "Что ты знаешь о владельце из памяти (можешь ссылаться если уместно):\n"
-                            + "\n".join(memory_lines)
-                        )
+            result = await recall(
+                owner_id,
+                query=user_text[:200],
+                contact_id=None,
+                limit=8,
+                include_self=True,
+                include_pinned=True,
+                include_tasks=True,
+            )
+            if result.facts:
+                memory_recall_context = format_recall_for_prompt(result)
         except Exception:
-            logger.debug("Memory recall failed, continuing without")
+            logger.debug("Memory recall failed, proceeding without", exc_info=True)
 
     system = MAESTRO_SYSTEM
     if rag_context:

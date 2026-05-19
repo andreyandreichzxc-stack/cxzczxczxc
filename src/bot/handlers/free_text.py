@@ -28,7 +28,6 @@ from src.core import conversation_context as ctx_store
 from src.core.text_sanitizer import sanitize_html
 from src.core.timeutil import fmt_local, is_valid_tz, now_in_tz, tz_short
 from src.core.transcription import transcription_service
-from src.core.temporal_layers import get_prompt_facts
 from src.db.repo import (
     add_commitment,
     add_memory,
@@ -252,25 +251,27 @@ async def _execute_intent(
                 if target.peer_id:
                     contact_facts: list = []
                     try:
-                        contact_facts = await get_prompt_facts(
-                            session, owner, contact_id=target.peer_id, total_limit=3
+                        from src.core.memory_recall import recall, format_recall_human
+
+                        contact_facts_result = await recall(
+                            owner.telegram_id,
+                            contact_id=target.peer_id,
+                            query=text[:200],
+                            limit=3,
+                            include_self=False,
+                            include_pinned=False,
+                            include_tasks=False,
                         )
-                        if contact_facts:
+                        if contact_facts_result.facts:
+                            fact_lines = [
+                                f"{rf.reason}: {rf.fact[:60]}"
+                                for rf in contact_facts_result.facts
+                            ]
                             facts_hint = "\n\n📝 О собеседнике: " + "; ".join(
-                                m.fact[:60] for m in contact_facts
+                                fact_lines
                             )
                     except Exception:
                         pass
-
-                    # Инкрементируем use_count для использованных фактов
-                    if contact_facts:
-                        from datetime import datetime, timezone
-
-                        now = datetime.now(timezone.utc)
-                        for m in contact_facts:
-                            m.use_count = (m.use_count or 0) + 1
-                            m.last_used_at = now
-                        await session.flush()
 
                     # подгружаем профиль (стиль, dos/donts)
                     try:
@@ -643,16 +644,20 @@ async def _process_text(
     now_local_str = now_in_tz(tz_name).strftime("%Y-%m-%d %H:%M")
     history_block = ctx_store.render_history_block(message.from_user.id)
 
-    # грузим память для контекста с временными слоями
+    # грузим память для контекста через recall
     memory_context = ""
     try:
-        async with get_session() as session:
-            owner_obj = await get_or_create_user(session, message.from_user.id)
-            facts = await get_prompt_facts(session, owner_obj, total_limit=8)
-            memory_lines = []
-            for m in facts:
-                memory_lines.append(f"- {m.fact}")
-            memory_context = "\n".join(memory_lines) if memory_lines else ""
+        from src.core.memory_recall import recall, format_recall_for_prompt
+
+        recall_result = await recall(
+            owner.telegram_id,
+            query=raw[:200],
+            limit=8,
+            include_self=True,
+            include_pinned=True,
+            include_tasks=True,
+        )
+        memory_context = format_recall_for_prompt(recall_result)
     except Exception:
         pass
 
