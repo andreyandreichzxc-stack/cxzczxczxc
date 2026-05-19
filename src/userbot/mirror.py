@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -79,6 +80,63 @@ async def _sender_label(msg: TgMessage) -> str | None:
     if name:
         return name
     return getattr(sender, "username", None) or str(sender.id)
+
+
+async def _process_incoming_bg(
+    owner_telegram_id: int,
+    peer_id: int,
+    sender_name: str,
+    text: str,
+) -> None:
+    """Фоновая обработка входящего сообщения: InboxManager + notifier.
+
+    Открывает собственную сессию БД, не роняет обработчик при ошибках.
+    """
+    from src.core.inbox_manager import InboxAction, process_incoming
+    from src.db.repo import get_contact, get_or_create_user, upsert_conversation_state
+    from src.llm.router import build_provider
+
+    try:
+        async with get_session() as _im_session:
+            _im_owner = await get_or_create_user(_im_session, owner_telegram_id)
+            _im_contact = await get_contact(_im_session, _im_owner, peer_id)
+            _im_provider = await build_provider(_im_session, _im_owner)
+            decision = await process_incoming(
+                message_text=text,
+                sender_name=sender_name,
+                peer_id=peer_id,
+                owner=_im_owner,
+                contact=_im_contact,
+                provider=_im_provider,
+            )
+
+            # Обновить ConversationState
+            status = "active"
+            if decision.action == InboxAction.QUEUE_FOR_DIGEST:
+                status = "waiting_reply"
+            await upsert_conversation_state(
+                _im_session,
+                _im_owner,
+                peer_id,
+                status=status,
+                increment_unread=True,
+                last_incoming_at=datetime.utcnow(),
+            )
+
+        # Применить решение (вне сессии)
+        if decision.action == InboxAction.NOTIFY_URGENT:
+            await notifier.notify(
+                f"🔴 <b>СРОЧНОЕ от {sender_name}!</b>\n\n<i>{text[:300]}</i>"
+            )
+        elif decision.action == InboxAction.DRAFT_SUGGEST:
+            await notifier.notify(
+                f"💬 <b>{sender_name}:</b>"
+                f" <i>{text[:200]}</i>\n\n"
+                f"→ Напиши ответ? /chat {sender_name}"
+            )
+        # SILENT_LOG / IGNORE — только сохранили в БД, ничего не делаем
+    except Exception:
+        logger.exception("Background inbox processing failed for peer %s", peer_id)
 
 
 def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
@@ -167,51 +225,16 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                         owner.absence_status = status
                         owner.absence_message = message_text or msg.text[:100]
 
-            # ===== InboxManager: решение по входящему =====
+            # ===== InboxManager: тяжёлая обработка — в фон =====
             if not msg.out and msg.text:
-                from src.core.inbox_manager import process_incoming, InboxAction
-                from src.llm.router import build_provider as _build_provider
-
-                async with get_session() as _im_session:
-                    _im_owner = await get_or_create_user(_im_session, owner_telegram_id)
-                    _im_contact = await get_contact(_im_session, _im_owner, peer_id)
-                    _im_provider = await _build_provider(_im_session, _im_owner)
-                    decision = await process_incoming(
-                        message_text=msg.text,
-                        sender_name=sender_name or str(peer_id),
+                asyncio.create_task(
+                    _process_incoming_bg(
+                        owner_telegram_id=owner_telegram_id,
                         peer_id=peer_id,
-                        owner=_im_owner,
-                        contact=_im_contact,
-                        provider=_im_provider,
+                        sender_name=sender_name or str(peer_id),
+                        text=msg.text,
                     )
-
-                    # Обновить ConversationState
-                    status = "active"
-                    if decision.action == InboxAction.QUEUE_FOR_DIGEST:
-                        status = "waiting_reply"
-                    await upsert_conversation_state(
-                        _im_session,
-                        _im_owner,
-                        peer_id,
-                        status=status,
-                        increment_unread=True,
-                        last_incoming_at=datetime.utcnow(),
-                    )
-
-                # Применить решение (вне сессии)
-                if decision.action == InboxAction.NOTIFY_URGENT:
-                    await notifier.notify(
-                        f"🔴 <b>СРОЧНОЕ от {sender_name or peer_id}!</b>\n\n"
-                        f"<i>{msg.text[:300]}</i>"
-                    )
-                elif decision.action == InboxAction.DRAFT_SUGGEST:
-                    await notifier.notify(
-                        f"💬 <b>{sender_name or peer_id}:</b>"
-                        f" <i>{msg.text[:200]}</i>\n\n"
-                        f"→ Напиши ответ? /chat {sender_name or peer_id}"
-                    )
-                elif decision.action in (InboxAction.SILENT_LOG, InboxAction.IGNORE):
-                    pass  # только сохранили в БД
+                )
         except Exception:
             logger.exception("mirror handler failed")
 

@@ -63,7 +63,7 @@ def _parse_json_array(text: str) -> list[dict]:
 
 async def extract_and_save_memories(
     provider: LLMProvider,
-    user_id: int,
+    telegram_id: int,
     contact: Contact | None,
     messages: list[Message] | None = None,
     transcript: str | None = None,
@@ -72,7 +72,7 @@ async def extract_and_save_memories(
 
     Аргументы:
         provider — LLM-провайдер для извлечения фактов.
-        user_id — User.id (внутренний ID БД).
+        telegram_id — Telegram ID владельца (message.from_user.id).
         contact — объект Contact (нужен для display_name в промпте).
         messages — список сообщений для построения транскрипта.
         transcript — готовая текстовая расшифровка переписки (альтернатива messages).
@@ -142,6 +142,8 @@ async def extract_and_save_memories(
                 "source": "chat",
                 "importance": importance,
                 "decay_rate": decay_rate,
+                "relation_type": item.get("relation_type"),
+                "relation_to_index": item.get("relation_to_index"),
             }
         )
 
@@ -167,7 +169,7 @@ async def extract_and_save_memories(
 
     await enqueue(
         MemoryJob(
-            owner_id=user_id,
+            telegram_id=telegram_id,
             contact_id=contact.peer_id if contact else None,
             facts=valid_facts,
             job_type="save",
@@ -177,7 +179,7 @@ async def extract_and_save_memories(
     logger.info(
         "Extracted %d facts for user %d, contact %s (enqueued for save)",
         len(valid_facts),
-        user_id,
+        telegram_id,
         contact.display_name,
     )
     return len(valid_facts)

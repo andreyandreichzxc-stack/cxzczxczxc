@@ -49,8 +49,8 @@ async def distill_cluster(
         if len(active) < min_facts:
             return None
 
-        # Собираем факты для промпта (последние 30)
-        facts_text = "\n".join(f"- {m.fact}" for m in active[-30:])
+        # Собираем факты для промпта (первые 30 самых свежих)
+        facts_text = "\n".join(f"- {m.fact}" for m in active[:30])
 
         system = DISTILLATION_PROMPT
         user_text = f"Сожми эти факты ({len(active)} шт.):\n{facts_text}"

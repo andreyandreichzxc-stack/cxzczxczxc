@@ -583,11 +583,11 @@ async def _process_text(
     try:
         async with get_session() as session:
             memories = await list_memories(session, owner)
-            if memories:
-                recent = memories[-20:]  # последние 20 фактов
+            active = [m for m in memories if m.is_active][:20]
+            if active:
                 memory_context = "Факты из памяти:\n" + "\n".join(
                     f"[#{m.id}] {m.fact} (sentiment={m.sentiment or 'neutral'})"
-                    for m in recent
+                    for m in active
                 )
     except Exception:
         pass
@@ -1140,7 +1140,7 @@ async def _exec_extract_memories(intent, message, userbot_manager) -> None:
     # Ставим задачу в очередь на фоновое извлечение
     await enqueue(
         MemoryJob(
-            owner_id=owner.id,
+            telegram_id=message.from_user.id,
             contact_id=contact.peer_id if contact else None,
             messages_text=transcript,
             job_type="extract",

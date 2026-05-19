@@ -218,7 +218,9 @@ async def _action_load(
         import asyncio
 
         asyncio.create_task(
-            extract_and_save_memories(provider, owner.id, contact, messages)
+            extract_and_save_memories(
+                provider, callback.from_user.id, contact, messages
+            )
         )
 
     if contact is None:
@@ -499,7 +501,9 @@ async def cb_extract_memories(
             messages = await load_chat(
                 client, callback.from_user.id, ct.peer_id, limit=80
             )
-            count = await extract_and_save_memories(provider, owner.id, ct, messages)
+            count = await extract_and_save_memories(
+                provider, callback.from_user.id, ct, messages
+            )
             if count:
                 total += count
         except Exception:
@@ -534,7 +538,9 @@ async def _auto_extract_memories(message: Message, client, owner) -> None:
     for ct in targets:
         try:
             msgs = await load_chat(client, message.from_user.id, ct.peer_id, limit=60)
-            count = await extract_and_save_memories(provider, owner.id, ct, msgs)
+            count = await extract_and_save_memories(
+                provider, message.from_user.id, ct, msgs
+            )
             total += count
         except Exception:
             pass

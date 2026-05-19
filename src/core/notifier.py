@@ -2,6 +2,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from src.config import settings
+from src.core.tg_sender import send_with_retry
 
 
 if TYPE_CHECKING:
@@ -29,17 +30,18 @@ class Notifier:
         reply_markup: "InlineKeyboardMarkup | None" = None,
     ) -> None:
         if self._bot is None:
-            logger.warning("Notifier not attached, dropping message: %s", text[:80])
+            logger.warning("Notifier not attached, skipping: %s", text[:80])
             return
         try:
-            await self._bot.send_message(
+            await send_with_retry(
+                self._bot.send_message,
                 chat_id=settings.owner_telegram_id,
                 text=text,
                 parse_mode=parse_mode,
                 reply_markup=reply_markup,
             )
-        except Exception:
-            logger.exception("Failed to notify owner")
+        except Exception as e:
+            logger.error("Failed to notify owner after retries: %s", e)
 
 
 notifier = Notifier()

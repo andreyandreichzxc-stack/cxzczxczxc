@@ -163,6 +163,7 @@ class VectorStore:
         Если contact_id передан — возвращаются только факты о контакте или общие
         (contact_id == null).
         """
+        await self._ensure_memory_collection(len(embedding))
         if self._memory_dim is None:
             return []
 

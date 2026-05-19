@@ -15,14 +15,14 @@ logger = logging.getLogger(__name__)
 class MemoryJob:
     """Задача на фоновую обработку памяти.
 
-    owner_id — User.id (внутренний ID БД).
+    telegram_id — Telegram ID владельца (message.from_user.id).
     contact_id — Contact.peer_id (Telegram peer_id собеседника).
     facts — список словарей с фактами для сохранения.
     messages_text — текст переписки для извлечения фактов.
     job_type — тип задачи: save | extract | tag.
     """
 
-    owner_id: int
+    telegram_id: int
     contact_id: int | None = None
     facts: list[dict] | None = None
     messages_text: str = ""
@@ -57,7 +57,7 @@ async def _process_job(job: MemoryJob) -> None:
     from src.db.repo import get_or_create_user
 
     async with get_session() as session:
-        owner = await get_or_create_user(session, job.owner_id)
+        owner = await get_or_create_user(session, job.telegram_id)
 
         if job.job_type == "save":
             await _handle_save(session, owner, job)
@@ -71,11 +71,12 @@ async def _process_job(job: MemoryJob) -> None:
 
 async def _handle_save(session, owner, job: MemoryJob) -> None:
     """Сохранить готовые факты (job_type='save')."""
-    from src.db.repo import add_memory
+    from src.db.repo import add_memory, link_memories
     from src.core.vector_store import vector_store
 
+    saved_memories: list = []
     for fact_data in job.facts or []:
-        await add_memory(
+        mem = await add_memory(
             session,
             owner,
             fact=fact_data.get("fact", ""),
@@ -88,9 +89,30 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
             vector_store_obj=vector_store if fact_data.get("embedding") else None,
             deduplicate=False,  # дедупликация уже выполнена на этапе извлечения
         )
+        if mem:
+            saved_memories.append(mem)
+
+    # Сохраняем связи между фактами, указанные LLM (relation_type / relation_to_index)
+    for i, fact_data in enumerate(job.facts or []):
+        if i >= len(saved_memories):
+            continue
+        relation_type = fact_data.get("relation_type")
+        relation_to_index = fact_data.get("relation_to_index")
+        if relation_type and relation_to_index is not None:
+            target_idx = int(relation_to_index)
+            if 0 <= target_idx < len(saved_memories):
+                await link_memories(
+                    session,
+                    owner,
+                    source_id=saved_memories[i].id,
+                    target_id=saved_memories[target_idx].id,
+                    relation_type=relation_type,
+                    weight=0.9,
+                )
+
     await session.commit()
     logger.debug(
-        "Background saved %d facts for user %d", len(job.facts or []), job.owner_id
+        "Background saved %d facts for user %d", len(job.facts or []), job.telegram_id
     )
 
 
@@ -101,7 +123,7 @@ async def _handle_extract(session, owner, job: MemoryJob) -> None:
 
     provider = await build_provider(session, owner)
     if provider is None:
-        logger.warning("No provider for extract job uid=%d", job.owner_id)
+        logger.warning("No provider for extract job uid=%d", job.telegram_id)
         return
 
     # Получить объект Contact по peer_id
@@ -122,7 +144,7 @@ async def _handle_extract(session, owner, job: MemoryJob) -> None:
     # поставит задачу на сохранение в ту же очередь (job_type='save')
     count = await extract_and_save_memories(
         provider,
-        owner.id,
+        job.telegram_id,
         contact,
         messages=[],
         transcript=job.messages_text,
@@ -130,7 +152,7 @@ async def _handle_extract(session, owner, job: MemoryJob) -> None:
     logger.debug(
         "Background extracted %d facts for user %d (contact %s)",
         count,
-        job.owner_id,
+        job.telegram_id,
         job.contact_id,
     )
 
@@ -143,7 +165,7 @@ async def _handle_tag(session, owner, job: MemoryJob) -> None:
 
     provider = await build_provider(session, owner)
     if provider is None:
-        logger.warning("No provider for tag job uid=%d", job.owner_id)
+        logger.warning("No provider for tag job uid=%d", job.telegram_id)
         return
 
     memories = await list_memories(session, owner)
@@ -154,7 +176,7 @@ async def _handle_tag(session, owner, job: MemoryJob) -> None:
             except Exception:
                 logger.exception("Tagging failed for memory %d", mem.id)
     await session.commit()
-    logger.debug("Background tagging done for user %d", job.owner_id)
+    logger.debug("Background tagging done for user %d", job.telegram_id)
 
 
 def start_worker() -> asyncio.Task:
@@ -169,14 +191,15 @@ def start_worker() -> asyncio.Task:
 
 
 async def enqueue(job: MemoryJob) -> None:
-    """Добавить задание в очередь (неблокирующе).
+    """Добавить задание в очередь (с таймаутом 10с).
 
-    Если очередь переполнена — задание тихо отбрасывается с предупреждением.
+    Если очередь переполнена — отправитель ждёт до 10 секунд,
+    после чего задание отбрасывается с error-логом.
     """
     try:
-        _queue.put_nowait(job)
-    except asyncio.QueueFull:
-        logger.warning("Memory queue full, dropping job: %s", job.job_type)
+        await asyncio.wait_for(_queue.put(job), timeout=10.0)
+    except asyncio.TimeoutError:
+        logger.error("Memory queue stuck, dropping job: %s", job.job_type)
 
 
 async def stop_worker() -> None:
