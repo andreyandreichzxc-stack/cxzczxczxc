@@ -66,6 +66,14 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
                 break
 
             for mem in chunk:
+                if mem.pinned:
+                    continue  # закреплённые не decayятся
+                # Принудительная деактивация по expires_at
+                if mem.expires_at and mem.expires_at < now_utc:
+                    mem.is_active = False
+                    mem.validity_end = now_utc
+                    closed_count += 1
+                    continue
                 # Decay
                 if mem.validity_start and mem.decay_rate:
                     days = (now_utc - mem.validity_start).total_seconds() / 86400

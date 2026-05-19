@@ -683,12 +683,13 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
             await callback.answer("Факт сохранён навсегда")
 
         elif action == "edit":
+            await session.delete(candidate)
             await callback.message.edit_text(  # type: ignore[union-attr]
                 f"✏️ Напиши исправленный текст для факта:\n\n"
                 f"<i>{candidate.fact}</i>\n\n"
                 f"<code>/remember исправленный текст</code>"
             )
-            await callback.answer()
+            await callback.answer("Напиши /remember с исправленным текстом")
 
         else:
             await callback.answer("Неизвестное действие")

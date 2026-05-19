@@ -250,6 +250,7 @@ async def _execute_intent(
                 facts_hint = ""
                 profile_hint = ""
                 if target.peer_id:
+                    contact_facts: list = []
                     try:
                         contact_facts = await get_prompt_facts(
                             session, owner, contact_id=target.peer_id, total_limit=3
@@ -260,6 +261,17 @@ async def _execute_intent(
                             )
                     except Exception:
                         pass
+
+                    # Инкрементируем use_count для использованных фактов
+                    if contact_facts:
+                        from datetime import datetime, timezone
+
+                        now = datetime.now(timezone.utc)
+                        for m in contact_facts:
+                            m.use_count = (m.use_count or 0) + 1
+                            m.last_used_at = now
+                        await session.flush()
+
                     # подгружаем профиль (стиль, dos/donts)
                     try:
                         profile = await get_contact_profile(

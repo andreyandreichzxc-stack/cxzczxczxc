@@ -435,17 +435,19 @@ class Memory(Base):
         String(16), nullable=True, index=True
     )  # хеш для дедупликации
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), index=True
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
     validity_start: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
-    validity_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    validity_end: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     importance: Mapped[float] = mapped_column(Float, default=0.5)  # 0.0–1.0
     decay_rate: Mapped[float] = mapped_column(Float, default=0.07)  # скорость забывания
     memory_tier: Mapped[int] = mapped_column(
@@ -467,7 +469,9 @@ class Memory(Base):
 
     use_count: Mapped[int] = mapped_column(Integer, default=0)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     pinned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
     related_memory_id: Mapped[int | None] = mapped_column(

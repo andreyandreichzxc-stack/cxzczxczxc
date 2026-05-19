@@ -3,7 +3,7 @@
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from src.db.models import Memory
 from src.db.repo import get_or_create_user, list_memories
@@ -122,7 +122,12 @@ async def get_prompt_facts(
     Возвращает факты для инжекции в промпт с учётом слоёв.
     Приоритет: recent (5) > medium (3) > longterm (2). Всего до total_limit.
     """
-    conditions = [Memory.user_id == owner.id, Memory.is_active == True]
+    now = datetime.now(timezone.utc)
+    conditions = [
+        Memory.user_id == owner.id,
+        Memory.is_active == True,
+        or_(Memory.expires_at.is_(None), Memory.expires_at > now),
+    ]
     if contact_id:
         conditions.append(Memory.contact_id == contact_id)
     result = await session.execute(
@@ -131,7 +136,6 @@ async def get_prompt_facts(
         .order_by(Memory.confidence.desc(), Memory.created_at.desc())
     )
     all_facts = list(result.scalars().all())
-    now = datetime.now(timezone.utc)
     buckets: dict[str, list] = {"recent": [], "medium": [], "longterm": []}
     # Сортируем: pinned всегда первыми, затем по use_count, затем по confidence
     all_facts.sort(key=lambda m: (m.pinned, m.use_count, m.confidence), reverse=True)
@@ -147,6 +151,11 @@ async def get_prompt_facts(
         picked.extend(buckets[layer])
         if len(picked) >= total_limit:
             break
+    for m in picked[:total_limit]:
+        m.use_count = (m.use_count or 0) + 1
+        m.last_used_at = datetime.now(timezone.utc)
+    if picked:
+        await session.flush()
     return picked[:total_limit]
 
 

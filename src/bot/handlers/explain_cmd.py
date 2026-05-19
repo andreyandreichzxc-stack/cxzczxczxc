@@ -69,6 +69,33 @@ def _build_explain_output(
             lines.append(f"«{c['fact_negative'][:60]}» → «{c['fact_positive'][:60]}»")
         lines.append("")
 
+    # Explainability — метаданные о recall
+    lines.append("")
+    lines.append("<b>🔍 Почему эти факты в ответе:</b>")
+    if active:
+        top_facts = sorted(
+            active,
+            key=lambda m: (m.pinned, m.use_count, m.confidence, m.importance),
+            reverse=True,
+        )[:5]
+        for f in top_facts:
+            reasons = []
+            if f.pinned:
+                reasons.append("📌 закреплён")
+            if f.use_count and f.use_count > 0:
+                reasons.append(f"🔄 использован {f.use_count} раз(а)")
+            if f.confidence and f.confidence > 0.7:
+                reasons.append(f"🎯 confidence={f.confidence:.2f}")
+            if f.importance and f.importance > 0.7:
+                reasons.append(f"⭐ важность={f.importance:.2f}")
+            if f.temporal_layer:
+                layer_emoji = {"recent": "🔥", "medium": "🌗", "longterm": "🏛️"}.get(
+                    f.temporal_layer, ""
+                )
+                reasons.append(f"{layer_emoji} слой={f.temporal_layer}")
+            reason_str = " · ".join(reasons) if reasons else "базовый recall"
+            lines.append(f"• <i>{f.fact[:60]}</i> — {reason_str}")
+
     return "\n".join(lines)
 
 
