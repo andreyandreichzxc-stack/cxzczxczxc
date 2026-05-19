@@ -2,6 +2,7 @@
 и отправляет единую нотификацию, сгруппированную по срочности."""
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta
 
@@ -11,7 +12,7 @@ from src.config import settings as app_settings
 from src.core.notifier import notifier
 from src.core.urgency_classifier import classify_message
 from src.db.models import Message, User
-from src.db.repo import get_or_create_user
+from src.db.repo import get_contact, get_or_create_user
 from src.db.session import get_session
 
 
@@ -45,6 +46,21 @@ async def collect_recent_messages(
     by_peer: dict[int, dict] = {}
     for m in rows:
         if m.peer_id not in by_peer:
+            # Folder filter: если monitor_only_selected_folders и контакт не в выбранных папках — пропустить
+            if (
+                user.settings.monitor_only_selected_folders
+                and user.settings.monitored_folders
+            ):
+                monitored = json.loads(user.settings.monitored_folders)
+                if monitored:
+                    contact = await get_contact(session, user, m.peer_id)
+                    contact_folders = (
+                        (contact.folder_names or "").split(",") if contact else []
+                    )
+                    contact_folders = [f.strip() for f in contact_folders if f.strip()]
+                    if not any(f in monitored for f in contact_folders):
+                        continue
+
             text_content = m.transcript or m.text or m.extracted_text or ""
             urgency = classify_message(text_content) if text_content else "normal"
             by_peer[m.peer_id] = {

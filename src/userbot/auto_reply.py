@@ -218,6 +218,25 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                     phone=getattr(sender, "phone", None),
                 )
 
+                # Folder filter: если monitor_only_selected_folders и контакт не в выбранных папках — не отвечаем
+                if (
+                    owner.settings.monitor_only_selected_folders
+                    and owner.settings.monitored_folders
+                ):
+                    import json as _ar_json
+
+                    monitored = _ar_json.loads(owner.settings.monitored_folders)
+                    if monitored:
+                        contact = existing  # уже загружен через get_contact выше
+                        contact_folders = (
+                            (contact.folder_names or "").split(",") if contact else []
+                        )
+                        contact_folders = [
+                            f.strip() for f in contact_folders if f.strip()
+                        ]
+                        if not any(f in monitored for f in contact_folders):
+                            return
+
                 if not await _check_and_track_offline(client, session, owner):
                     return
             if await _recently_replied(owner_telegram_id, sender.id):

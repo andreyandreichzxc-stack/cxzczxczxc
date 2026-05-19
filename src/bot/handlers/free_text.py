@@ -79,6 +79,8 @@ SETTING_FIELDS: dict[str, str] = {
     "smart_digest_enabled": "bool",
     "smart_digest_interval_min": "int",
     "urgent_notify_enabled": "bool",
+    "monitor_only_selected_folders": "bool",
+    "monitored_folders": "str",
     "timezone": "tz",
 }
 

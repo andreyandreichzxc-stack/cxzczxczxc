@@ -1,5 +1,6 @@
 """/settings — главное меню и разделы. callback_data: set:sec / set:tog / set:choose / set:input."""
 
+import json
 import re
 
 from aiogram import F, Router
@@ -18,8 +19,10 @@ from src.bot.filters import OwnerOnly
 from src.bot.states import SettingsStates
 from src.config import LLMDefaults
 from src.core.timeutil import TZ_PRESETS, is_valid_tz, tz_short
-from src.db.repo import get_api_key, get_or_create_user, upsert_api_key
+from src.db.repo import get_api_key, get_or_create_user, list_folders, upsert_api_key
 from src.db.session import get_session
+from src.userbot.dialogs import sync_dialogs
+from src.userbot.manager import _MANAGER_SINGLETON
 from src.llm.gemini_provider import GeminiProvider
 from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
@@ -94,6 +97,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         InlineKeyboardButton(text="🔄 Синхронизация", callback_data="set:sec:sync"),
         InlineKeyboardButton(text="🔑 API-ключи", callback_data="set:sec:keys"),
     )
+    kb.row(InlineKeyboardButton(text="📁 Папки", callback_data="set:sec:folders"))
     kb.row(InlineKeyboardButton(text="❌ Закрыть", callback_data="set:close"))
     return text, kb.as_markup()
 
@@ -146,6 +150,7 @@ BOOL_KEYS = {
     "draft_only_important",
     "smart_digest_enabled",
     "urgent_notify_enabled",
+    "monitor_only_selected_folders",
 }
 
 CHOICE_KEYS = {
@@ -685,6 +690,48 @@ async def _render_section(
         )
         kb.row(*_back_row())
 
+    elif section == "folders":
+        async with get_session() as session:
+            folders_data = await list_folders(session, owner)
+
+        monitored = json.loads(s.monitored_folders) if s.monitored_folders else []
+
+        lines = ["📁 <b>Мониторинг папок</b>", ""]
+
+        if not folders_data:
+            lines.append("⚠️ Папки не найдены. Сделай /sync.")
+        else:
+            for f in folders_data:
+                icon = "✅" if f.title in monitored else "⬜"
+                lines.append(f"{icon} {f.emoji or '📂'} {f.title}")
+            lines.append("")
+            lines.append("Нажимай на папку чтобы включить/выключить мониторинг.")
+
+        monitor_only = "✅" if s.monitor_only_selected_folders else "⬜"
+        lines.append(f"{monitor_only} Мониторить ТОЛЬКО выбранные папки")
+
+        text = "\n".join(lines)
+
+        for f in folders_data:
+            icon = "✅" if f.title in monitored else "⬜"
+            kb.button(
+                text=f"{icon} {f.emoji or '📂'} {f.title}",
+                callback_data=f"set:folder:tog:{f.title}",
+            )
+
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{'✅' if s.monitor_only_selected_folders else '⬜'} Только выбранные",
+                callback_data="set:tog:monitor_only_selected_folders",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text="🔄 Обновить папки", callback_data="set:folder:refresh"
+            )
+        )
+        kb.row(*_back_row())
+
     else:
         text = "Раздел не найден."
         kb.row(*_back_row())
@@ -762,6 +809,45 @@ async def cb_input_news_time(callback: CallbackQuery, state: FSMContext) -> None
 @router.callback_query(F.data == "set:noop:news_topics")
 async def cb_noop_news_topics(callback: CallbackQuery) -> None:
     await callback.answer("Открой /news_topics в меню команд", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("set:folder:tog:"))
+async def cb_folder_toggle(callback: CallbackQuery) -> None:
+    folder_name = callback.data.split(":", 3)[3]
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        s = owner.settings
+
+        monitored = json.loads(s.monitored_folders) if s.monitored_folders else []
+
+        if folder_name in monitored:
+            monitored.remove(folder_name)
+        else:
+            monitored.append(folder_name)
+
+        s.monitored_folders = json.dumps(monitored, ensure_ascii=False)
+        await session.flush()
+
+    await _refresh_section(callback, "folders")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set:folder:refresh")
+async def cb_folder_refresh(callback: CallbackQuery) -> None:
+    if _MANAGER_SINGLETON:
+        client = _MANAGER_SINGLETON.get_client(callback.from_user.id)
+        if client:
+            async with get_session() as session:
+                owner = await get_or_create_user(session, callback.from_user.id)
+            await sync_dialogs(client, owner, limit=500)
+            await callback.answer("✅ Папки обновлены!")
+        else:
+            await callback.answer("❌ Сначала /login", show_alert=True)
+    else:
+        await callback.answer("❌ Userbot не запущен", show_alert=True)
+
+    await _refresh_section(callback, "folders")
 
 
 @router.callback_query(F.data.startswith("set:tz:"))

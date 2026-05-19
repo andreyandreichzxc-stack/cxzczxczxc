@@ -163,6 +163,32 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
 
             # ===== SESSION CLOSED — медленные LLM-вызовы вне сессии =====
 
+            # Folder filter: если monitor_only_selected_folders и контакт не в выбранных папках — пропустить обработку
+            if not msg.out:
+                async with get_session() as _ff_session:
+                    _ff_owner = await get_or_create_user(_ff_session, owner_telegram_id)
+                    _ff_s = _ff_owner.settings
+                    if _ff_s.monitor_only_selected_folders and _ff_s.monitored_folders:
+                        import json as _json
+
+                        monitored = _json.loads(_ff_s.monitored_folders)
+                        if monitored:
+                            from src.db.repo import get_contact as _get_contact
+
+                            _ff_contact = await _get_contact(
+                                _ff_session, _ff_owner, peer_id
+                            )
+                            contact_folders = (
+                                (_ff_contact.folder_names or "").split(",")
+                                if _ff_contact
+                                else []
+                            )
+                            contact_folders = [
+                                f.strip() for f in contact_folders if f.strip()
+                            ]
+                            if not any(f in monitored for f in contact_folders):
+                                return  # прервать обработку для этого сообщения
+
             # Urgent notification (LLM)
             if not msg.out and msg.text:
                 _urgent_enabled = False

@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select, text as sql_text
+from sqlalchemy import delete, func, select, text as sql_text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +12,7 @@ from src.db.models import (
     AutoReplyLog,
     Commitment,
     Contact,
+    Folder,
     Memory,
     Message,
     NewsTopic,
@@ -118,6 +119,7 @@ async def upsert_contact(
     phone: str | None = None,
     is_bot: bool = False,
     is_archived: bool | None = None,
+    folder_names: str | None = None,
 ) -> Contact:
     result = await session.execute(
         select(Contact).where(Contact.user_id == user.id, Contact.peer_id == peer_id)
@@ -133,6 +135,7 @@ async def upsert_contact(
             display_name=display_name,
             username=username,
             phone=phone,
+            folder_names=folder_names,
         )
         session.add(contact)
         await session.flush()
@@ -144,6 +147,8 @@ async def upsert_contact(
         contact.display_name = display_name
         contact.username = username
         contact.phone = phone
+        if folder_names is not None:
+            contact.folder_names = folder_names
     return contact
 
 
@@ -678,4 +683,34 @@ async def search_memories(
     if contact_id is not None:
         stmt = stmt.where(Memory.contact_id == contact_id)
     result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def upsert_folders(
+    session: AsyncSession, user: User, folders_data: list[dict]
+) -> int:
+    """Сохраняет/обновляет папки. folders_data: [{'telegram_folder_id': int, 'title': str, 'emoji': str|None}]."""
+    # Удалить старые папки этого пользователя
+    await session.execute(delete(Folder).where(Folder.user_id == user.id))
+    # Вставить новые
+    saved = 0
+    for f in folders_data:
+        session.add(
+            Folder(
+                user_id=user.id,
+                telegram_folder_id=f["telegram_folder_id"],
+                title=f["title"],
+                emoji=f.get("emoji"),
+            )
+        )
+        saved += 1
+    await session.flush()
+    return saved
+
+
+async def list_folders(session: AsyncSession, user: User) -> list[Folder]:
+    """Возвращает список папок пользователя."""
+    result = await session.execute(
+        select(Folder).where(Folder.user_id == user.id).order_by(Folder.title)
+    )
     return list(result.scalars().all())

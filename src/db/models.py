@@ -112,6 +112,10 @@ class UserSettings(Base):
     draft_suggestions_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     draft_only_important: Mapped[bool] = mapped_column(Boolean, default=True)
     draft_max_per_hour: Mapped[int] = mapped_column(Integer, default=5)
+    monitored_folders: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON: ["Работа", "Семья"]
+    monitor_only_selected_folders: Mapped[bool] = mapped_column(Boolean, default=False)
 
     user: Mapped[User] = relationship(back_populates="settings")
 
@@ -177,6 +181,9 @@ class Contact(Base):
     )  # JSON-строка
     style_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_seen_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    folder_names: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # comma-separated folder titles
 
 
 class Message(Base):
@@ -356,3 +363,20 @@ class AgentCache(Base):
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
     ttl_seconds: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Folder(Base):
+    """Папка (кастомный список чатов) пользователя Telegram."""
+
+    __tablename__ = "folders"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    telegram_folder_id: Mapped[int] = mapped_column(Integer, index=True)
+    title: Mapped[str] = mapped_column(String(128))
+    emoji: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
