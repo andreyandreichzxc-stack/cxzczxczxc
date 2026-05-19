@@ -30,7 +30,9 @@ _user_lock = asyncio.Lock()
 
 async def get_or_create_user(session: AsyncSession, telegram_id: int) -> User:
     async with _user_lock:
-        result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+        result = await session.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )
         user = result.scalar_one_or_none()
         if user is None:
             user = User(telegram_id=telegram_id, settings=UserSettings())
@@ -68,7 +70,9 @@ async def save_telegram_session(
     session.add(payload)
 
 
-async def load_telegram_session(session: AsyncSession, user: User) -> tuple[int, str, str] | None:
+async def load_telegram_session(
+    session: AsyncSession, user: User
+) -> tuple[int, str, str] | None:
     row = await session.get(TelegramSession, user.id)
     if row is None:
         return None
@@ -81,7 +85,9 @@ async def delete_telegram_session(session: AsyncSession, user: User) -> None:
         await session.delete(row)
 
 
-async def upsert_api_key(session: AsyncSession, user: User, provider: str, key: str) -> None:
+async def upsert_api_key(
+    session: AsyncSession, user: User, provider: str, key: str
+) -> None:
     result = await session.execute(
         select(ApiKey).where(ApiKey.user_id == user.id, ApiKey.provider == provider)
     )
@@ -167,7 +173,9 @@ async def list_contacts(
     return list(result.scalars().all())
 
 
-async def set_news_source(session: AsyncSession, user: User, peer_id: int, value: bool) -> bool:
+async def set_news_source(
+    session: AsyncSession, user: User, peer_id: int, value: bool
+) -> bool:
     result = await session.execute(
         select(Contact).where(Contact.user_id == user.id, Contact.peer_id == peer_id)
     )
@@ -178,7 +186,9 @@ async def set_news_source(session: AsyncSession, user: User, peer_id: int, value
     return True
 
 
-async def get_contact(session: AsyncSession, user: User, peer_id: int) -> Contact | None:
+async def get_contact(
+    session: AsyncSession, user: User, peer_id: int
+) -> Contact | None:
     result = await session.execute(
         select(Contact).where(Contact.user_id == user.id, Contact.peer_id == peer_id)
     )
@@ -252,6 +262,8 @@ class FtsHit:
     sender_name: str | None
     snippet: str
     rank: float
+    peer_name: str | None = None
+    date: datetime | None = None
 
 
 def _fts_query_for(query: str) -> str:
@@ -279,9 +291,12 @@ async def fts_search(
     sql = """
         SELECT m.user_id, m.peer_id, m.message_id, m.sender_name,
                snippet(messages_fts, -1, '', '', '…', 16) AS snippet,
-               bm25(messages_fts) AS rank
+               bm25(messages_fts) AS rank,
+               c.display_name AS peer_name,
+               m.date
         FROM messages_fts
         JOIN messages m ON m.id = messages_fts.rowid
+        LEFT JOIN contacts c ON c.user_id = m.user_id AND c.peer_id = m.peer_id
         WHERE messages_fts MATCH :q AND m.user_id = :uid
         ORDER BY rank
         LIMIT :lim
@@ -299,9 +314,28 @@ async def fts_search(
             sender_name=r["sender_name"],
             snippet=r["snippet"] or "",
             rank=float(r["rank"]) if r["rank"] is not None else 0.0,
+            peer_name=r["peer_name"],
+            date=r["date"],
         )
         for r in rows
     ]
+
+
+async def cross_chat_search(
+    session: AsyncSession,
+    user: User,
+    query: str,
+    limit: int = 30,
+) -> dict[int, list[FtsHit]]:
+    """
+    Поиск по всем чатам, группировка по peer_id.
+    Возвращает {peer_id: [FtsHit, ...]}.
+    """
+    hits = await fts_search(session, user.id, query, limit=limit)
+    result: dict[int, list[FtsHit]] = {}
+    for hit in hits:
+        result.setdefault(hit.peer_id, []).append(hit)
+    return result
 
 
 async def fetch_my_messages_in_chat(
@@ -336,7 +370,11 @@ async def cache_transcript(
 ) -> None:
     existing = await session.get(TranscriptionCache, file_id)
     if existing is None:
-        session.add(TranscriptionCache(file_id=file_id, text=text, duration_seconds=duration_seconds))
+        session.add(
+            TranscriptionCache(
+                file_id=file_id, text=text, duration_seconds=duration_seconds
+            )
+        )
     else:
         existing.text = text
         existing.duration_seconds = duration_seconds
@@ -379,12 +417,16 @@ async def list_open_commitments(
     )
     if direction:
         query = query.where(Commitment.direction == direction)
-    query = query.order_by(Commitment.deadline_at.is_(None), Commitment.deadline_at.asc())
+    query = query.order_by(
+        Commitment.deadline_at.is_(None), Commitment.deadline_at.asc()
+    )
     result = await session.execute(query)
     return list(result.scalars().all())
 
 
-async def update_commitment_status(session: AsyncSession, commitment_id: int, status: str) -> None:
+async def update_commitment_status(
+    session: AsyncSession, commitment_id: int, status: str
+) -> None:
     c = await session.get(Commitment, commitment_id)
     if c is not None:
         c.status = status
@@ -438,7 +480,9 @@ async def create_pending_action(
     return pa
 
 
-async def get_pending_action(session: AsyncSession, action_id: int) -> PendingAction | None:
+async def get_pending_action(
+    session: AsyncSession, action_id: int
+) -> PendingAction | None:
     return await session.get(PendingAction, action_id)
 
 
@@ -454,7 +498,11 @@ async def list_news_topics(
     *,
     only_enabled: bool = False,
 ) -> list[NewsTopic]:
-    query = select(NewsTopic).where(NewsTopic.user_id == user.id).order_by(NewsTopic.created_at.asc())
+    query = (
+        select(NewsTopic)
+        .where(NewsTopic.user_id == user.id)
+        .order_by(NewsTopic.created_at.asc())
+    )
     if only_enabled:
         query = query.where(NewsTopic.enabled.is_(True))
     result = await session.execute(query)
@@ -482,7 +530,9 @@ async def delete_news_topic(session: AsyncSession, user: User, topic_id: int) ->
     return True
 
 
-async def toggle_news_topic(session: AsyncSession, user: User, topic_id: int) -> bool | None:
+async def toggle_news_topic(
+    session: AsyncSession, user: User, topic_id: int
+) -> bool | None:
     nt = await session.get(NewsTopic, topic_id)
     if nt is None or nt.user_id != user.id:
         return None
@@ -517,7 +567,11 @@ async def list_memories(
     *,
     contact_id: int | None = None,
 ) -> list[Memory]:
-    query = select(Memory).where(Memory.user_id == user.id).order_by(Memory.created_at.desc())
+    query = (
+        select(Memory)
+        .where(Memory.user_id == user.id)
+        .order_by(Memory.created_at.desc())
+    )
     if contact_id is not None:
         query = query.where(Memory.contact_id == contact_id)
     result = await session.execute(query)
@@ -530,6 +584,26 @@ async def delete_memory(session: AsyncSession, user: User, memory_id: int) -> bo
         return False
     await session.delete(m)
     return True
+
+
+async def fetch_my_messages_global(
+    session: AsyncSession,
+    user: User,
+    limit: int = 200,
+) -> list[Message]:
+    """Получить последние N исходящих сообщений владельца из всех чатов."""
+    result = await session.execute(
+        select(Message)
+        .where(
+            Message.user_id == user.id,
+            Message.is_outgoing.is_(True),
+            Message.text.isnot(None),
+            Message.text != "",
+        )
+        .order_by(Message.date.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
 
 
 async def search_memories(

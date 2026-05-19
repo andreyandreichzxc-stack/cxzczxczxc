@@ -12,7 +12,12 @@ from src.core.contact_resolver import resolve
 from src.core.indexer import index_chat
 from src.core.vector_store import vector_store
 from src.db.models import Message as DBMessage
-from src.db.repo import get_contact, get_or_create_user
+from src.db.repo import (
+    FtsHit,
+    cross_chat_search,
+    get_contact,
+    get_or_create_user,
+)
 from src.db.session import get_session
 from src.llm.router import build_provider
 from src.userbot.manager import UserbotManager
@@ -27,13 +32,17 @@ router.callback_query.filter(OwnerOnly())
 def _result_keyboard(peer_id: int, message_id: int):
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="➡ Переслать мне", callback_data=f"search:fwd:{peer_id}:{message_id}"),
+        InlineKeyboardButton(
+            text="➡ Переслать мне", callback_data=f"search:fwd:{peer_id}:{message_id}"
+        ),
     )
     return kb.as_markup()
 
 
 @router.message(Command("index"))
-async def cmd_index(message: Message, command: CommandObject, userbot_manager: UserbotManager) -> None:
+async def cmd_index(
+    message: Message, command: CommandObject, userbot_manager: UserbotManager
+) -> None:
     client = userbot_manager.get_client(message.from_user.id)
     if client is None:
         await message.answer("Сначала /login.")
@@ -52,8 +61,12 @@ async def cmd_index(message: Message, command: CommandObject, userbot_manager: U
     if len(candidates) > 1 and candidates[0].score < 90:
         kb = InlineKeyboardBuilder()
         for c in candidates:
-            kb.row(InlineKeyboardButton(text=f"{c.label()} · {c.score}",
-                                        callback_data=f"search:idx:{c.peer_id}"))
+            kb.row(
+                InlineKeyboardButton(
+                    text=f"{c.label()} · {c.score}",
+                    callback_data=f"search:idx:{c.peer_id}",
+                )
+            )
         kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="search:cancel:0"))
         await message.answer("Кого индексируем?", reply_markup=kb.as_markup())
         return
@@ -66,12 +79,18 @@ async def cb_idx_pick(callback: CallbackQuery, userbot_manager: UserbotManager) 
     peer_id = int(callback.data.split(":")[2])
     if callback.message:
         await callback.message.edit_text("⏳ Индексирую...")
-    await _do_index(callback.message, peer_id, userbot_manager, telegram_id=callback.from_user.id)
+    await _do_index(
+        callback.message, peer_id, userbot_manager, telegram_id=callback.from_user.id
+    )
     await callback.answer()
 
 
-async def _do_index(message_or_msg, peer_id: int, userbot_manager: UserbotManager,
-                    telegram_id: int | None = None) -> None:
+async def _do_index(
+    message_or_msg,
+    peer_id: int,
+    userbot_manager: UserbotManager,
+    telegram_id: int | None = None,
+) -> None:
     tg_id = telegram_id or message_or_msg.from_user.id
     client = userbot_manager.get_client(tg_id)
     if client is None:
@@ -91,7 +110,9 @@ async def _do_index(message_or_msg, peer_id: int, userbot_manager: UserbotManage
         return
 
     n = await index_chat(provider, owner, contact)
-    await message_or_msg.answer(f"✅ Проиндексировано <b>{n}</b> сообщений в чате с {contact.display_name}.")
+    await message_or_msg.answer(
+        f"✅ Проиндексировано <b>{n}</b> сообщений в чате с {contact.display_name}."
+    )
 
 
 @router.callback_query(F.data == "search:cancel:0")
@@ -102,7 +123,9 @@ async def cb_cancel(callback: CallbackQuery) -> None:
 
 
 @router.message(Command("search"))
-async def cmd_search(message: Message, command: CommandObject, userbot_manager: UserbotManager) -> None:
+async def cmd_search(
+    message: Message, command: CommandObject, userbot_manager: UserbotManager
+) -> None:
     query = (command.args or "").strip()
     if not query:
         await message.answer("Использование: <code>/search текст запроса</code>")
@@ -112,18 +135,40 @@ async def cmd_search(message: Message, command: CommandObject, userbot_manager: 
         owner = await get_or_create_user(session, message.from_user.id)
         provider = await build_provider(session, owner)
 
-    hits_text: list[tuple[int, int, str, str | None, float]] = []  # (peer_id, msg_id, text, peer_name, score)
+    # Шаг 1: FTS-поиск по всем чатам (кросс-чатовый)
+    async with get_session() as session:
+        grouped = await cross_chat_search(session, owner, query, limit=30)
 
-    if provider is not None:
+    # Если FTS ничего не дал — fallback на векторный / LIKE
+    fts_hits: list[FtsHit] = []
+    for peer_hits in grouped.values():
+        fts_hits.extend(peer_hits)
+    fts_hits.sort(key=lambda h: h.rank)
+
+    if not fts_hits and provider is not None:
+        # векторный fallback
         try:
             vec = await provider.embed(query)
-            vec_hits = await vector_store.search(user_id=owner.id, embedding=vec, limit=8)
-            hits_text = [(h.peer_id, h.message_id, h.text, h.peer_name, h.score) for h in vec_hits]
+            vec_hits = await vector_store.search(
+                user_id=owner.id, embedding=vec, limit=8
+            )
+            for h in vec_hits:
+                fts_hits.append(
+                    FtsHit(
+                        user_id=owner.id,
+                        peer_id=h.peer_id,
+                        message_id=h.message_id,
+                        sender_name=h.peer_name,
+                        snippet=h.text,
+                        rank=h.score,
+                        peer_name=h.peer_name,
+                    )
+                )
         except Exception:
             logger.exception("vector search failed")
 
-    if not hits_text:
-        # fallback: LIKE по БД
+    if not fts_hits:
+        # LIKE fallback
         like = f"%{query}%"
         async with get_session() as session:
             result = await session.execute(
@@ -141,17 +186,50 @@ async def cmd_search(message: Message, command: CommandObject, userbot_manager: 
             )
             db_hits = list(result.scalars().all())
         for m in db_hits:
-            body = (m.transcript or m.text or m.extracted_text or "")[:400]
-            hits_text.append((m.peer_id, m.message_id, body, m.sender_name, 0.0))
+            fts_hits.append(
+                FtsHit(
+                    user_id=owner.id,
+                    peer_id=m.peer_id,
+                    message_id=m.message_id,
+                    sender_name=m.sender_name,
+                    snippet=(m.transcript or m.text or m.extracted_text or "")[:400],
+                    rank=0.0,
+                    peer_name=m.sender_name,
+                    date=m.date,
+                )
+            )
 
-    if not hits_text:
-        await message.answer("Ничего не нашлось. Попробуй /index <контакт> для индексации.")
+    if not fts_hits:
+        await message.answer(
+            "Ничего не нашлось. Попробуй /index <контакт> для индексации."
+        )
         return
 
-    for peer_id, msg_id, body, peer_name, score in hits_text[:8]:
-        head = f"<b>{peer_name or peer_id}</b>" + (f" · {score:.2f}" if score else "")
-        text = f"{head}\n{body[:600]}"
-        await message.answer(text, reply_markup=_result_keyboard(peer_id, msg_id))
+    # Группировка по peer_id для кросс-чатового вывода
+    from collections import defaultdict
+
+    groups: dict[int, list[FtsHit]] = defaultdict(list)
+    for hit in fts_hits:
+        groups[hit.peer_id].append(hit)
+
+    await message.answer(f"🔍 Результаты по «<i>{query}</i>»:")
+
+    sent = 0
+    for peer_id, hits in groups.items():
+        peer_label = hits[0].peer_name or str(peer_id)
+        await message.answer(f"📁 {peer_label} ({len(hits)} совпадений)")
+        for hit in hits[:5]:  # не более 5 на чат
+            if sent >= 8:
+                break
+            date_str = hit.date.strftime("%d.%m.%Y") if hit.date else ""
+            body = hit.snippet[:200]
+            line = f"• «{body}» — {date_str}" if date_str else f"• «{body}»"
+            await message.answer(
+                line, reply_markup=_result_keyboard(hit.peer_id, hit.message_id)
+            )
+            sent += 1
+        if sent >= 8:
+            break
 
 
 @router.callback_query(F.data.startswith("search:fwd:"))

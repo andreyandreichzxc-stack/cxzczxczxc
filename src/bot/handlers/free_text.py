@@ -1,5 +1,6 @@
 """Свободный текст (и голос) → агент → действие. Регистрируется последним в bot/app.py,
 чтобы команды и FSM перехватывали свои события раньше."""
+
 import json
 import logging
 from pathlib import Path
@@ -53,32 +54,36 @@ CHAT_LOAD_LIMIT = 50
 
 # Поля UserSettings, которые агент может менять через set_setting (имя → тип значения)
 SETTING_FIELDS: dict[str, str] = {
-    "auto_reply_enabled":         "bool",
-    "auto_reply_mode":            "choice:static,smart",
-    "auto_reply_text":            "str",
-    "auto_reply_cooldown_min":    "int",
-    "digest_enabled":             "bool",
-    "digest_time":                "hm",
-    "news_enabled":               "bool",
-    "news_digest_time":           "hm",
-    "news_window_hours":          "int",
-    "reminders_enabled":          "bool",
-    "reminder_lead_hours":        "int",
-    "reminder_overdue_enabled":   "bool",
-    "ignore_archived":            "bool",
-    "use_heavy_model":            "bool",
-    "llm_provider":               "choice:openai,gemini,mistral",
-    "transcription_mode":         "choice:local,api,hybrid",
+    "auto_reply_enabled": "bool",
+    "auto_reply_mode": "choice:static,smart",
+    "auto_reply_text": "str",
+    "auto_reply_cooldown_min": "int",
+    "digest_enabled": "bool",
+    "digest_time": "hm",
+    "news_enabled": "bool",
+    "news_digest_time": "hm",
+    "news_window_hours": "int",
+    "reminders_enabled": "bool",
+    "reminder_lead_hours": "int",
+    "reminder_overdue_enabled": "bool",
+    "ignore_archived": "bool",
+    "use_heavy_model": "bool",
+    "llm_provider": "choice:openai,gemini,mistral",
+    "transcription_mode": "choice:local,api,hybrid",
     "transcription_api_provider": "choice:openai,gemini,mistral",
-    "auto_sync_enabled":          "bool",
-    "auto_sync_interval_sec":      "int",
-    "auto_extract_memories":       "bool",
-    "include_saved_messages":      "bool",
-    "timezone":                   "tz",
+    "auto_sync_enabled": "bool",
+    "auto_sync_interval_sec": "int",
+    "auto_extract_memories": "bool",
+    "include_saved_messages": "bool",
+    "smart_digest_enabled": "bool",
+    "smart_digest_interval_min": "int",
+    "urgent_notify_enabled": "bool",
+    "timezone": "tz",
 }
 
 
 import re
+
 _HM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
@@ -109,7 +114,7 @@ def _coerce_setting_value(spec: str, raw):
             return raw.strip(), None
         return None, "не нашёл такой IANA timezone"
     if spec.startswith("choice:"):
-        opts = set(spec[len("choice:"):].split(","))
+        opts = set(spec[len("choice:") :].split(","))
         if isinstance(raw, str) and raw.strip() in opts:
             return raw.strip(), None
         return None, f"допустимые значения: {', '.join(sorted(opts))}"
@@ -119,20 +124,26 @@ def _coerce_setting_value(spec: str, raw):
 def _confirm_keyboard(action_id: int):
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="✅ Отправить", callback_data=f"send:confirm:{action_id}"),
+        InlineKeyboardButton(
+            text="✅ Отправить", callback_data=f"send:confirm:{action_id}"
+        ),
         InlineKeyboardButton(text="✏ Изменить", callback_data=f"send:edit:{action_id}"),
     )
-    kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"send:cancel:{action_id}"))
+    kb.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"send:cancel:{action_id}")
+    )
     return kb.as_markup()
 
 
 def _candidates_keyboard_send(candidates):
     kb = InlineKeyboardBuilder()
     for c in candidates:
-        kb.row(InlineKeyboardButton(
-            text=f"{c.label()} · {c.score}",
-            callback_data=f"send:pick:{c.peer_id}",
-        ))
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{c.label()} · {c.score}",
+                callback_data=f"send:pick:{c.peer_id}",
+            )
+        )
     kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="send:cancel:0"))
     return kb.as_markup()
 
@@ -141,15 +152,19 @@ def _candidates_keyboard_chat(action: str, candidates):
     # action ∈ {summary, tasks, draft, catchup} — re-use chat:* callback'ов из chat_cmd
     kb = InlineKeyboardBuilder()
     for c in candidates:
-        kb.row(InlineKeyboardButton(
-            text=f"{c.label()} · {c.score}",
-            callback_data=f"chat:{action}:{c.peer_id}",
-        ))
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{c.label()} · {c.score}",
+                callback_data=f"chat:{action}:{c.peer_id}",
+            )
+        )
     kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="chat:cancel:0"))
     return kb.as_markup()
 
 
-async def _execute_intent(intent, message, state, userbot_manager, *, tz_name: str) -> None:
+async def _execute_intent(
+    intent, message, state, userbot_manager, *, tz_name: str
+) -> None:
     kind = intent.get("intent")
     client = userbot_manager.get_client(message.from_user.id)
 
@@ -182,6 +197,7 @@ async def _execute_intent(intent, message, state, userbot_manager, *, tz_name: s
             await message.answer("Открытых обязательств нет 🎉")
             return
         from src.core.timeutil import fmt_local
+
         lines = []
         for c in items[:30]:
             who = "Я" if c.direction == "mine" else (c.peer_name or "Они")
@@ -208,8 +224,12 @@ async def _execute_intent(intent, message, state, userbot_manager, *, tz_name: s
             return
         if len(candidates) == 1 or candidates[0].score >= 90:
             target = candidates[0]
-            ctx_store.set_last_peer(message.from_user.id, target.peer_id, target.display_name)
-            payload = json.dumps({"peer_id": target.peer_id, "text": text}, ensure_ascii=False)
+            ctx_store.set_last_peer(
+                message.from_user.id, target.peer_id, target.display_name
+            )
+            payload = json.dumps(
+                {"peer_id": target.peer_id, "text": text}, ensure_ascii=False
+            )
             async with get_session() as session:
                 owner = await get_or_create_user(session, message.from_user.id)
                 action = await create_pending_action(
@@ -230,11 +250,21 @@ async def _execute_intent(intent, message, state, userbot_manager, *, tz_name: s
         return
 
     if kind == "search":
-        query = (intent.get("query") or "").strip() or raw
+        query = (intent.get("query") or "").strip()
+        peer_query = (intent.get("peer_query") or intent.get("contact") or "").strip()
+        if not query:
+            await message.answer("Не понял, что искать.")
+            return
         await message.answer(f"🔎 Ищу: <i>{query}</i>…")
+        # Если нет явного контакта — cmd_search сам сделает cross_chat_search (FTS)
         from src.bot.handlers.search import cmd_search
         from aiogram.filters import CommandObject
-        await cmd_search(message, CommandObject(prefix="/", command="search", args=query), userbot_manager)
+
+        await cmd_search(
+            message,
+            CommandObject(prefix="/", command="search", args=query),
+            userbot_manager,
+        )
         return
 
     if kind == "find_in_chats":
@@ -278,8 +308,8 @@ async def _execute_intent(intent, message, state, userbot_manager, *, tz_name: s
     action_map = {
         "summarize_chat": "summary",
         "tasks_for_chat": "tasks",
-        "draft_reply":    "draft",
-        "catchup":        "catchup",
+        "draft_reply": "draft",
+        "catchup": "catchup",
     }
     cb_action = action_map.get(kind)
     if cb_action is None:
@@ -297,8 +327,11 @@ async def _execute_intent(intent, message, state, userbot_manager, *, tz_name: s
     ctx_store.set_last_peer(message.from_user.id, target.peer_id, target.display_name)
     await message.answer(f"⏳ Подгружаю чат с <b>{target.label()}</b>…")
     messages_loaded = await load_chat(
-        client, message.from_user.id, target.peer_id,
-        limit=CHAT_LOAD_LIMIT, transcribe=True,
+        client,
+        message.from_user.id,
+        target.peer_id,
+        limit=CHAT_LOAD_LIMIT,
+        transcribe=True,
     )
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -311,7 +344,13 @@ async def _execute_intent(intent, message, state, userbot_manager, *, tz_name: s
         return
 
     if kind == "summarize_chat":
-        text = await summarize_chat(provider, contact, messages_loaded, heavy=heavy)
+        text = await summarize_chat(
+            provider,
+            contact,
+            messages_loaded,
+            heavy=heavy,
+            global_style=owner.global_style_profile,
+        )
         await message.answer(f"📝 <b>Саммари — {contact.display_name}</b>\n\n{text}")
 
     elif kind == "tasks_for_chat":
@@ -328,12 +367,23 @@ async def _execute_intent(intent, message, state, userbot_manager, *, tz_name: s
                 tail = f" · до {deadline}" if deadline else ""
                 lines.append(f"• <b>{who}</b>: {it.get('text', '')}{tail}")
             body = "\n".join(lines)
-        await message.answer(f"✅ <b>Обязательства — {contact.display_name}</b>\n\n{body}")
+        await message.answer(
+            f"✅ <b>Обязательства — {contact.display_name}</b>\n\n{body}"
+        )
 
     elif kind == "draft_reply":
         instruction = intent.get("instruction") or None
-        draft = await draft_reply(provider, contact, messages_loaded, instruction=instruction, heavy=heavy)
-        payload = json.dumps({"peer_id": target.peer_id, "text": draft}, ensure_ascii=False)
+        draft = await draft_reply(
+            provider,
+            contact,
+            messages_loaded,
+            instruction=instruction,
+            heavy=heavy,
+            global_style=owner.global_style_profile,
+        )
+        payload = json.dumps(
+            {"peer_id": target.peer_id, "text": draft}, ensure_ascii=False
+        )
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
             action = await create_pending_action(
@@ -345,7 +395,13 @@ async def _execute_intent(intent, message, state, userbot_manager, *, tz_name: s
         )
 
     elif kind == "catchup":
-        text = await catchup(provider, contact, messages_loaded, heavy=heavy)
+        text = await catchup(
+            provider,
+            contact,
+            messages_loaded,
+            heavy=heavy,
+            global_style=owner.global_style_profile,
+        )
         await message.answer(
             f"⏪ <b>Где мы остановились — {contact.display_name}</b>\n\n{text}"
         )
@@ -400,14 +456,16 @@ async def _find_chats_and_offer(message, client, query: str, action: str) -> Non
         label = f"{r.name}" + (f" · {meta}" if meta else "")
         if len(label) > 60:
             label = label[:57] + "…"
-        kb.row(InlineKeyboardButton(text=label, callback_data=f"chat:{action}:{r.peer_id}"))
+        kb.row(
+            InlineKeyboardButton(text=label, callback_data=f"chat:{action}:{r.peer_id}")
+        )
     kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="chat:cancel:0"))
 
     pretty_action = {
         "catchup": "«где остановились»",
         "summary": "саммари",
-        "tasks":   "задачи/обещания",
-        "draft":   "черновик ответа",
+        "tasks": "задачи/обещания",
+        "draft": "черновик ответа",
     }.get(action, action)
 
     await message.answer(
@@ -504,14 +562,16 @@ async def _process_text(
             if memories:
                 recent = memories[-20:]  # последние 20 фактов
                 memory_context = "Факты из памяти:\n" + "\n".join(
-                    f"[#{m.id}] {m.fact} (sentiment={m.sentiment or 'neutral'})" for m in recent
+                    f"[#{m.id}] {m.fact} (sentiment={m.sentiment or 'neutral'})"
+                    for m in recent
                 )
     except Exception:
         pass
 
     try:
         intent = await route_intent(
-            provider, raw,
+            provider,
+            raw,
             heavy=False,
             now_local=now_local_str,
             tz_name=tz_name,
@@ -708,6 +768,7 @@ def _parse_iso_to_utc_naive(value, tz_name: str | None = None):
     try:
         from datetime import datetime, timezone
         from src.core.timeutil import parse_tz
+
         s = str(value).replace("Z", "+00:00")
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is not None:
@@ -733,9 +794,15 @@ async def _exec_add_reminder(intent, message, *, tz_name: str) -> None:
     peer_name = None
     if peer_query:
         from src.userbot.manager import _MANAGER_SINGLETON
-        client = _MANAGER_SINGLETON.get_client(message.from_user.id) if _MANAGER_SINGLETON else None
+
+        client = (
+            _MANAGER_SINGLETON.get_client(message.from_user.id)
+            if _MANAGER_SINGLETON
+            else None
+        )
         if client is not None:
             from src.core.contact_resolver import resolve
+
             async with get_session() as session:
                 owner = await get_or_create_user(session, message.from_user.id)
             cands = await resolve(client, owner, peer_query)
@@ -758,8 +825,14 @@ async def _exec_add_reminder(intent, message, *, tz_name: str) -> None:
 
     when_str = fmt_local(when, tz_name) if when else "без срока"
     extra = f" (контакт: {peer_name})" if peer_name else ""
-    note = "" if owner.settings.reminders_enabled else "\n\n⚠ Напоминания выключены — включи в /settings → ⏰."
-    await message.answer(f"⏰ Напоминание добавлено: <b>{text}</b>\nКогда: {when_str}{extra}{note}")
+    note = (
+        ""
+        if owner.settings.reminders_enabled
+        else "\n\n⚠ Напоминания выключены — включи в /settings → ⏰."
+    )
+    await message.answer(
+        f"⏰ Напоминание добавлено: <b>{text}</b>\nКогда: {when_str}{extra}{note}"
+    )
 
 
 async def _exec_remove_reminder(intent, message) -> None:
@@ -771,7 +844,8 @@ async def _exec_remove_reminder(intent, message) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         items = await list_open_commitments(session, owner)
         matched = [
-            c for c in items
+            c
+            for c in items
             if needle in (c.text or "").lower()
             or (c.peer_name and needle in c.peer_name.lower())
         ]
@@ -795,6 +869,7 @@ async def _exec_add_reminders_from_chat(intent, message, userbot_manager) -> Non
         return
 
     from src.core.contact_resolver import resolve
+
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         provider = await build_provider(session, owner)
@@ -808,8 +883,12 @@ async def _exec_add_reminders_from_chat(intent, message, userbot_manager) -> Non
         return
     target = cands[0]
 
-    await message.answer(f"⏳ Подгружаю чат с <b>{target.label()}</b> и извлекаю обещания…")
-    msgs = await load_chat(client, message.from_user.id, target.peer_id, limit=80, transcribe=True)
+    await message.answer(
+        f"⏳ Подгружаю чат с <b>{target.label()}</b> и извлекаю обещания…"
+    )
+    msgs = await load_chat(
+        client, message.from_user.id, target.peer_id, limit=80, transcribe=True
+    )
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         contact = await get_contact(session, owner, target.peer_id)
@@ -845,7 +924,11 @@ async def _exec_store_memory(intent, message) -> None:
     if contact_name:
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-        client = _MANAGER_SINGLETON.get_client(message.from_user.id) if _MANAGER_SINGLETON else None
+        client = (
+            _MANAGER_SINGLETON.get_client(message.from_user.id)
+            if _MANAGER_SINGLETON
+            else None
+        )
         if client is not None:
             candidates = await resolve(client, owner, contact_name)
             if candidates:
@@ -853,7 +936,14 @@ async def _exec_store_memory(intent, message) -> None:
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        mem = await add_memory(session, owner, fact=fact, contact_id=contact_id, sentiment=sentiment, source="user")
+        mem = await add_memory(
+            session,
+            owner,
+            fact=fact,
+            contact_id=contact_id,
+            sentiment=sentiment,
+            source="user",
+        )
 
     await message.answer(f"🧠 Запомнил: <i>{fact}</i>")
 
@@ -869,7 +959,11 @@ async def _exec_forget_memory(intent, message) -> None:
     if contact_name:
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-        client = _MANAGER_SINGLETON.get_client(message.from_user.id) if _MANAGER_SINGLETON else None
+        client = (
+            _MANAGER_SINGLETON.get_client(message.from_user.id)
+            if _MANAGER_SINGLETON
+            else None
+        )
         if client is not None:
             candidates = await resolve(client, owner, contact_name)
             if candidates:
@@ -887,7 +981,9 @@ async def _exec_forget_memory(intent, message) -> None:
         for m in found:
             await delete_memory(session, owner, m.id)
 
-    names = ", ".join(f"«{m.fact[:50]}…»" if len(m.fact) > 50 else f"«{m.fact}»" for m in found)
+    names = ", ".join(
+        f"«{m.fact[:50]}…»" if len(m.fact) > 50 else f"«{m.fact}»" for m in found
+    )
     await message.answer(f"🗑 Забыл: {names}")
 
 
@@ -899,7 +995,11 @@ async def _exec_list_memories(intent, message) -> None:
     if contact_name:
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-        client = _MANAGER_SINGLETON.get_client(message.from_user.id) if _MANAGER_SINGLETON else None
+        client = (
+            _MANAGER_SINGLETON.get_client(message.from_user.id)
+            if _MANAGER_SINGLETON
+            else None
+        )
         if client is not None:
             candidates = await resolve(client, owner, contact_name)
             if candidates:
@@ -916,7 +1016,9 @@ async def _exec_list_memories(intent, message) -> None:
 
     lines = []
     for m in items:
-        sent = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(m.sentiment or "", "")
+        sent = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(
+            m.sentiment or "", ""
+        )
         lines.append(f"• {sent} {m.fact}")
     body = "\n".join(lines)
     await message.answer(f"🧠 <b>Память{label}</b>\n\n{body}")
@@ -931,7 +1033,9 @@ async def _exec_extract_memories(intent, message, userbot_manager) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
 
-    client = userbot_manager.get_client(message.from_user.id) if userbot_manager else None
+    client = (
+        userbot_manager.get_client(message.from_user.id) if userbot_manager else None
+    )
     if client is None:
         await message.answer("Сначала /login.")
         return
@@ -976,7 +1080,9 @@ async def _exec_check_memories(intent, message) -> None:
         kb = InlineKeyboardBuilder()
         kb.row(
             InlineKeyboardButton(text="✅ Да, всё ок", callback_data=f"mem:ok:{mid}"),
-            InlineKeyboardButton(text="❌ Уже неактуально", callback_data=f"mem:del:{mid}"),
+            InlineKeyboardButton(
+                text="❌ Уже неактуально", callback_data=f"mem:del:{mid}"
+            ),
         )
         await message.answer(f"🤔 {question}", reply_markup=kb.as_markup())
 
@@ -984,6 +1090,7 @@ async def _exec_check_memories(intent, message) -> None:
 @router.callback_query(F.data.startswith("mem:ok:"))
 async def cb_mem_ok(callback: CallbackQuery) -> None:
     from src.db.repo import get_or_create_user, list_memories
+
     mid = int(callback.data.split(":")[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
@@ -992,17 +1099,22 @@ async def cb_mem_ok(callback: CallbackQuery) -> None:
         if m.id == mid:
             m.sentiment = "neutral"
     if callback.message:
-        await callback.message.edit_text(f"✅ {callback.message.text}\n\n<i>Понял, память обновлена.</i>")
+        await callback.message.edit_text(
+            f"✅ {callback.message.text}\n\n<i>Понял, память обновлена.</i>"
+        )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("mem:del:"))
 async def cb_mem_del(callback: CallbackQuery) -> None:
     from src.db.repo import delete_memory, get_or_create_user
+
     mid = int(callback.data.split(":")[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         await delete_memory(session, owner, mid)
     if callback.message:
-        await callback.message.edit_text(f"🗑 {callback.message.text}\n\n<i>Удалил из памяти.</i>")
+        await callback.message.edit_text(
+            f"🗑 {callback.message.text}\n\n<i>Удалил из памяти.</i>"
+        )
     await callback.answer()

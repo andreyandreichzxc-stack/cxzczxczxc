@@ -1,11 +1,17 @@
 """/settings — главное меню и разделы. callback_data: set:sec / set:tog / set:choose / set:input."""
+
 import re
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
@@ -33,6 +39,7 @@ def _check(value: bool) -> str:
 
 # ---------- Главное меню ----------
 
+
 async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
@@ -52,6 +59,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         f"⏰ Напоминания: {_check(s.reminders_enabled)} (за {s.reminder_lead_hours}ч; просрочки {_check(s.reminder_overdue_enabled)})\n"
         f"📰 Новости: {_check(s.news_enabled)} (окно {s.news_window_hours}ч)\n"
         f"🛡 Игнорировать архив: {_check(s.ignore_archived)}\n"
+        f"📊 Smart дайджест: {_check(getattr(s, 'smart_digest_enabled', False))} (каждые {getattr(s, 'smart_digest_interval_min', 30)}м)\n"
         f"🤖 LLM: <b>{s.llm_provider}</b> · {'тяжёлая' if s.use_heavy_model else 'лёгкая'}\n"
         f"🎤 Транскрипция: <b>{s.transcription_mode}</b> ({getattr(s, 'transcription_api_provider', 'openai')})\n"
         f"🔑 Ключи: OpenAI {_check(bool(openai_key))} · Gemini {_check(bool(gemini_key))} · Mistral {_check(bool(mistral_key))}\n\n"
@@ -63,18 +71,15 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         InlineKeyboardButton(text="🔄 Авто-ответ", callback_data="set:sec:auto_reply"),
     )
     kb.row(
-        InlineKeyboardButton(text="☀ Дайджест", callback_data="set:sec:digest"),
-        InlineKeyboardButton(text="⏰ Напоминания", callback_data="set:sec:reminders"),
-    )
-    kb.row(
-        InlineKeyboardButton(text="🛡 Приватность", callback_data="set:sec:privacy"),
-        InlineKeyboardButton(text="🔄 Синхронизация", callback_data="set:sec:sync"),
-    )
-    kb.row(
         InlineKeyboardButton(text="🤖 LLM", callback_data="set:sec:llm"),
-        InlineKeyboardButton(text="🎤 Транскрипция", callback_data="set:sec:transcription"),
+        InlineKeyboardButton(
+            text="🎤 Транскрипция", callback_data="set:sec:transcription"
+        ),
     )
-    kb.row(InlineKeyboardButton(text="🔑 API-ключи", callback_data="set:sec:keys"))
+    kb.row(
+        InlineKeyboardButton(text="✍️ Черновики", callback_data="set:sec:drafts"),
+        InlineKeyboardButton(text="🔑 API-ключи", callback_data="set:sec:keys"),
+    )
     kb.row(InlineKeyboardButton(text="❌ Закрыть", callback_data="set:close"))
     return text, kb.as_markup()
 
@@ -123,6 +128,8 @@ BOOL_KEYS = {
     "auto_sync_enabled",
     "auto_extract_memories",
     "include_saved_messages",
+    "draft_suggestions_enabled",
+    "draft_only_important",
 }
 
 CHOICE_KEYS = {
@@ -137,6 +144,7 @@ NUMERIC_KEYS = {
     "reminder_lead_hours",
     "news_window_hours",
     "auto_sync_interval_sec",
+    "draft_max_per_hour",
 }
 
 
@@ -197,6 +205,9 @@ def _section_for_key(key: str) -> str:
         "use_heavy_model": "llm",
         "transcription_mode": "transcription",
         "transcription_api_provider": "transcription",
+        "draft_suggestions_enabled": "drafts",
+        "draft_only_important": "drafts",
+        "draft_max_per_hour": "drafts",
     }.get(key, "menu")
 
 
@@ -210,6 +221,7 @@ async def _refresh_section(callback: CallbackQuery, section: str) -> None:
 
 # ---------- Разделы ----------
 
+
 @router.callback_query(F.data.startswith("set:sec:"))
 async def cb_open_section(callback: CallbackQuery) -> None:
     section = callback.data.split(":", 2)[2]
@@ -222,7 +234,9 @@ def _back_row():
     return [InlineKeyboardButton(text="← Меню настроек", callback_data="set:menu")]
 
 
-async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _render_section(
+    telegram_id: int, section: str
+) -> tuple[str, InlineKeyboardMarkup]:
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
         s = owner.settings
@@ -233,7 +247,11 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
     kb = InlineKeyboardBuilder()
 
     if section == "auto_reply":
-        mode_label = "🤖 умный (LLM в твоём стиле)" if s.auto_reply_mode == "smart" else "📝 заготовленный текст"
+        mode_label = (
+            "🤖 умный (LLM в твоём стиле)"
+            if s.auto_reply_mode == "smart"
+            else "📝 заготовленный текст"
+        )
         snippet = (s.auto_reply_text or "").strip().replace("\n", " ")
         if len(snippet) > 80:
             snippet = snippet[:77] + "…"
@@ -249,10 +267,12 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
             f"Кулдаун: <b>{s.auto_reply_cooldown_min} мин</b>\n"
             f"Текст заготовки:\n<i>«{snippet}»</i>"
         )
-        kb.row(InlineKeyboardButton(
-            text=f"{_check(s.auto_reply_enabled)} Включить авто-ответ",
-            callback_data="set:tog:auto_reply_enabled",
-        ))
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{_check(s.auto_reply_enabled)} Включить авто-ответ",
+                callback_data="set:tog:auto_reply_enabled",
+            )
+        )
         kb.row(
             InlineKeyboardButton(
                 text=("• " if s.auto_reply_mode == "static" else "") + "📝 Заготовка",
@@ -263,16 +283,21 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
                 callback_data="set:choose:auto_reply_mode:smart",
             ),
         )
-        kb.row(InlineKeyboardButton(
-            text="✏ Изменить текст заготовки",
-            callback_data="set:input:auto_reply_text",
-        ))
-        kb.row(*[
+        kb.row(
             InlineKeyboardButton(
-                text=("• " if s.auto_reply_cooldown_min == m else "") + f"{m}м",
-                callback_data=f"set:choose:auto_reply_cooldown_min:{m}",
-            ) for m in (5, 15, 30, 60)
-        ])
+                text="✏ Изменить текст заготовки",
+                callback_data="set:input:auto_reply_text",
+            )
+        )
+        kb.row(
+            *[
+                InlineKeyboardButton(
+                    text=("• " if s.auto_reply_cooldown_min == m else "") + f"{m}м",
+                    callback_data=f"set:choose:auto_reply_cooldown_min:{m}",
+                )
+                for m in (5, 15, 30, 60)
+            ]
+        )
         kb.row(*_back_row())
 
     elif section == "digest":
@@ -285,11 +310,17 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
             "Часовой пояс — отдельный раздел в /settings.\n"
             "Для разовой сводки — команда /digest"
         )
-        kb.row(InlineKeyboardButton(
-            text=f"{_check(s.digest_enabled)} Включить дайджест",
-            callback_data="set:tog:digest_enabled",
-        ))
-        kb.row(InlineKeyboardButton(text=f"⏰ Время: {s.digest_time}", callback_data="set:input:digest_time"))
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{_check(s.digest_enabled)} Включить дайджест",
+                callback_data="set:tog:digest_enabled",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text=f"⏰ Время: {s.digest_time}", callback_data="set:input:digest_time"
+            )
+        )
         kb.row(*_back_row())
 
     elif section == "reminders":
@@ -301,20 +332,62 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
             f"Заранее за: <b>{s.reminder_lead_hours} ч</b>\n"
             f"Алерт о просрочках: <b>{'ВКЛ' if s.reminder_overdue_enabled else 'ВЫКЛ'}</b>"
         )
-        kb.row(InlineKeyboardButton(
-            text=f"{_check(s.reminders_enabled)} Включить напоминания",
-            callback_data="set:tog:reminders_enabled",
-        ))
-        kb.row(InlineKeyboardButton(
-            text=f"{_check(s.reminder_overdue_enabled)} Алерт при просрочке",
-            callback_data="set:tog:reminder_overdue_enabled",
-        ))
-        kb.row(*[
+        kb.row(
             InlineKeyboardButton(
-                text=("• " if s.reminder_lead_hours == h else "") + f"{h}ч",
-                callback_data=f"set:choose:reminder_lead_hours:{h}",
-            ) for h in (1, 2, 4, 12, 24)
-        ])
+                text=f"{_check(s.reminders_enabled)} Включить напоминания",
+                callback_data="set:tog:reminders_enabled",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{_check(s.reminder_overdue_enabled)} Алерт при просрочке",
+                callback_data="set:tog:reminder_overdue_enabled",
+            )
+        )
+        kb.row(
+            *[
+                InlineKeyboardButton(
+                    text=("• " if s.reminder_lead_hours == h else "") + f"{h}ч",
+                    callback_data=f"set:choose:reminder_lead_hours:{h}",
+                )
+                for h in (1, 2, 4, 12, 24)
+            ]
+        )
+        kb.row(*_back_row())
+
+    elif section == "smart_digest":
+        text = (
+            "📊 <b>Smart дайджест</b>\n\n"
+            "Входящие сообщения за последние N минут собираются в один дайджест "
+            "с группировкой по срочности (🔴 срочное → 🟡 важное → 🟢 обычное).\n\n"
+            f"Smart дайджест: <b>{'ВКЛ' if s.smart_digest_enabled else 'ВЫКЛ'}</b>\n"
+            f"Интервал: <b>{s.smart_digest_interval_min} мин</b>\n"
+            f"Мгновенные 🔴 уведомления: <b>{'ВКЛ' if s.urgent_notify_enabled else 'ВЫКЛ'}</b>\n\n"
+            "Мгновенные уведомления приходят сразу при получении срочного сообщения.\n"
+            "Дайджест собирает все сообщения за интервал и присылает единый отчёт.\n"
+            "Ручной запуск: /smart_digest"
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{_check(s.smart_digest_enabled)} Включить smart дайджест",
+                callback_data="set:tog:smart_digest_enabled",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{_check(s.urgent_notify_enabled)} Мгновенные 🔴 уведомления",
+                callback_data="set:tog:urgent_notify_enabled",
+            )
+        )
+        kb.row(
+            *[
+                InlineKeyboardButton(
+                    text=("• " if s.smart_digest_interval_min == m else "") + f"{m}мин",
+                    callback_data=f"set:choose:smart_digest_interval_min:{m}",
+                )
+                for m in (15, 30, 60, 120)
+            ]
+        )
         kb.row(*_back_row())
 
     elif section == "news":
@@ -329,30 +402,46 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
             f"Время отправки: <b>{s.news_digest_time}</b> · {tz_short(s.timezone)}\n"
             f"Окно по умолчанию: <b>{s.news_window_hours} ч</b>"
         )
-        kb.row(InlineKeyboardButton(
-            text=f"{_check(s.news_enabled)} Включить авто-новости",
-            callback_data="set:tog:news_enabled",
-        ))
-        kb.row(InlineKeyboardButton(
-            text=f"⏰ Время: {s.news_digest_time}",
-            callback_data="set:input:news_time",
-        ))
-        kb.row(*[
+        kb.row(
             InlineKeyboardButton(
-                text=("• " if s.news_window_hours == h else "") + f"{h}ч",
-                callback_data=f"set:choose:news_window_hours:{h}",
-            ) for h in (6, 12, 24, 48, 72)
-        ])
-        kb.row(InlineKeyboardButton(text="📋 Темы → /news_topics", callback_data="set:noop:news_topics"))
+                text=f"{_check(s.news_enabled)} Включить авто-новости",
+                callback_data="set:tog:news_enabled",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text=f"⏰ Время: {s.news_digest_time}",
+                callback_data="set:input:news_time",
+            )
+        )
+        kb.row(
+            *[
+                InlineKeyboardButton(
+                    text=("• " if s.news_window_hours == h else "") + f"{h}ч",
+                    callback_data=f"set:choose:news_window_hours:{h}",
+                )
+                for h in (6, 12, 24, 48, 72)
+            ]
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text="📋 Темы → /news_topics", callback_data="set:noop:news_topics"
+            )
+        )
         kb.row(*_back_row())
 
     elif section == "llm":
         active = (
-            LLMDefaults.OPENAI_CHAT_HEAVY if s.use_heavy_model and s.llm_provider == "openai"
-            else LLMDefaults.OPENAI_CHAT_LIGHT if s.llm_provider == "openai"
-            else LLMDefaults.GEMINI_CHAT_HEAVY if s.use_heavy_model and s.llm_provider == "gemini"
-            else LLMDefaults.GEMINI_CHAT_LIGHT if s.llm_provider == "gemini"
-            else LLMDefaults.MISTRAL_CHAT_HEAVY if s.use_heavy_model
+            LLMDefaults.OPENAI_CHAT_HEAVY
+            if s.use_heavy_model and s.llm_provider == "openai"
+            else LLMDefaults.OPENAI_CHAT_LIGHT
+            if s.llm_provider == "openai"
+            else LLMDefaults.GEMINI_CHAT_HEAVY
+            if s.use_heavy_model and s.llm_provider == "gemini"
+            else LLMDefaults.GEMINI_CHAT_LIGHT
+            if s.llm_provider == "gemini"
+            else LLMDefaults.MISTRAL_CHAT_HEAVY
+            if s.use_heavy_model
             else LLMDefaults.MISTRAL_CHAT_LIGHT
         )
         text = (
@@ -373,19 +462,28 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
                 callback_data="set:choose:llm_provider:gemini",
             ),
         )
-        kb.row(InlineKeyboardButton(
-            text=("• " if s.llm_provider == "mistral" else "") + "Mistral (бесплатно)",
-            callback_data="set:choose:llm_provider:mistral",
-        ))
-        kb.row(InlineKeyboardButton(
-            text=f"{_check(s.use_heavy_model)} Тяжёлая модель",
-            callback_data="set:tog:use_heavy_model",
-        ))
+        kb.row(
+            InlineKeyboardButton(
+                text=("• " if s.llm_provider == "mistral" else "")
+                + "Mistral (бесплатно)",
+                callback_data="set:choose:llm_provider:mistral",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{_check(s.use_heavy_model)} Тяжёлая модель",
+                callback_data="set:tog:use_heavy_model",
+            )
+        )
         kb.row(*_back_row())
 
     elif section == "transcription":
         api_provider = getattr(s, "transcription_api_provider", "openai")
-        labels = {"openai": "OpenAI Whisper", "gemini": "Gemini (бесплатно)", "mistral": "Mistral (бесплатно)"}
+        labels = {
+            "openai": "OpenAI Whisper",
+            "gemini": "Gemini (бесплатно)",
+            "mistral": "Mistral (бесплатно)",
+        }
         api_label = labels.get(api_provider, "OpenAI Whisper")
         text = (
             "🎤 <b>Транскрипция голосовых и аудио</b>\n\n"
@@ -396,16 +494,20 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
             f"API-провайдер: <b>{api_label}</b>"
         )
         for mode in ("local", "api", "hybrid"):
-            kb.row(InlineKeyboardButton(
-                text=("• " if s.transcription_mode == mode else "") + mode,
-                callback_data=f"set:choose:transcription_mode:{mode}",
-            ))
+            kb.row(
+                InlineKeyboardButton(
+                    text=("• " if s.transcription_mode == mode else "") + mode,
+                    callback_data=f"set:choose:transcription_mode:{mode}",
+                )
+            )
         for prov in ("openai", "gemini", "mistral"):
             prov_label = labels.get(prov, prov)
-            kb.row(InlineKeyboardButton(
-                text=("• " if api_provider == prov else "") + prov_label,
-                callback_data=f"set:choose:transcription_api_provider:{prov}",
-            ))
+            kb.row(
+                InlineKeyboardButton(
+                    text=("• " if api_provider == prov else "") + prov_label,
+                    callback_data=f"set:choose:transcription_api_provider:{prov}",
+                )
+            )
         kb.row(*_back_row())
 
     elif section == "tz":
@@ -421,11 +523,15 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
         # пресеты по 2 в ряд
         for i in range(0, len(TZ_PRESETS), 2):
             buttons = []
-            for tz in TZ_PRESETS[i:i + 2]:
+            for tz in TZ_PRESETS[i : i + 2]:
                 mark = "• " if s.timezone == tz else ""
-                buttons.append(InlineKeyboardButton(text=mark + tz, callback_data=f"set:tz:{tz}"))
+                buttons.append(
+                    InlineKeyboardButton(text=mark + tz, callback_data=f"set:tz:{tz}")
+                )
             kb.row(*buttons)
-        kb.row(InlineKeyboardButton(text="✏ Другой…", callback_data="set:input:timezone"))
+        kb.row(
+            InlineKeyboardButton(text="✏ Другой…", callback_data="set:input:timezone")
+        )
         kb.row(*_back_row())
 
     elif section == "privacy":
@@ -438,10 +544,12 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
             "<i>Изменения вступают в силу для следующих запросов. Архивный статус подтягивается "
             "при /sync.</i>"
         )
-        kb.row(InlineKeyboardButton(
-            text=f"{_check(s.ignore_archived)} Игнорировать архив",
-            callback_data="set:tog:ignore_archived",
-        ))
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{_check(s.ignore_archived)} Игнорировать архив",
+                callback_data="set:tog:ignore_archived",
+            )
+        )
         kb.row(*_back_row())
 
     elif section == "sync":
@@ -462,24 +570,79 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
             f"Авто-память: <b>{'ВКЛ' if auto_mem else 'ВЫКЛ'}</b> (после синка извлекает факты без вопроса)\n"
             f"Избранное: <b>{'ВКЛ' if saved_msgs else 'ВЫКЛ'}</b> (индексировать и искать в Избранном)"
         )
-        kb.row(InlineKeyboardButton(
-            text=f"{_check(sync_enabled)} Включить авто-синк",
-            callback_data="set:tog:auto_sync_enabled",
-        ))
-        kb.row(InlineKeyboardButton(
-            text=f"{_check(auto_mem)} Авто-извлечение памяти",
-            callback_data="set:tog:auto_extract_memories",
-        ))
-        kb.row(InlineKeyboardButton(
-            text=f"{_check(saved_msgs)} Индексировать Избранное",
-            callback_data="set:tog:include_saved_messages",
-        ))
-        for v, label in [(60, "1м"), (300, "5м"), (1800, "30м"), (3600, "1ч"), (7200, "2ч"), (14400, "4ч"), (86400, "24ч")]:
-            kb.row(InlineKeyboardButton(
-                text=("• " if sync_sec == v else "") + label,
-                callback_data=f"set:choose:auto_sync_interval_sec:{v}",
-            ))
-        kb.row(InlineKeyboardButton(text="✏ Свой интервал…", callback_data="set:input:auto_sync_interval"))
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{_check(sync_enabled)} Включить авто-синк",
+                callback_data="set:tog:auto_sync_enabled",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{_check(auto_mem)} Авто-извлечение памяти",
+                callback_data="set:tog:auto_extract_memories",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{_check(saved_msgs)} Индексировать Избранное",
+                callback_data="set:tog:include_saved_messages",
+            )
+        )
+        for v, label in [
+            (60, "1м"),
+            (300, "5м"),
+            (1800, "30м"),
+            (3600, "1ч"),
+            (7200, "2ч"),
+            (14400, "4ч"),
+            (86400, "24ч"),
+        ]:
+            kb.row(
+                InlineKeyboardButton(
+                    text=("• " if sync_sec == v else "") + label,
+                    callback_data=f"set:choose:auto_sync_interval_sec:{v}",
+                )
+            )
+        kb.row(
+            InlineKeyboardButton(
+                text="✏ Свой интервал…", callback_data="set:input:auto_sync_interval"
+            )
+        )
+        kb.row(*_back_row())
+
+    elif section == "drafts":
+        text = (
+            "✍️ <b>Авто-черновики</b>\n\n"
+            "Когда приходит новое сообщение — бот может автоматически предложить черновик ответа "
+            "с кнопками «Отправить / Редактировать / Игнорировать».\n\n"
+            "• <b>Только важные</b> — черновик предлагается только для срочных/важных сообщений "
+            "(классификация по тексту).\n"
+            "• <b>Лимит</b> — макс. черновиков в час, чтобы не спамить.\n\n"
+            f"Статус: <b>{'ВКЛ' if s.draft_suggestions_enabled else 'ВЫКЛ'}</b>\n"
+            f"Только важные: <b>{'ВКЛ' if s.draft_only_important else 'ВЫКЛ'}</b>\n"
+            f"Лимит: <b>{s.draft_max_per_hour} в час</b>"
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{_check(s.draft_suggestions_enabled)} Включить авто-черновики",
+                callback_data="set:tog:draft_suggestions_enabled",
+            )
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{_check(s.draft_only_important)} Только важные",
+                callback_data="set:tog:draft_only_important",
+            )
+        )
+        kb.row(
+            *[
+                InlineKeyboardButton(
+                    text=("• " if s.draft_max_per_hour == m else "") + f"{m}/ч",
+                    callback_data=f"set:choose:draft_max_per_hour:{m}",
+                )
+                for m in (3, 5, 10)
+            ]
+        )
         kb.row(*_back_row())
 
     elif section == "keys":
@@ -491,10 +654,18 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
             f"Mistral: {_check(bool(mistral_key))}"
         )
         kb.row(
-            InlineKeyboardButton(text="🔑 OpenAI key", callback_data="set:input:openai_key"),
-            InlineKeyboardButton(text="🔑 Gemini key", callback_data="set:input:gemini_key"),
+            InlineKeyboardButton(
+                text="🔑 OpenAI key", callback_data="set:input:openai_key"
+            ),
+            InlineKeyboardButton(
+                text="🔑 Gemini key", callback_data="set:input:gemini_key"
+            ),
         )
-        kb.row(InlineKeyboardButton(text="🔑 Mistral key", callback_data="set:input:mistral_key"))
+        kb.row(
+            InlineKeyboardButton(
+                text="🔑 Mistral key", callback_data="set:input:mistral_key"
+            )
+        )
         kb.row(*_back_row())
 
     else:
@@ -505,6 +676,7 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
 
 
 # ---------- FSM-вводы ----------
+
 
 @router.callback_query(F.data == "set:input:openai_key")
 async def cb_input_openai(callback: CallbackQuery, state: FSMContext) -> None:
@@ -536,7 +708,9 @@ async def cb_input_mistral(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == "set:input:digest_time")
 async def cb_input_digest(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_digest_time)
-    await callback.message.answer("Введи время в формате <code>HH:MM</code> (UTC). /cancel — отмена.")
+    await callback.message.answer(
+        "Введи время в формате <code>HH:MM</code> (UTC). /cancel — отмена."
+    )
     await callback.answer()
 
 
@@ -575,7 +749,7 @@ async def cb_noop_news_topics(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("set:tz:"))
 async def cb_pick_tz(callback: CallbackQuery) -> None:
-    tz_value = callback.data[len("set:tz:"):]
+    tz_value = callback.data[len("set:tz:") :]
     if not is_valid_tz(tz_value):
         await callback.answer("Неизвестный TZ", show_alert=True)
         return
@@ -660,7 +834,9 @@ async def step_mistral_key(message: Message, state: FSMContext) -> None:
 async def step_digest_time(message: Message, state: FSMContext) -> None:
     hm = (message.text or "").strip()
     if not HM_RE.match(hm):
-        await message.answer("Формат HH:MM, например <code>06:30</code>. Повтори или /cancel.")
+        await message.answer(
+            "Формат HH:MM, например <code>06:30</code>. Повтори или /cancel."
+        )
         return
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -673,7 +849,9 @@ async def step_digest_time(message: Message, state: FSMContext) -> None:
 async def step_news_time(message: Message, state: FSMContext) -> None:
     hm = (message.text or "").strip()
     if not HM_RE.match(hm):
-        await message.answer("Формат HH:MM, например <code>07:30</code>. Повтори или /cancel.")
+        await message.answer(
+            "Формат HH:MM, например <code>07:30</code>. Повтори или /cancel."
+        )
         return
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -690,7 +868,9 @@ async def step_auto_reply_text(message: Message, state: FSMContext) -> None:
         await message.answer("Пустой текст. Повтори или /cancel.")
         return
     if len(text) > 1000:
-        await message.answer("Слишком длинно (макс. 1000 символов). Повтори или /cancel.")
+        await message.answer(
+            "Слишком длинно (макс. 1000 символов). Повтори или /cancel."
+        )
         return
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)

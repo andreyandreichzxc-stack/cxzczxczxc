@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
@@ -6,6 +7,7 @@ from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
 from src.core.digest import build_digest
+from src.core.smart_digest import build_smart_digest, collect_recent_messages
 from src.core.timeutil import tz_short
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
@@ -49,7 +51,9 @@ async def cmd_digest(message: Message, command: CommandObject) -> None:
     if arg.startswith("at "):
         hm = arg[3:].strip()
         if not HM_RE.match(hm):
-            await message.answer("Формат: <code>/digest at HH:MM</code> (в твоём TZ, напр. <code>06:30</code>)")
+            await message.answer(
+                "Формат: <code>/digest at HH:MM</code> (в твоём TZ, напр. <code>06:30</code>)"
+            )
             return
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
@@ -65,3 +69,15 @@ async def cmd_digest(message: Message, command: CommandObject) -> None:
         "<code>/digest on</code> | <code>off</code>\n"
         "<code>/digest at HH:MM</code> (в твоём часовом поясе)"
     )
+
+
+@router.message(Command("smart_digest"))
+async def cmd_smart_digest(message: Message) -> None:
+    """Ручной запуск smart-дайджеста."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        interval = owner.settings.smart_digest_interval_min
+        messages = await collect_recent_messages(session, owner, since_minutes=interval)
+        text = build_smart_digest(messages, interval)
+        owner.settings.smart_digest_last_sent = datetime.utcnow()
+    await message.answer(text)

@@ -23,3 +23,7 @@ class SettingsStates(StatesGroup):
 
 class NewsTopicStates(StatesGroup):
     waiting_topic = State()
+
+
+class DraftStates(StatesGroup):
+    waiting_edit = State()

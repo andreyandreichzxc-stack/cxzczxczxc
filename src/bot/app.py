@@ -10,6 +10,7 @@ from src.bot.handlers import (
     catchup_cmd,
     chat_cmd,
     digest_cmd,
+    draft_actions,
     free_text,
     login,
     memory_cmd,
@@ -59,6 +60,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(style_cmd.router)
     dp.include_router(memory_cmd.router)
     dp.include_router(news_cmd.router)
+    dp.include_router(draft_actions.router)
     dp.include_router(news_topics.router)
     # ВАЖНО: free_text — самым последним, чтобы команды и FSM перехватили текст раньше
     dp.include_router(free_text.router)

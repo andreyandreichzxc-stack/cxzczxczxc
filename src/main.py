@@ -1,17 +1,31 @@
 import asyncio
 import logging
 
+from src.config import settings
 from src.bot.app import run_bot
 from src.core.auto_sync import auto_sync_loop
 from src.core.digest import digest_scheduler_loop
 from src.core.memory_checker import memory_checker_loop
 from src.core.news import news_scheduler_loop
 from src.core.reminders import reminders_loop
+from src.core.smart_digest import smart_digest_loop
 from src.db.session import init_db
 from src.userbot.manager import UserbotManager
 
 
 logger = logging.getLogger(__name__)
+
+
+async def global_style_scheduler_loop(owner_telegram_id: int) -> None:
+    """Обновляет глобальный стиль-профиль каждые 12 часов."""
+    from src.core.style_profile import update_global_style_profile
+
+    while True:
+        try:
+            await update_global_style_profile(owner_telegram_id)
+        except Exception as e:
+            logger.error("Global style update failed: %s", e)
+        await asyncio.sleep(12 * 3600)  # 12 hours
 
 
 async def main() -> None:
@@ -32,6 +46,12 @@ async def main() -> None:
         asyncio.create_task(news_scheduler_loop(), name="news-scheduler"),
         asyncio.create_task(auto_sync_loop(), name="auto-sync"),
         asyncio.create_task(memory_checker_loop(), name="memory-checker"),
+        asyncio.create_task(
+            global_style_scheduler_loop(settings.owner_telegram_id), name="global-style"
+        ),
+        asyncio.create_task(
+            smart_digest_loop(settings.owner_telegram_id), name="smart-digest"
+        ),
     ]
 
     try:

@@ -1,12 +1,14 @@
 """Авто-ответ оффлайн. Жёсткие правила: только входящие в ЛС от людей (не боты),
 только если включено и владелец действительно оффлайн (или статус скрыт),
 один ответ на контакт раз в COOLDOWN_MINUTES."""
+
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import TelegramClient, events
 from telethon.tl.custom import Message as TgMessage
 from telethon.tl.types import (
@@ -57,18 +59,25 @@ AUTO_REPLY_SYSTEM_BASE = (
 )
 
 
-async def _is_offline(client: TelegramClient) -> bool:
-    # скрытый статус трактуем как оффлайн — это безопасный default
+async def _check_and_track_offline(
+    client: TelegramClient, session: AsyncSession, owner: User
+) -> bool:
     try:
         me = await client.get_me()
         status = getattr(me, "status", None)
         if isinstance(status, UserStatusOnline):
+            owner.last_seen_online = datetime.utcnow()
+            await session.commit()
             return False
         if isinstance(status, UserStatusOffline):
-            return True
+            now = datetime.utcnow()
+            last_seen = owner.last_seen_online
+            if last_seen is None or (now - last_seen) > timedelta(minutes=10):
+                return True
+            return False
         return True
     except Exception:
-        logger.exception("get_me failed in _is_offline")
+        logger.exception("get_me failed in _check_and_track_offline")
         return False
 
 
@@ -101,8 +110,11 @@ async def _build_reply_text(
         memories = await list_memories(session, owner, contact_id=peer_id)
         if memories:
             memory_lines = [f"- {m.fact}" for m in memories[-10:]]  # last 10 only
-            memory_context = "Что ты знаешь о собеседнике из памяти:\n" + "\n".join(memory_lines)
+            memory_context = "Что ты знаешь о собеседнике из памяти:\n" + "\n".join(
+                memory_lines
+            )
         heavy = owner.settings.use_heavy_model
+        global_profile = owner.global_style_profile
 
     if provider is None:
         logger.warning("auto-reply: no LLM provider configured")
@@ -111,19 +123,32 @@ async def _build_reply_text(
     # подгружаем контекст последних сообщений
     from src.userbot.manager import _MANAGER_SINGLETON  # локальный импорт
 
-    client = _MANAGER_SINGLETON.get_client(owner_telegram_id) if _MANAGER_SINGLETON else None
+    client = (
+        _MANAGER_SINGLETON.get_client(owner_telegram_id) if _MANAGER_SINGLETON else None
+    )
     history_text = ""
     if client is not None:
         try:
-            messages = await load_chat(client, owner_telegram_id, peer_id, limit=CONTEXT_LIMIT)
-            history_text = "\n".join(message_to_text(m) for m in messages[-CONTEXT_LIMIT:])
+            messages = await load_chat(
+                client, owner_telegram_id, peer_id, limit=CONTEXT_LIMIT
+            )
+            history_text = "\n".join(
+                message_to_text(m) for m in messages[-CONTEXT_LIMIT:]
+            )
         except Exception:
             logger.exception("auto-reply: load_chat failed")
 
-    style_hint = style_profile_as_prompt_hint(contact.style_profile if contact else None)
+    style_hint = style_profile_as_prompt_hint(
+        contact.style_profile if contact else None,
+        global_profile,
+    )
     system = AUTO_REPLY_SYSTEM_BASE
     if memory_context:
         system = system + "\n\n" + memory_context
+    if owner.absence_status == "away":
+        system += f"\n\nВАЖНО: Владелец сказал перед уходом: «{owner.absence_message}». Учти это в ответе. Он отсутствует."
+    elif owner.absence_status == "soon_back":
+        system += f"\n\nВладелец скоро вернётся: «{owner.absence_message}». Ответь обнадёживающе, он скоро будет."
     if style_hint:
         system = system + "\n" + style_hint
 
@@ -166,11 +191,20 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                     return
                 # игнорируем архив, если опция включена
                 existing = await get_contact(session, owner, sender.id)
-                if owner.settings.ignore_archived and existing is not None and existing.is_archived:
+                if (
+                    owner.settings.ignore_archived
+                    and existing is not None
+                    and existing.is_archived
+                ):
                     return
                 # запомним контакт
-                parts = [getattr(sender, "first_name", None), getattr(sender, "last_name", None)]
-                display = " ".join(p for p in parts if p).strip() or (sender.username or str(sender.id))
+                parts = [
+                    getattr(sender, "first_name", None),
+                    getattr(sender, "last_name", None),
+                ]
+                display = " ".join(p for p in parts if p).strip() or (
+                    sender.username or str(sender.id)
+                )
                 await upsert_contact(
                     session,
                     owner,
@@ -182,8 +216,8 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                     phone=getattr(sender, "phone", None),
                 )
 
-            if not await _is_offline(client):
-                return
+                if not await _check_and_track_offline(client, session, owner):
+                    return
             if await _recently_replied(owner.id, sender.id):
                 return
 

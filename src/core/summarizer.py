@@ -36,6 +36,7 @@ async def summarize_chat(
     messages: list[Message],
     *,
     heavy: bool = False,
+    global_style: str | None = None,
 ) -> str:
     transcript = "\n".join(message_to_text(m) for m in messages)
     user_prompt = (
@@ -59,16 +60,21 @@ async def draft_reply(
     *,
     instruction: str | None = None,
     heavy: bool = False,
+    global_style: str | None = None,
 ) -> str:
     transcript = "\n".join(message_to_text(m) for m in messages)
-    style_hint = style_profile_as_prompt_hint(contact.style_profile)
+    style_hint = style_profile_as_prompt_hint(contact.style_profile, global_style)
     system = DRAFT_SYSTEM
     if style_hint:
         system = system + "\n" + style_hint
     user_prompt = (
         f"Собеседник: {contact.display_name}\n\n"
         f"Контекст переписки:\n{transcript}\n\n"
-        + (f"Инструкция: {instruction}" if instruction else "Напиши уместный ответ на последнее сообщение.")
+        + (
+            f"Инструкция: {instruction}"
+            if instruction
+            else "Напиши уместный ответ на последнее сообщение."
+        )
     )
     raw = await provider.chat(
         [
@@ -86,9 +92,10 @@ async def catchup(
     messages: list[Message],
     *,
     heavy: bool = False,
+    global_style: str | None = None,
 ) -> str:
     transcript = "\n".join(message_to_text(m) for m in messages)
-    style_hint = style_profile_as_prompt_hint(contact.style_profile)
+    style_hint = style_profile_as_prompt_hint(contact.style_profile, global_style)
     system = CATCHUP_SYSTEM
     if style_hint:
         system = system + "\n" + style_hint
