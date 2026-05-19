@@ -219,7 +219,7 @@ async def _execute_intent(
         if not recipient or not text:
             await message.answer("Не хватает кому/что отправить. Уточни.")
             return
-        candidates = await resolve(client, owner, recipient)
+        candidates = await resolve_with_llm(client, owner, recipient, provider)
         if not candidates:
             await message.answer(f"Не нашёл контакт «{recipient}». Попробуй /sync.")
             return
