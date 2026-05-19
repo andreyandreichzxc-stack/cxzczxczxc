@@ -64,7 +64,7 @@ def _parse_json_array(text: str) -> list[dict]:
     try:
         parsed = json.loads(text)
         return parsed if isinstance(parsed, list) else []
-    except Exception:
+    except (json.JSONDecodeError, ValueError, AttributeError, KeyError):
         logger.warning("Memories JSON parse failed: %r", text[:120])
         return []
 
@@ -110,7 +110,7 @@ async def extract_and_save_memories(
             ],
             heavy=False,
         )
-    except Exception:
+    except (ConnectionError, OSError, ValueError):
         logger.exception("Memory extraction LLM call failed")
         return 0
 

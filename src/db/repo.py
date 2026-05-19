@@ -617,6 +617,9 @@ async def add_memory(
     decay_rate: float | None = None,
     memory_tier: int = 1,
     memory_type: str | None = None,
+    pinned: bool = False,
+    expires_at: datetime | None = None,
+    use_count: int = 0,
 ) -> Memory | None:
     """
     Добавляет факт в память с дедупликацией.
@@ -729,6 +732,9 @@ async def add_memory(
         decay_rate=decay_rate if decay_rate is not None else 0.07,
         memory_tier=memory_tier,
         memory_type=memory_type,
+        pinned=pinned,
+        expires_at=expires_at,
+        use_count=use_count,
     )
     session.add(mem)
     await session.flush()

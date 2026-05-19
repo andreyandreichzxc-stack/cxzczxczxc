@@ -106,6 +106,10 @@ async def main() -> None:
                 pass
         await stop_worker()
 
+        from src.core.vector_store import vector_store
+
+        await vector_store.shutdown()
+
 
 def run() -> None:
     try:

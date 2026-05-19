@@ -178,6 +178,6 @@ async def temporal_migration_loop(owner_id: int) -> None:
     while True:
         try:
             await update_temporal_layers(owner_id)
-        except Exception as e:
+        except (ValueError, AttributeError, LookupError, OSError) as e:
             logger.error("Temporal migration error: %s", e)
         await asyncio.sleep(3600)

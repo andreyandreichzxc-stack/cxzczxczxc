@@ -47,7 +47,7 @@ async def _worker() -> None:
             _queue.task_done()
         except asyncio.CancelledError:
             break
-        except Exception:
+        except (ValueError, AttributeError, KeyError, ImportError, OSError):
             logger.exception("Memory queue worker error")
 
 
@@ -173,7 +173,7 @@ async def _handle_tag(session, owner, job: MemoryJob) -> None:
         if not mem.tags:
             try:
                 await tag_new_fact(provider, session, mem.id)
-            except Exception:
+            except (ValueError, AttributeError, ConnectionError, OSError):
                 logger.exception("Tagging failed for memory %d", mem.id)
     await session.commit()
     logger.debug("Background tagging done for user %d", job.telegram_id)

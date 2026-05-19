@@ -294,5 +294,13 @@ class VectorStore:
             for p in raw
         ]
 
+    async def shutdown(self) -> None:
+        """Graceful shutdown — закрывает Qdrant клиент."""
+        try:
+            if self._client:
+                self._client.close()
+        except Exception:
+            pass
+
 
 vector_store = VectorStore()

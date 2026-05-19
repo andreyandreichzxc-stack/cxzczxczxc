@@ -163,7 +163,7 @@ async def recall(
                                     )
                                 )
                                 seen_ids.add(m.id)
-            except Exception:
+            except (ImportError, ValueError, ConnectionError, OSError):
                 logger.debug("Semantic recall failed, skipping", exc_info=True)
 
         # --- 4. Fresh (7 days, high confidence) ---

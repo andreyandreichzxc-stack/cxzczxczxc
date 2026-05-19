@@ -94,6 +94,21 @@ async def init_db() -> None:
         for stmt in _MEMORY_FTS_SETUP:
             await conn.execute(text(stmt))
 
+        # Миграция: user-колонки (last_seen_online и др.)
+        for col, col_def in [
+            ("last_seen_online", "TIMESTAMP"),
+            ("absence_status", "VARCHAR(16)"),
+            ("absence_message", "TEXT"),
+            ("global_style_profile", "TEXT"),
+            ("global_style_updated_at", "TIMESTAMP"),
+        ]:
+            try:
+                await conn.execute(
+                    text(f"ALTER TABLE users ADD COLUMN {col} {col_def}")
+                )
+            except Exception:
+                pass
+
         # Миграция: добавляем колонки adaptive scoring если их нет
         for col, col_def in [
             ("memory_type", "VARCHAR(24)"),
