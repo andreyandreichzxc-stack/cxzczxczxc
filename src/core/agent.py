@@ -68,7 +68,9 @@ AGENT_SYSTEM = """\
       - "llm_provider"              : "openai" | "gemini" | "mistral"
       - "transcription_mode"        : "local" | "api" | "hybrid"
       - "transcription_api_provider": "openai" | "gemini" | "mistral"
-     - "timezone"                  : IANA (Europe/Moscow и т.п.)
+      - "auto_sync_enabled"          : true/false
+      - "auto_sync_interval_min"     : int (минут, 60–1440)
+      - "timezone"                  : IANA (Europe/Moscow и т.п.)
    Используй для фраз: «включи Х», «выключи Х», «дайджест в 7 утра», «часовой пояс Лондон»,
    «новости в 9», «не показывай архив», «переключись на gemini», «текст автоответа: …» и т.п.
    Если просят «новости в 9», ставь news_digest_time = "09:00" И ОТДЕЛЬНО news_enabled=true

@@ -9,19 +9,37 @@ from html.parser import HTMLParser
 _KEEP_TAGS = {"b", "strong", "i", "em", "u", "s", "strike", "code", "pre",
               "a", "tg-spoiler", "blockquote"}
 _NORMALIZE = {"strong": "b", "em": "i", "strike": "s"}
-_BLOCK_TO_NEWLINE = {"br", "p", "div", "li"}
+_BLOCK_TO_NEWLINE = {"br", "p", "div", "ul", "ol", "section", "article"}
+_LIST_ITEM = {"li"}
 
 
 class _Cleaner(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=False)
         self.parts: list[str] = []
+        self._in_ol = False
+        self._li_index = 0
 
     def handle_starttag(self, tag: str, attrs):
         tag = tag.lower()
-        if tag in _BLOCK_TO_NEWLINE:
+        if tag == "ol":
+            self._in_ol = True
+            self._li_index = 0
             if self.parts and not self.parts[-1].endswith("\n"):
                 self.parts.append("\n")
+            return
+        if tag in _BLOCK_TO_NEWLINE:
+            if tag == "ul" and not self._in_ol:
+                pass
+            if self.parts and not self.parts[-1].endswith("\n"):
+                self.parts.append("\n")
+            return
+        if tag in _LIST_ITEM:
+            self._li_index += 1
+            prefix = f"{self._li_index}. " if self._in_ol else "• "
+            if self.parts and not self.parts[-1].endswith("\n"):
+                self.parts.append("\n")
+            self.parts.append(prefix)
             return
         if tag not in _KEEP_TAGS:
             return
@@ -42,7 +60,12 @@ class _Cleaner(HTMLParser):
 
     def handle_endtag(self, tag: str):
         tag = tag.lower()
-        if tag in _BLOCK_TO_NEWLINE:
+        if tag == "ol":
+            self._in_ol = False
+            if self.parts and not self.parts[-1].endswith("\n"):
+                self.parts.append("\n")
+            return
+        if tag in _BLOCK_TO_NEWLINE | _LIST_ITEM:
             return
         if tag not in _KEEP_TAGS:
             return

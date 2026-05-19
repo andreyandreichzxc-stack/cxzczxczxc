@@ -45,6 +45,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         "⚙ <b>Настройки</b>\n\n"
         f"🌍 Часовой пояс: <b>{tz_short(s.timezone)}</b>\n"
         f"🔄 Авто-ответ: {_check(s.auto_reply_enabled)} (кулдаун {s.auto_reply_cooldown_min}м)\n"
+        f"🔄 Авто-синк: {_check(getattr(s, 'auto_sync_enabled', True))} (каждые {getattr(s, 'auto_sync_interval_min', 120)}м)\n"
         f"☀ Дайджест: {_check(s.digest_enabled)} ({s.digest_time})\n"
         f"⏰ Напоминания: {_check(s.reminders_enabled)} (за {s.reminder_lead_hours}ч; просрочки {_check(s.reminder_overdue_enabled)})\n"
         f"📰 Новости: {_check(s.news_enabled)} (окно {s.news_window_hours}ч)\n"
@@ -64,8 +65,8 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         InlineKeyboardButton(text="⏰ Напоминания", callback_data="set:sec:reminders"),
     )
     kb.row(
-        InlineKeyboardButton(text="📰 Новости", callback_data="set:sec:news"),
         InlineKeyboardButton(text="🛡 Приватность", callback_data="set:sec:privacy"),
+        InlineKeyboardButton(text="🔄 Синхронизация", callback_data="set:sec:sync"),
     )
     kb.row(
         InlineKeyboardButton(text="🤖 LLM", callback_data="set:sec:llm"),
@@ -117,6 +118,7 @@ BOOL_KEYS = {
     "reminder_overdue_enabled",
     "news_enabled",
     "use_heavy_model",
+    "auto_sync_enabled",
 }
 
 CHOICE_KEYS = {
@@ -130,6 +132,7 @@ NUMERIC_KEYS = {
     "auto_reply_cooldown_min",
     "reminder_lead_hours",
     "news_window_hours",
+    "auto_sync_interval_min",
 }
 
 
@@ -435,6 +438,28 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
             text=f"{_check(s.ignore_archived)} Игнорировать архив",
             callback_data="set:tog:ignore_archived",
         ))
+        kb.row(*_back_row())
+
+    elif section == "sync":
+        sync_enabled = getattr(s, "auto_sync_enabled", True)
+        sync_interval = getattr(s, "auto_sync_interval_min", 120)
+        text = (
+            "🔄 <b>Авто-синхронизация</b>\n\n"
+            "Раз в указанный интервал бот обновляет список контактов и архивный статус. "
+            "Нужно для случаев, когда mirror-хендлер мог пропустить изменения.\n\n"
+            f"Статус: <b>{'ВКЛ' if sync_enabled else 'ВЫКЛ'}</b>\n"
+            f"Интервал: <b>{sync_interval} мин</b>"
+        )
+        kb.row(InlineKeyboardButton(
+            text=f"{_check(sync_enabled)} Включить авто-синк",
+            callback_data="set:tog:auto_sync_enabled",
+        ))
+        kb.row(*[
+            InlineKeyboardButton(
+                text=("• " if sync_interval == m else "") + f"{m}м",
+                callback_data=f"set:choose:auto_sync_interval_min:{m}",
+            ) for m in (60, 120, 360, 720, 1440)
+        ])
         kb.row(*_back_row())
 
     elif section == "keys":

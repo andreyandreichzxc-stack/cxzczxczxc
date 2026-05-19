@@ -66,6 +66,8 @@ SETTING_FIELDS: dict[str, str] = {
     "llm_provider":               "choice:openai,gemini,mistral",
     "transcription_mode":         "choice:local,api,hybrid",
     "transcription_api_provider": "choice:openai,gemini,mistral",
+    "auto_sync_enabled":          "bool",
+    "auto_sync_interval_min":      "int",
     "timezone":                   "tz",
 }
 
