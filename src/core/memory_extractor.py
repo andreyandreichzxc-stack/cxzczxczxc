@@ -1,17 +1,14 @@
-"""LLM-извлечение фактов-воспоминаний о контакте из переписки."""
+"""LLM-извлечение фактов-воспоминаний о контакте из переписки.
 
-import asyncio
+После извлечения факты ставятся в очередь на фоновое сохранение (memory_queue),
+чтобы не блокировать основной поток обработки сообщений.
+"""
+
 import json
 import logging
 
-from sqlalchemy import select
-
 from src.core.chat_service import message_to_text
-from src.core.memory_tagger import tag_new_fact
-from src.core.vector_store import vector_store
-from src.db.models import Contact, Memory, Message, User
-from src.db.repo import add_memory, link_memories
-from src.db.session import get_session
+from src.db.models import Contact, Message
 from src.llm.base import ChatMessage, LLMProvider
 
 
@@ -68,13 +65,29 @@ async def extract_and_save_memories(
     provider: LLMProvider,
     user_id: int,
     contact: Contact | None,
-    messages: list[Message],
-) -> list[Memory]:
-    """Извлекает факты о контакте из переписки и сохраняет в БД (fire-and-forget)."""
-    if not messages or contact is None:
-        return []
+    messages: list[Message] | None = None,
+    transcript: str | None = None,
+) -> int:
+    """Извлекает факты о контакте из переписки и ставит в очередь на сохранение.
 
-    transcript = "\n".join(message_to_text(m) for m in messages)
+    Аргументы:
+        provider — LLM-провайдер для извлечения фактов.
+        user_id — User.id (внутренний ID БД).
+        contact — объект Contact (нужен для display_name в промпте).
+        messages — список сообщений для построения транскрипта.
+        transcript — готовая текстовая расшифровка переписки (альтернатива messages).
+
+    Возвращает количество найденных фактов.
+    """
+    if contact is None:
+        return 0
+
+    # Строим транскрипт из сообщений, если не передан готовый
+    if transcript is None and messages:
+        transcript = "\n".join(message_to_text(m) for m in messages)
+    if not transcript:
+        return 0
+
     user_prompt = (
         f"Собеседник: {contact.display_name}.\n"
         "Извлеки важные факты о собеседнике из этой переписки:\n\n"
@@ -91,138 +104,80 @@ async def extract_and_save_memories(
         )
     except Exception:
         logger.exception("Memory extraction LLM call failed")
-        return []
+        return 0
 
     items = _parse_json_array(raw)
     if not items:
-        return []
+        return 0
 
-    saved: list[Memory | None] = []
-    async with get_session() as session:
-        # Подтягиваем User по telegram_id
-        result = await session.execute(select(User).where(User.id == user_id))
-        user = result.scalar_one_or_none()
-        if user is None:
-            logger.warning("Memory extraction: user %s not found", user_id)
-            return []
+    # --- Собираем валидные факты (пропускаем не-словари и пустые факты) ---
+    valid_facts: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        fact = (item.get("fact") or "").strip()
+        if not fact:
+            continue
 
-        if not isinstance(items, list):
-            logger.warning("LLM returned non-list for memory extraction: %s", items)
-            return [m for m in saved if m is not None]
+        sentiment = item.get("sentiment")
+        if sentiment not in {"positive", "negative", "neutral"}:
+            sentiment = None
 
-        # --- Собираем валидные факты (пропускаем не-словари и пустые факты) ---
-        valid_facts: list[
-            tuple[int, dict, str, str | None, float | None, float | None]
-        ] = []
-        for i, item in enumerate(items):
-            if not isinstance(item, dict):
-                continue
-            fact = (item.get("fact") or "").strip()
-            if not fact:
-                continue
+        # importance 1-10 → 0.0-1.0
+        raw_importance = item.get("importance")
+        if isinstance(raw_importance, (int, float)):
+            importance = max(0.0, min(1.0, raw_importance / 10.0))
+        else:
+            importance = None
 
-            sentiment = item.get("sentiment")
-            if sentiment not in {"positive", "negative", "neutral"}:
-                sentiment = None
+        # decay_rate из LLM (0.01-0.30)
+        decay_rate = item.get("decay_rate")
+        if not isinstance(decay_rate, (int, float)):
+            decay_rate = None
 
-            # importance 1-10 → 0.0-1.0
-            raw_importance = item.get("importance")
-            if isinstance(raw_importance, (int, float)):
-                importance = max(0.0, min(1.0, raw_importance / 10.0))
-            else:
-                importance = None
-
-            # decay_rate из LLM (0.01-0.30)
-            decay_rate = item.get("decay_rate")
-            if not isinstance(decay_rate, (int, float)):
-                decay_rate = None
-
-            valid_facts.append((i, item, fact, sentiment, importance, decay_rate))
-
-        if not valid_facts:
-            return []
-
-        # --- Batch embedding — один API-вызов вместо N ---
-        texts = [vf[2] for vf in valid_facts]
-        embeddings: list[list[float] | None]
-        try:
-            raw = await provider.embed_batch(texts)
-            embeddings = raw  # type: ignore[assignment]
-        except Exception:
-            logger.warning(
-                "Failed to embed batch of %d facts, skipping vector dedup", len(texts)
-            )
-            embeddings = [None] * len(texts)
-
-        # --- Параллельное сохранение через asyncio.gather ---
-        save_tasks = [
-            add_memory(
-                session,
-                user,
-                fact=vf[2],
-                contact_id=contact.peer_id if contact else None,
-                sentiment=vf[3],
-                source="chat",
-                message_id=None,
-                embedding=embeddings[idx] if idx < len(embeddings) else None,
-                vector_store_obj=(
-                    vector_store if embeddings[idx] is not None else None
-                ),
-                importance=vf[4],
-                decay_rate=vf[5],
-                deduplicate=(idx == 0),  # дедупликация только для первого факта
-            )
-            for idx, vf in enumerate(valid_facts)
-        ]
-        save_results = await asyncio.gather(*save_tasks, return_exceptions=True)
-
-        # --- Разбираем результаты и тегируем ---
-        saved: list[Memory | None] = []
-        tag_tasks: list[asyncio.Task] = []
-        for result in save_results:
-            if not isinstance(result, BaseException) and result is not None:
-                saved.append(result)
-                tag_tasks.append(
-                    asyncio.ensure_future(tag_new_fact(provider, session, result.id))
-                )
-            else:
-                if isinstance(result, BaseException):
-                    logger.warning("Failed to save memory: %s", result)
-                saved.append(None)
-        if tag_tasks:
-            await asyncio.gather(*tag_tasks, return_exceptions=True)
-
-        # Второй проход: установка связей между фактами
-        for i, item in enumerate(items):
-            if not isinstance(item, dict):
-                continue
-            rel_type = (item.get("relation_type") or "").strip()
-            rel_idx = item.get("relation_to_index")
-            if rel_type and isinstance(rel_idx, int) and 0 <= rel_idx < len(saved):
-                mem = saved[i]
-                target = saved[rel_idx]
-                if (
-                    mem is not None
-                    and target is not None
-                    and hasattr(mem, "id")
-                    and hasattr(target, "id")
-                ):
-                    weight = 0.9 if rel_type in ("cause", "effect") else 0.7
-                    await link_memories(
-                        session,
-                        user,
-                        mem.id,
-                        target.id,
-                        weight=weight,
-                        relation_type=rel_type,
-                    )
-
-    valid = [m for m in saved if m is not None]
-    if valid:
-        logger.info(
-            "Saved %d memories for user %d, contact %s",
-            len(valid),
-            user_id,
-            contact.display_name,
+        valid_facts.append(
+            {
+                "fact": fact,
+                "sentiment": sentiment,
+                "source": "chat",
+                "importance": importance,
+                "decay_rate": decay_rate,
+            }
         )
-    return valid
+
+    if not valid_facts:
+        return 0
+
+    # --- Batch embedding — один API-вызов вместо N ---
+    texts = [vf["fact"] for vf in valid_facts]
+    try:
+        embeddings = await provider.embed_batch(texts)
+    except Exception:
+        logger.warning("Failed to embed batch of %d facts", len(texts))
+        embeddings = [None] * len(texts)
+
+    # Прикрепляем эмбеддинги к фактам
+    for idx, vf in enumerate(valid_facts):
+        if idx < len(embeddings) and embeddings[idx] is not None:
+            vf["embedding"] = embeddings[idx]
+
+    # --- Ставим в очередь на фоновое сохранение ---
+    # (lazy import — избегаем циклической зависимости на уровне модулей)
+    from src.core.memory_queue import enqueue, MemoryJob
+
+    await enqueue(
+        MemoryJob(
+            owner_id=user_id,
+            contact_id=contact.peer_id if contact else None,
+            facts=valid_facts,
+            job_type="save",
+        )
+    )
+
+    logger.info(
+        "Extracted %d facts for user %d, contact %s (enqueued for save)",
+        len(valid_facts),
+        user_id,
+        contact.display_name,
+    )
+    return len(valid_facts)

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 async def get_fuel_stats(owner_id: int) -> dict:
     """
-    Возвращает статистику «топлива» памяти.
+    Возвращает статистику «топлива» памяти (кэшируется на 5 минут).
 
     Возвращает словарь:
         total_contacts  — общее количество контактов (user, не боты)
@@ -20,6 +20,13 @@ async def get_fuel_stats(owner_id: int) -> dict:
         critical        — критически истощённые
         depleted_contacts — список истощённых контактов с деталями
     """
+    from src.core.stats_cache import get_cached, set_cache
+
+    cache_key = f"fuel:{owner_id}"
+    cached = await get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
         contacts = await list_contacts(
@@ -68,13 +75,15 @@ async def get_fuel_stats(owner_id: int) -> dict:
             else:
                 fueled_count += 1
 
-    return {
+    result = {
         "total_contacts": len(contacts),
         "fueled": fueled_count,
         "depleted": len(depleted_contacts),
         "critical": critical_count,
         "depleted_contacts": depleted_contacts,
     }
+    await set_cache(cache_key, result)
+    return result
 
 
 def format_fuel_line(stats: dict) -> str:

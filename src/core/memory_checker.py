@@ -98,4 +98,7 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
                 f"Обработано: {total_processed} активных фактов."
             )
 
+    from src.core.stats_cache import invalidate
+
+    await invalidate("mem_")
     return decayed_count, closed_count

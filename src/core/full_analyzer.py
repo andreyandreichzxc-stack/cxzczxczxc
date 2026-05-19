@@ -151,13 +151,12 @@ async def run_full_analysis(
 
             # Извлечь память (extract_and_save_memories открывает свою сессию)
             try:
-                saved = await extract_and_save_memories(
+                mem_count = await extract_and_save_memories(
                     provider,
                     owner_id,
                     contact,
                     messages,
                 )
-                mem_count = len(saved)
                 result.memories_found += mem_count
                 if mem_count > 0:
                     result.details.append(

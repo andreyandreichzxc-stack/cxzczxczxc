@@ -340,6 +340,10 @@ class Memory(Base):
     """Факты о владельце и контактах, извлекаемые из переписок и разговоров с ботом."""
 
     __tablename__ = "memories"
+    __table_args__ = (
+        Index("ix_mem_active_contact", "is_active", "contact_id"),
+        Index("ix_mem_user_active", "user_id", "is_active"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
@@ -350,7 +354,7 @@ class Memory(Base):
     )
     fact: Mapped[str] = mapped_column(Text)
     sentiment: Mapped[str | None] = mapped_column(
-        String(16), nullable=True
+        String(16), nullable=True, index=True
     )  # positive, negative, neutral
     source: Mapped[str] = mapped_column(String(16), default="chat")  # chat, user, auto
     confidence: Mapped[float] = mapped_column(
@@ -363,7 +367,7 @@ class Memory(Base):
         BigInteger, nullable=True
     )  # исходное сообщение
     is_active: Mapped[bool] = mapped_column(
-        Boolean, default=True
+        Boolean, default=True, index=True
     )  # активен / опровергнут
     cluster_topic: Mapped[str | None] = mapped_column(
         String(128), nullable=True
@@ -372,7 +376,7 @@ class Memory(Base):
         String(16), nullable=True, index=True
     )  # хеш для дедупликации
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime, default=lambda: datetime.now(timezone.utc), index=True
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -388,7 +392,9 @@ class Memory(Base):
     memory_tier: Mapped[int] = mapped_column(
         Integer, default=1
     )  # 1=эпизод, 2=недельное, 3=месячное
-    temporal_layer: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    temporal_layer: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, index=True
+    )
     # null | "recent" (≤7d) | "medium" (8-30d) | "longterm" (>30d)
 
     tags: Mapped[str | None] = mapped_column(
@@ -407,6 +413,10 @@ class MemoryLink(Base):
     """Many-to-many связи между фактами памяти с весами."""
 
     __tablename__ = "memory_links"
+    __table_args__ = (
+        Index("ix_ml_source", "source_id"),
+        Index("ix_ml_target", "target_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(

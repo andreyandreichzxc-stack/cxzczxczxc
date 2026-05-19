@@ -7,6 +7,7 @@ from src.core.auto_sync import auto_sync_loop
 from src.core.digest import digest_scheduler_loop
 from src.core.follow_up import follow_up_loop
 from src.core.memory_checker import memory_decay_loop
+from src.core.memory_queue import start_worker, stop_worker
 from src.core.temporal_layers import temporal_migration_loop
 from src.core.memory_patterns import patterns_loop
 from src.core.news import news_scheduler_loop
@@ -44,6 +45,8 @@ async def main() -> None:
     logger.info("Starting TelegramAssistant")
 
     await init_db()
+
+    start_worker()
 
     userbot_manager = UserbotManager()
     await userbot_manager.restore_all()
@@ -101,6 +104,7 @@ async def main() -> None:
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
+        await stop_worker()
 
 
 def run() -> None:

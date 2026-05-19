@@ -10,9 +10,16 @@ logger = logging.getLogger(__name__)
 
 async def calculate_health_score(owner_id: int) -> dict:
     """
-    Вычисляет балл здоровья памяти и компоненты.
+    Вычисляет балл здоровья памяти и компоненты (кэшируется на 5 минут).
     Возвращает {score, confidence_score, coverage_score, freshness_score, distillation_score, diagnostics}
     """
+    from src.core.stats_cache import get_cached, set_cache
+
+    cache_key = f"health:{owner_id}"
+    cached = await get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
         memories = await list_memories(session, owner)
@@ -129,7 +136,7 @@ async def calculate_health_score(owner_id: int) -> dict:
             emoji = "🔴"
             label = "Плохо"
 
-        return {
+        result = {
             "score": round(composite, 1),
             "level": level,
             "emoji": emoji,
@@ -144,6 +151,8 @@ async def calculate_health_score(owner_id: int) -> dict:
             "contacts_with_facts": len(contacts_with_facts),
             "diagnostics": diagnostics,
         }
+        await set_cache(cache_key, result)
+        return result
 
 
 def format_health(health: dict) -> str:

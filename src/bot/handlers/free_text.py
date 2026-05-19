@@ -1125,24 +1125,28 @@ async def _exec_extract_memories(intent, message, userbot_manager) -> None:
         return
 
     peer_id = candidates[0].peer_id
-    await message.answer("🧠 Извлекаю факты из переписки…")
 
-    from src.core.chat_service import load_chat
-    from src.core.memory_extractor import extract_and_save_memories
-    from src.llm.router import build_provider
+    from src.core.chat_service import load_chat, message_to_text
+    from src.core.memory_queue import enqueue, MemoryJob
 
+    # Загружаем сообщения и строим транскрипт
     messages = await load_chat(client, message.from_user.id, peer_id, limit=100)
+    transcript = "\n".join(message_to_text(m) for m in messages)
+
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        provider = await build_provider(session, owner)
         contact = await get_contact(session, owner, peer_id)
 
-    if provider is None:
-        await message.answer("Не задан LLM-ключ.")
-        return
-
-    count = await extract_and_save_memories(provider, owner.id, contact, messages)
-    await message.answer(f"✅ Извлечено фактов: {count}")
+    # Ставим задачу в очередь на фоновое извлечение
+    await enqueue(
+        MemoryJob(
+            owner_id=owner.id,
+            contact_id=contact.peer_id if contact else None,
+            messages_text=transcript,
+            job_type="extract",
+        )
+    )
+    await message.answer("🧠 Извлекаю факты в фоне…")
 
 
 async def _exec_change_auto_mode(intent, message) -> None:

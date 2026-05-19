@@ -611,6 +611,8 @@ async def add_memory(
     всегда создаётся новая запись.
     Если embedding передан, индексирует факт в Qdrant для будущих проверок.
     """
+    from src.core.stats_cache import invalidate
+
     fact = fact.strip()
     if len(fact) < 3:
         return None
@@ -643,6 +645,7 @@ async def add_memory(
             if sentiment and existing.sentiment != sentiment:
                 existing.sentiment = "contradictory"  # маркируем противоречие
             await session.flush()
+            await invalidate("mem_")
             return existing
 
         # --- Уровень 2: семантическая дедупликация через Qdrant ---
@@ -683,6 +686,7 @@ async def add_memory(
                         if sentiment and existing.sentiment != sentiment:
                             existing.sentiment = "contradictory"
                         await session.flush()
+                        await invalidate("mem_")
                         return existing
 
     mem = Memory(
@@ -717,6 +721,7 @@ async def add_memory(
         except Exception:
             logger.exception("Failed to index memory embedding in Qdrant")
 
+    await invalidate("mem_")
     return mem
 
 
@@ -738,10 +743,13 @@ async def list_memories(
 
 
 async def delete_memory(session: AsyncSession, user: User, memory_id: int) -> bool:
+    from src.core.stats_cache import invalidate
+
     m = await session.get(Memory, memory_id)
     if m is None or m.user_id != user.id:
         return False
     await session.delete(m)
+    await invalidate("mem_")
     return True
 
 
@@ -889,7 +897,14 @@ async def find_similar_memories(
 
 
 async def get_memory_stats(session: AsyncSession, user: User) -> dict:
-    """Статистика по памяти."""
+    """Статистика по памяти (кэшируется на 5 минут)."""
+    from src.core.stats_cache import get_cached, set_cache
+
+    cache_key = f"mem_stats:{user.id}"
+    cached = await get_cached(cache_key)
+    if cached is not None:
+        return cached
+
     result = await session.execute(
         select(Memory).where(Memory.user_id == user.id, Memory.is_active == True)
     )
@@ -905,7 +920,7 @@ async def get_memory_stats(session: AsyncSession, user: User) -> dict:
     for m in memories:
         key = f"tier_{m.memory_tier}"
         by_tier[key] = by_tier.get(key, 0) + 1
-    return {
+    stats = {
         "total": len(memories),
         "by_sentiment": by_sentiment,
         "by_source": by_source,
@@ -913,6 +928,8 @@ async def get_memory_stats(session: AsyncSession, user: User) -> dict:
         "high_confidence": sum(1 for m in memories if m.confidence >= 0.8),
         "with_contact": sum(1 for m in memories if m.contact_id is not None),
     }
+    await set_cache(cache_key, stats)
+    return stats
 
 
 async def upsert_memory_cluster(
