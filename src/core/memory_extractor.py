@@ -1,5 +1,6 @@
 """LLM-извлечение фактов-воспоминаний о контакте из переписки."""
 
+import asyncio
 import json
 import logging
 
@@ -109,13 +110,17 @@ async def extract_and_save_memories(
             logger.warning("LLM returned non-list for memory extraction: %s", items)
             return [m for m in saved if m is not None]
 
-        # Первый проход: сохранение фактов
-        for item in items:
+        # --- Собираем валидные факты (пропускаем не-словари и пустые факты) ---
+        valid_facts: list[
+            tuple[int, dict, str, str | None, float | None, float | None]
+        ] = []
+        for i, item in enumerate(items):
             if not isinstance(item, dict):
-                continue  # пропустить строки/не-словари
+                continue
             fact = (item.get("fact") or "").strip()
             if not fact:
                 continue
+
             sentiment = item.get("sentiment")
             if sentiment not in {"positive", "negative", "neutral"}:
                 sentiment = None
@@ -132,31 +137,60 @@ async def extract_and_save_memories(
             if not isinstance(decay_rate, (int, float)):
                 decay_rate = None
 
-            # Вычисляем эмбеддинг для семантической дедупликации
-            embedding = None
-            try:
-                embedding = await provider.embed(fact)
-            except Exception:
-                logger.warning(
-                    "Failed to embed fact, skipping vector dedup: %r", fact[:60]
-                )
+            valid_facts.append((i, item, fact, sentiment, importance, decay_rate))
 
-            mem = await add_memory(
+        if not valid_facts:
+            return []
+
+        # --- Batch embedding — один API-вызов вместо N ---
+        texts = [vf[2] for vf in valid_facts]
+        embeddings: list[list[float] | None]
+        try:
+            raw = await provider.embed_batch(texts)
+            embeddings = raw  # type: ignore[assignment]
+        except Exception:
+            logger.warning(
+                "Failed to embed batch of %d facts, skipping vector dedup", len(texts)
+            )
+            embeddings = [None] * len(texts)
+
+        # --- Параллельное сохранение через asyncio.gather ---
+        save_tasks = [
+            add_memory(
                 session,
                 user,
-                fact=fact,
+                fact=vf[2],
                 contact_id=contact.peer_id if contact else None,
-                sentiment=sentiment,
+                sentiment=vf[3],
                 source="chat",
                 message_id=None,
-                embedding=embedding,
-                vector_store_obj=vector_store if embedding else None,
-                importance=importance,
-                decay_rate=decay_rate,
+                embedding=embeddings[idx] if idx < len(embeddings) else None,
+                vector_store_obj=(
+                    vector_store if embeddings[idx] is not None else None
+                ),
+                importance=vf[4],
+                decay_rate=vf[5],
+                deduplicate=(idx == 0),  # дедупликация только для первого факта
             )
-            if mem is not None:
-                await tag_new_fact(provider, session, mem.id)
-            saved.append(mem)
+            for idx, vf in enumerate(valid_facts)
+        ]
+        save_results = await asyncio.gather(*save_tasks, return_exceptions=True)
+
+        # --- Разбираем результаты и тегируем ---
+        saved: list[Memory | None] = []
+        tag_tasks: list[asyncio.Task] = []
+        for result in save_results:
+            if not isinstance(result, BaseException) and result is not None:
+                saved.append(result)
+                tag_tasks.append(
+                    asyncio.ensure_future(tag_new_fact(provider, session, result.id))
+                )
+            else:
+                if isinstance(result, BaseException):
+                    logger.warning("Failed to save memory: %s", result)
+                saved.append(None)
+        if tag_tasks:
+            await asyncio.gather(*tag_tasks, return_exceptions=True)
 
         # Второй проход: установка связей между фактами
         for i, item in enumerate(items):

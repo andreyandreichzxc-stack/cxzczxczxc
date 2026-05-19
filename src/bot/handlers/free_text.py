@@ -7,7 +7,12 @@ from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
@@ -540,6 +545,19 @@ async def _exec_remove_news_topic(intent, message) -> None:
     await message.answer(f"🗑 Удалил: {names}")
 
 
+def memory_quick_keyboard() -> InlineKeyboardMarkup:
+    """Inline-кнопки быстрых действий с памятью."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🧠 Что помню", callback_data="memq:list"),
+                InlineKeyboardButton(text="➕ Запомни", callback_data="memq:add"),
+                InlineKeyboardButton(text="❌ Забудь", callback_data="memq:forget"),
+            ]
+        ]
+    )
+
+
 async def _process_text(
     raw: str,
     message: Message,
@@ -593,7 +611,10 @@ async def _process_text(
                 logger.debug("Maestro agents: %s", used)
             if errors:
                 logger.debug("Maestro agent errors: %s", errors)
-            await message.answer(response_text)
+            await message.answer(
+                response_text,
+                reply_markup=memory_quick_keyboard(),
+            )
             return
     except Exception:
         logger.debug("Maestro pipeline failed, falling back to route_intent")
@@ -1269,4 +1290,79 @@ async def cb_mem_del(callback: CallbackQuery) -> None:
         await callback.message.edit_text(
             f"🗑 {callback.message.text}\n\n<i>Удалил из памяти.</i>"
         )
+    await callback.answer()
+
+
+# ── Memory Quick Actions (inline-кнопки) ──────────────────────────────
+
+
+@router.callback_query(F.data == "memq:list")
+async def cb_memq_list(callback: CallbackQuery) -> None:
+    """Показать последние 10 фактов памяти."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        memories = await list_memories(session, owner)
+        if not memories:
+            await callback.answer("Память пуста 📭", show_alert=True)
+            return
+        lines = ["<b>🧠 Последние факты:</b>", ""]
+        for m in memories[:10]:
+            emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(
+                m.sentiment, "⚪"
+            )
+            lines.append(f"{emoji} {m.fact[:100]}")
+        lines.append(f"\n<i>Всего: {len(memories)} фактов. /memory — подробнее</i>")
+        await callback.message.answer("\n".join(lines))
+        await callback.answer()
+
+
+@router.callback_query(F.data == "memq:add")
+async def cb_memq_add(callback: CallbackQuery) -> None:
+    """Предложить добавить факт в память."""
+    await callback.message.answer(
+        "📝 <b>Что запомнить?</b>\n"
+        "Напиши факт в формате:\n"
+        "<code>запомни: [факт]</code>\n\n"
+        "Например: <code>запомни: у Насти ДР 15 июня</code>"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "memq:forget")
+async def cb_memq_forget(callback: CallbackQuery) -> None:
+    """Показать последние факты для удаления."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        memories = await list_memories(session, owner)
+        if not memories:
+            await callback.answer("Нечего забывать 📭", show_alert=True)
+            return
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=f"❌ {m.fact[:40]}", callback_data=f"memq:del:{m.id}"
+                    )
+                ]
+                for m in memories[:8]
+            ]
+        )
+        await callback.message.answer(
+            "<b>❌ Что забыть?</b>\nВыбери факт для удаления:",
+            reply_markup=kb,
+        )
+        await callback.answer()
+
+
+@router.callback_query(F.data.startswith("memq:del:"))
+async def cb_memq_delete(callback: CallbackQuery) -> None:
+    """Удалить конкретный факт памяти по ID."""
+    mem_id = int(callback.data.split(":")[2])
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        success = await delete_memory(session, owner, mem_id)
+        if success:
+            await callback.message.edit_text("✅ Забыто!")
+        else:
+            await callback.answer("Не удалось удалить", show_alert=True)
     await callback.answer()

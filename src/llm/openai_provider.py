@@ -31,7 +31,43 @@ class OpenAIProvider:
         return resp.choices[0].message.content or ""
 
     async def embed(self, text: str) -> list[float]:
+        from src.core.embedding_cache import get as cache_get, set as cache_set
+
+        cached = cache_get(text)
+        if cached is not None:
+            return cached
         resp = await self._client.embeddings.create(
             model=LLMDefaults.OPENAI_EMBED, input=text
         )
-        return resp.data[0].embedding
+        result = resp.data[0].embedding
+        cache_set(text, result)
+        return result
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        from src.core.embedding_cache import get as cache_get, set as cache_set
+
+        if not texts:
+            return []
+
+        # Проверяем кэш — собираем только некэшированные тексты
+        results: list[list[float] | None] = [None] * len(texts)
+        uncached_texts: list[str] = []
+        uncached_indices: list[int] = []
+        for i, t in enumerate(texts):
+            cached = cache_get(t)
+            if cached is not None:
+                results[i] = cached
+            else:
+                uncached_texts.append(t)
+                uncached_indices.append(i)
+
+        if uncached_texts:
+            resp = await self._client.embeddings.create(
+                model=LLMDefaults.OPENAI_EMBED, input=uncached_texts
+            )
+            api_results = [d.embedding for d in resp.data]
+            for idx, emb in zip(uncached_indices, api_results):
+                cache_set(texts[idx], emb)
+                results[idx] = emb
+
+        return results  # type: ignore[return-value]

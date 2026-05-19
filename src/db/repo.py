@@ -647,6 +647,9 @@ async def add_memory(
 
         # --- Уровень 2: семантическая дедупликация через Qdrant ---
         if embedding is not None and vector_store_obj is not None:
+            # Проверяем кэш эмбеддингов (на случай если embed уже закэширован)
+            from src.core.embedding_cache import get as _cache_get
+
             # Ищем кандидатов с запасом (порог 0.7)
             similar = await vector_store_obj.search_similar_memories(
                 user_id=user.id,

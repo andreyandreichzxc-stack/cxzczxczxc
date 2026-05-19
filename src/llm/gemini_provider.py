@@ -55,6 +55,12 @@ class GeminiProvider:
         return await asyncio.to_thread(_call)
 
     async def embed(self, text: str) -> list[float]:
+        from src.core.embedding_cache import get as cache_get, set as cache_set
+
+        cached = cache_get(text)
+        if cached is not None:
+            return cached
+
         def _call() -> list[float]:
             resp = self._client.models.embed_content(
                 model=LLMDefaults.GEMINI_EMBED,
@@ -62,4 +68,46 @@ class GeminiProvider:
             )
             return list(resp.embeddings[0].values)
 
-        return await asyncio.to_thread(_call)
+        result = await asyncio.to_thread(_call)
+        cache_set(text, result)
+        return result
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        from src.core.embedding_cache import get as cache_get, set as cache_set
+
+        if not texts:
+            return []
+
+        # Проверяем кэш — собираем только некэшированные тексты
+        results: list[list[float] | None] = [None] * len(texts)
+        uncached_texts: list[str] = []
+        uncached_indices: list[int] = []
+        for i, t in enumerate(texts):
+            cached = cache_get(t)
+            if cached is not None:
+                results[i] = cached
+            else:
+                uncached_texts.append(t)
+                uncached_indices.append(i)
+
+        if uncached_texts:
+            # Gemini поддерживает до 100 текстов за вызов — разбиваем на чанки
+            api_results: list[list[float]] = []
+            chunk_size = 100
+            for start in range(0, len(uncached_texts), chunk_size):
+                chunk = uncached_texts[start : start + chunk_size]
+
+                def _call(chunk: list[str] = chunk) -> list[list[float]]:
+                    resp = self._client.models.embed_content(
+                        model=LLMDefaults.GEMINI_EMBED,
+                        contents=chunk,
+                    )
+                    return [list(e.values) for e in resp.embeddings]
+
+                api_results.extend(await asyncio.to_thread(_call))
+
+            for idx, emb in zip(uncached_indices, api_results):
+                cache_set(texts[idx], emb)
+                results[idx] = emb
+
+        return results  # type: ignore[return-value]
