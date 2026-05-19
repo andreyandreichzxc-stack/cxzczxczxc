@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta
 
@@ -28,6 +29,7 @@ from src.core.temporal_layers import get_prompt_facts
 from src.db.repo import (
     add_auto_reply_log,
     get_contact,
+    get_contact_profile,
     get_or_create_user,
     upsert_contact,
 )
@@ -218,6 +220,34 @@ async def _build_reply_text(
         hint = archetype_reply_hint(contact.archetype)
         if hint:
             system += hint
+
+    # ContactProfile — подсказки о стиле и ограничениях
+    try:
+        profile = await get_contact_profile(session, owner, peer_id)
+        if profile:
+            profile_hints = []
+            if profile.communication_style:
+                profile_hints.append(f"Стиль общения: {profile.communication_style}")
+            if profile.communication_dos:
+                dos_list = (
+                    json.loads(profile.communication_dos)
+                    if isinstance(profile.communication_dos, str)
+                    and profile.communication_dos.startswith("[")
+                    else [profile.communication_dos]
+                )
+                profile_hints.append(f"МОЖНО: {', '.join(dos_list[:4])}")
+            if profile.communication_donts:
+                donts_list = (
+                    json.loads(profile.communication_donts)
+                    if isinstance(profile.communication_donts, str)
+                    and profile.communication_donts.startswith("[")
+                    else [profile.communication_donts]
+                )
+                profile_hints.append(f"НЕЛЬЗЯ: {', '.join(donts_list[:4])}")
+            if profile_hints:
+                system += "\n\nПРОФИЛЬ КОНТАКТА:\n" + "\n".join(profile_hints)
+    except Exception:
+        logger.debug("get_contact_profile failed, skipping profile hints")
 
     user_prompt = (
         f"Собеседник: {sender_name}.\n"

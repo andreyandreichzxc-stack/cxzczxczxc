@@ -17,11 +17,14 @@ from src.core.memory_fuel import (
     get_fuel_stats,
 )
 from src.core.memory_neighbors import format_neighbors, get_neighbors
+from src.db.models import Commitment, Memory, MemoryCandidate
 from src.db.repo import (
+    add_commitment,
     add_memory,
     add_memory_candidate,
     delete_memory,
     delete_memory_candidate,
+    get_commitment_by_source_memory,
     get_linked_memories,
     get_memory_stats,
     get_or_create_user,
@@ -109,6 +112,10 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
         await message.answer(text)
         return
 
+    timeline_mode = "--timeline" in args
+    if timeline_mode:
+        args = args.replace("--timeline", "").strip()
+
     story_mode = "--story" in args
     if story_mode:
         args = args.replace("--story", "").strip()
@@ -145,12 +152,36 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
             await message.answer("Укажи контакт: <code>/memory --story имя</code>")
         return
 
+    # ── Timeline mode ──────────────────────────────────────────────────
+    if timeline_mode:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            items = await list_memories(session, owner, contact_id=contact_id)
+
+        if not items:
+            await message.answer("Память пуста.")
+            return
+
+        text = _format_timeline(items, contact_id, message.from_user.id)
+        await message.answer(text)
+        return
+
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        items = await list_memories(session, owner, contact_id=contact_id)
+        all_items = await list_memories(session, owner, contact_id=contact_id)
         stats = await get_memory_stats(session, owner)
 
-    if not items:
+        # Отделяем task-факты для показа с кнопками и статусом Commitment
+        task_memories = [m for m in all_items if m.memory_type == "task"]
+        task_commitments: dict[int, Commitment | None] = {}
+        for m in task_memories:
+            task_commitments[m.id] = await get_commitment_by_source_memory(
+                session, owner.id, m.id
+            )
+
+    items = [m for m in all_items if m.memory_type != "task"]
+
+    if not items and not task_memories:
         await message.answer("Память пуста.")
         return
 
@@ -171,7 +202,45 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
     fuel_line = format_fuel_line(fuel)
     fuel_depleted = format_depleted_contacts(fuel)
 
-    # Группировка по sentiment
+    # Отправляем task-факты отдельными сообщениями с кнопками
+    for m in task_memories:
+        date_str = m.created_at.strftime("%d.%m.%Y") if m.created_at else "?"
+        sent = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(
+            m.sentiment or "", "⚪"
+        )
+        c = task_commitments.get(m.id)
+        if c:
+            status_emoji = {
+                "done": "✅",
+                "cancelled": "❌",
+                "open": "📋",
+                "reminded": "⏰",
+            }.get(c.status, "📋")
+            line = (
+                f"• {sent} [{date_str}] {m.fact}\n"
+                f"   {status_emoji} Задача: <b>{c.status}</b>"
+            )
+            await message.answer(line)
+        else:
+            line = f"• {sent} [{date_str}] {m.fact}"
+            # Кнопка создания задачи из факта памяти
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="📋 Создать задачу",
+                            callback_data=f"mem:totask:{m.id}",
+                        ),
+                    ]
+                ]
+            )
+            await message.answer(line, reply_markup=kb)
+
+    # Если есть только task-факты — завершаем
+    if not items:
+        return
+
+    # Группировка по sentiment для остальных фактов
     positive_lines: list[str] = []
     negative_lines: list[str] = []
     neutral_lines: list[str] = []
@@ -625,6 +694,41 @@ async def cb_memory_inbox(callback: CallbackQuery) -> None:
             await callback.answer("Неизвестное действие")
 
 
+@router.callback_query(F.data.startswith("mem:totask:"))
+async def cb_mem_to_task(callback: CallbackQuery) -> None:
+    """Создать задачу (Commitment) из факта памяти."""
+    memory_id = int(callback.data.split(":")[2])
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        mem = await session.get(Memory, memory_id)
+        if mem is None or mem.user_id != owner.id:
+            await callback.answer("Факт не найден", show_alert=True)
+            return
+
+        # Проверяем, нет ли уже задачи для этого факта
+        existing = await get_commitment_by_source_memory(session, owner.id, mem.id)
+        if existing:
+            await callback.answer("Задача уже существует", show_alert=True)
+            return
+
+        # Создаём обязательство со ссылкой на факт памяти
+        c = await add_commitment(
+            session,
+            user_id=owner.id,
+            peer_id=mem.contact_id or 0,
+            peer_name=None,
+            message_id=None,
+            direction="mine",
+            text=mem.fact,
+            deadline_at=None,
+            source_memory_id=mem.id,
+        )
+
+    if callback.message:
+        await callback.message.edit_text(f"📋 Задача создана:\n<i>{mem.fact}</i>")
+    await callback.answer("✅ Задача создана")
+
+
 @router.callback_query(F.data.startswith("conflict:resolve:"))
 async def cb_conflict_resolve(callback: CallbackQuery) -> None:
     """Обработать разрешение конфликта памяти."""
@@ -643,3 +747,80 @@ async def cb_conflict_resolve(callback: CallbackQuery) -> None:
         )
     else:
         await callback.answer("Ошибка при разрешении конфликта")
+
+
+# ── Timeline format ───────────────────────────────────────────────────
+
+
+def _format_timeline(
+    items: list,
+    contact_id: int | None,
+    owner_id: int,
+) -> str:
+    """Форматирует факты как хронологию по неделям."""
+    from datetime import datetime, timedelta, timezone
+    from collections import defaultdict
+
+    now = datetime.now(timezone.utc)
+
+    # Разделяем на долгосрочные (tier 3 или distillation) и обычные
+    longterm = [m for m in items if m.memory_tier == 3 or m.source == "distillation"]
+    regular = [m for m in items if m not in longterm and m.is_active]
+
+    # Группируем regular факты по ISO неделям
+    weekly: dict[str, list] = defaultdict(list)
+    for m in regular:
+        if not m.created_at:
+            continue
+        # Начало недели (понедельник)
+        iso = m.created_at.isocalendar()
+        week_start = datetime.strptime(
+            f"{iso[0]}-W{iso[1]:02d}-1", "%G-W%V-%u"
+        ).replace(tzinfo=timezone.utc)
+        week_end = week_start + timedelta(days=6)
+        label = f"{week_start.strftime('%-d')}-{week_end.strftime('%-d %b')}"
+        weekly[label].append(m)
+
+    # Сортируем недели по дате (от новых к старым)
+    sorted_weeks = sorted(weekly.items(), key=lambda x: x[0], reverse=True)
+
+    lines: list[str] = []
+    if contact_id:
+        from src.db.repo import get_contact, get_or_create_user
+
+        # contact name is already resolved, but we don't have it here directly
+        lines.append(f"📅 <b>История отношений:</b>\n")
+    else:
+        lines.append("📅 <b>Хронология памяти:</b>\n")
+
+    for week_label, fact_list in sorted_weeks:
+        # Считаем тренд недели
+        pos = sum(1 for m in fact_list if m.sentiment == "positive")
+        neg = sum(1 for m in fact_list if m.sentiment == "negative")
+        if pos > neg:
+            trend = "улучшение ⬆️"
+        elif neg > pos:
+            trend = "напряжение ⬇️"
+        else:
+            trend = "стабильно ➖"
+
+        lines.append(f"🗓 <b>Неделя {week_label}:</b>")
+        for m in fact_list[:10]:
+            sent_emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(
+                m.sentiment or "", "⚪"
+            )
+            lines.append(f"  • {sent_emoji} «{m.fact}»")
+        lines.append(f"  📊 Тренд: {trend}")
+        lines.append("")
+
+    # Долгосрочные факты
+    if longterm:
+        lines.append("🏛️ <b>Долгосрочные факты:</b>")
+        for m in longterm:
+            fact_text = m.fact
+            if fact_text.startswith("💡 "):
+                fact_text = fact_text[2:]
+            lines.append(f"  • 💡 {fact_text}")
+        lines.append("")
+
+    return "\n".join(lines) if lines else "Нет данных для хронологии."

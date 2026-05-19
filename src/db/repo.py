@@ -15,6 +15,7 @@ from src.db.models import (
     AutoReplyLog,
     Commitment,
     Contact,
+    ContactProfile,
     ConversationState,
     Folder,
     Memory,
@@ -24,6 +25,7 @@ from src.db.models import (
     Message,
     NewsTopic,
     PendingAction,
+    SelfProfile,
     TelegramSession,
     TranscriptionCache,
     User,
@@ -420,6 +422,7 @@ async def add_commitment(
     direction: str,
     text: str,
     deadline_at: datetime | None,
+    source_memory_id: int | None = None,
 ) -> Commitment:
     c = Commitment(
         user_id=user_id,
@@ -429,6 +432,7 @@ async def add_commitment(
         direction=direction,
         text=text,
         deadline_at=deadline_at,
+        source_memory_id=source_memory_id,
     )
     session.add(c)
     await session.flush()
@@ -460,6 +464,24 @@ async def update_commitment_status(
     c = await session.get(Commitment, commitment_id)
     if c is not None:
         c.status = status
+
+
+async def get_commitment(
+    session: AsyncSession, commitment_id: int
+) -> Commitment | None:
+    return await session.get(Commitment, commitment_id)
+
+
+async def get_commitment_by_source_memory(
+    session: AsyncSession, user_id: int, source_memory_id: int
+) -> Commitment | None:
+    result = await session.execute(
+        select(Commitment).where(
+            Commitment.user_id == user_id,
+            Commitment.source_memory_id == source_memory_id,
+        )
+    )
+    return result.scalar_one_or_none()
 
 
 async def add_auto_reply_log(
@@ -594,6 +616,7 @@ async def add_memory(
     importance: float | None = None,
     decay_rate: float | None = None,
     memory_tier: int = 1,
+    memory_type: str | None = None,
 ) -> Memory | None:
     """
     Добавляет факт в память с дедупликацией.
@@ -705,6 +728,7 @@ async def add_memory(
         importance=importance if importance is not None else 0.5,
         decay_rate=decay_rate if decay_rate is not None else 0.07,
         memory_tier=memory_tier,
+        memory_type=memory_type,
     )
     session.add(mem)
     await session.flush()
@@ -1266,3 +1290,102 @@ async def get_memory_graph(
                 if target_id not in visited:
                     queue.append((target_id, depth + 1))
     return graph
+
+
+# ─── SelfProfile CRUD ────────────────────────────────────────────────
+
+
+async def get_self_profile(session: AsyncSession, user: User) -> SelfProfile | None:
+    """Возвращает self-profile владельца или None."""
+    result = await session.execute(
+        select(SelfProfile).where(SelfProfile.user_id == user.id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_self_profile(
+    session: AsyncSession, user: User, **kwargs: object
+) -> SelfProfile:
+    """Создаёт или обновляет self-profile владельца.
+
+    Списки/словари автоматически сериализуются в JSON (Text колонки).
+    Переданные ``**kwargs`` применяются только если значение не None.
+    """
+    import json
+
+    serialized: dict[str, object] = {}
+    for k, v in kwargs.items():
+        if v is not None:
+            serialized[k] = (
+                json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v
+            )
+    profile = await get_self_profile(session, user)
+    if profile is None:
+        profile = SelfProfile(user_id=user.id, **serialized)
+        session.add(profile)
+    else:
+        for k, v in serialized.items():
+            setattr(profile, k, v)
+    await session.flush()
+    return profile
+
+
+# ─── ContactProfile CRUD ─────────────────────────────────────────────
+
+
+async def upsert_contact_profile(
+    session: AsyncSession,
+    user: User,
+    contact_id: int,
+    **kwargs: object,
+) -> ContactProfile:
+    """Создаёт или обновляет профиль контакта.
+
+    Переданные ``**kwargs`` применяются только если значение не None.
+    """
+    result = await session.execute(
+        select(ContactProfile).where(
+            ContactProfile.user_id == user.id,
+            ContactProfile.contact_id == contact_id,
+        )
+    )
+    profile = result.scalar_one_or_none()
+    if profile is None:
+        profile = ContactProfile(user_id=user.id, contact_id=contact_id, **kwargs)
+        session.add(profile)
+    else:
+        for k, v in kwargs.items():
+            if v is not None:
+                setattr(profile, k, v)
+    await session.flush()
+    return profile
+
+
+async def get_contact_profile(
+    session: AsyncSession,
+    user: User,
+    contact_id: int,
+) -> ContactProfile | None:
+    """Возвращает профиль контакта или None."""
+    result = await session.execute(
+        select(ContactProfile).where(
+            ContactProfile.user_id == user.id,
+            ContactProfile.contact_id == contact_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def list_contact_profiles(
+    session: AsyncSession,
+    user: User,
+    limit: int = 50,
+) -> list[ContactProfile]:
+    """Возвращает профили контактов, отсортированные по близости (убывание)."""
+    result = await session.execute(
+        select(ContactProfile)
+        .where(ContactProfile.user_id == user.id)
+        .order_by(ContactProfile.closeness.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())

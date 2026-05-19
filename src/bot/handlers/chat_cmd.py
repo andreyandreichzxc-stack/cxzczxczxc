@@ -67,6 +67,11 @@ def _actions_keyboard(peer_id: int) -> InlineKeyboardMarkup:
     )
     kb.row(
         InlineKeyboardButton(text="📖 История", callback_data=f"chat:story:{peer_id}"),
+        InlineKeyboardButton(
+            text="👤 Профиль", callback_data=f"chat:profile:{peer_id}"
+        ),
+    )
+    kb.row(
         InlineKeyboardButton(text="🧠 Полный анализ", callback_data="chat:analyze:all"),
     )
     return kb.as_markup()
@@ -266,7 +271,7 @@ async def cb_tasks(callback: CallbackQuery, userbot_manager: UserbotManager) -> 
 
     items = await extract_and_save_commitments(
         provider,
-        user_id=owner.id,
+        telegram_id=owner.telegram_id,
         contact=contact,
         messages=messages,
     )
@@ -603,6 +608,35 @@ async def cb_story(callback: CallbackQuery) -> None:
                 reply_markup=_actions_keyboard(peer_id),
             )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("chat:profile:"))
+async def cb_profile(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
+    """Показать профиль контакта."""
+    peer_id = int(callback.data.split(":")[2])
+    client = userbot_manager.get_client(callback.from_user.id)
+    if client is None:
+        await callback.answer("Сначала /login", show_alert=True)
+        return
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        contact = await get_contact(session, owner, peer_id)
+
+    from src.core.contact_resolver import ContactCandidate
+
+    candidate = ContactCandidate(
+        peer_id=peer_id,
+        display_name=contact.display_name if contact else str(peer_id),
+        username=None,
+        peer_kind="user",
+        score=100,
+    )
+
+    contact_name = contact.display_name if contact else str(peer_id)
+    await callback.message.answer(
+        f"👤 Используй /profile {contact_name} для просмотра профиля"
+    )
 
 
 @router.callback_query(F.data.startswith("chat:analyze:"))

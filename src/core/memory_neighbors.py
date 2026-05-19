@@ -174,3 +174,83 @@ def format_bridges(bridges: list[dict]) -> str:
         lines.append(f"  «{b['fact2']}»")
         lines.append("")
     return "\n".join(lines)
+
+
+async def cross_contact_insights(owner_id: int) -> list[str]:
+    """Находит общие темы и паттерны между контактами.
+
+    Анализирует факты всех контактов, ищет общие ключевые слова,
+    пересекающиеся темы (теги), и повторяющиеся ситуации.
+
+    Возвращает список строк-инсайтов вида:
+    - "и Настя, и Артём упоминали дедлайны"
+    - "у Насти и Лены общая тема: ремонт"
+    """
+    from collections import Counter
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, owner_id)
+        memories = await list_memories(session, owner)
+        active_with_contact = [m for m in memories if m.is_active and m.contact_id]
+
+    if len(active_with_contact) < 5:
+        return []
+
+    # Группируем факты по контактам
+    from collections import defaultdict
+
+    by_contact: dict[int, list] = defaultdict(list)
+    for m in active_with_contact:
+        by_contact[m.contact_id].append(m)
+
+    # Собираем ключевые слова для каждого контакта
+    contact_keywords: dict[int, set[str]] = {}
+    for cid, facts in by_contact.items():
+        words: set[str] = set()
+        for m in facts:
+            # Извлекаем слова длиннее 3 букв
+            tokens = [
+                w.lower().strip(",.!?…():;-«»\"'")
+                for w in m.fact.split()
+                if len(w.strip(",.!?…():;-«»\"'")) > 3
+            ]
+            words.update(tokens)
+        contact_keywords[cid] = words
+
+    # Ищем пересечения
+    insights: list[str] = []
+    contact_ids = list(contact_keywords.keys())
+
+    for i in range(len(contact_ids)):
+        for j in range(i + 1, len(contact_ids)):
+            cid1 = contact_ids[i]
+            cid2 = contact_ids[j]
+            common = contact_keywords[cid1] & contact_keywords[cid2]
+            if len(common) >= 2:
+                # Получаем имена контактов
+                async with get_session() as s:
+                    owner = await get_or_create_user(s, owner_id)
+                    c1 = await get_contact(s, owner, cid1)
+                    c2 = await get_contact(s, owner, cid2)
+                name1 = c1.display_name if c1 else str(cid1)
+                name2 = c2.display_name if c2 else str(cid2)
+                common_words = ", ".join(sorted(common)[:4])
+                insights.append(
+                    f"🔗 И <b>{name1}</b>, и <b>{name2}</b> упоминали: {common_words}"
+                )
+                if len(insights) >= 5:
+                    break
+        if len(insights) >= 5:
+            break
+
+    return insights
+
+
+def format_cross_insights(insights: list[str]) -> str:
+    """Форматирует кросс-контактные инсайты для показа в UI."""
+    if not insights:
+        return ""
+    lines = ["<b>🔗 Связи между контактами:</b>"]
+    for ins in insights:
+        lines.append(f"  {ins}")
+    return "\n".join(lines)

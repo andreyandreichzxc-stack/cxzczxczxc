@@ -36,6 +36,7 @@ class BriefingData:
     memory_stats: dict = None  # статистика по памяти
     fuel_stats: dict = None  # статистика топлива памяти
     bridges: list = None  # смысловые мосты между контактами
+    cross_insights: list = None  # инсайты по связям между контактами
     tag_stats: dict = None  # статистика по тегам
     health: dict = None  # здоровье памяти
     emotional_trend: str | None = None  # эмоциональный тренд
@@ -50,6 +51,8 @@ class BriefingData:
             self.today_commitments = []
         if self.bridges is None:
             self.bridges = []
+        if self.cross_insights is None:
+            self.cross_insights = []
         if self.conversation_starters is None:
             self.conversation_starters = []
 
@@ -106,9 +109,15 @@ async def collect_briefing_data(owner_id: int) -> BriefingData:
     result.tag_stats = await get_tag_stats(owner_id)
 
     # Смысловые мосты между контактами
-    from src.core.memory_neighbors import find_cross_contact_bridges
+    from src.core.memory_neighbors import (
+        cross_contact_insights,
+        find_cross_contact_bridges,
+    )
 
     result.bridges = await find_cross_contact_bridges(owner_id)
+
+    # Кросс-контактные инсайты (общие темы между контактами)
+    result.cross_insights = await cross_contact_insights(owner_id)
 
     # Здоровье памяти
     result.health = await calculate_health_score(owner_id)
@@ -215,6 +224,13 @@ def format_briefing(data: BriefingData, title: str) -> str:
 
         lines.append("")
         lines.append(format_bridges(data.bridges))
+
+    # Кросс-контактные инсайты
+    if data.cross_insights:
+        from src.core.memory_neighbors import format_cross_insights
+
+        lines.append("")
+        lines.append(format_cross_insights(data.cross_insights))
 
     # Эмоциональный тренд
     if data.emotional_trend:

@@ -172,7 +172,7 @@ async def run_full_analysis(
                     owner_obj = await get_or_create_user(session, owner_id)
                     saved = await extract_and_save_commitments(
                         provider,
-                        user_id=owner_obj.id,
+                        telegram_id=owner_obj.telegram_id,
                         contact=contact,
                         messages=messages,
                     )

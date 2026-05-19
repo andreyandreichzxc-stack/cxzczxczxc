@@ -221,6 +221,37 @@ async def route_intent(
     if history_block:
         system = system + "\n\n" + history_block
 
+    # --- Self-profile: информация о владельце ---
+    if user_id is not None:
+        try:
+            from src.db.repo import get_or_create_user, get_self_profile
+            from src.db.session import get_session
+
+            async with get_session() as session:
+                owner = await get_or_create_user(session, user_id)
+                profile = await get_self_profile(session, owner)
+                if profile:
+                    lines = ["ТВОЙ ПРОФИЛЬ (владелец):"]
+                    if profile.preferences:
+                        lines.append(f"Предпочтения: {profile.preferences}")
+                    if profile.goals:
+                        lines.append(f"Цели: {profile.goals}")
+                    if profile.current_projects:
+                        lines.append(f"Проекты: {profile.current_projects}")
+                    if profile.decision_style:
+                        lines.append(f"Стиль решений: {profile.decision_style}")
+                    if profile.communication_preferences:
+                        lines.append(
+                            f"Коммуникация: {profile.communication_preferences}"
+                        )
+                    if profile.sleep_pattern:
+                        lines.append(f"Сон: {profile.sleep_pattern}")
+                    if profile.work_hours:
+                        lines.append(f"Рабочие часы: {profile.work_hours}")
+                    system = system + "\n\n" + "\n".join(lines)
+        except Exception:
+            logger.debug("Failed to load self_profile in route_intent, continuing")
+
     # --- RAG: релевантный контекст из истории (легковесный — 3 сообщения) ---
     if user_id is not None:
         try:

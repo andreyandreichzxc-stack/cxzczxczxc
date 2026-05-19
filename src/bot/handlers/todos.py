@@ -5,7 +5,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
 from src.core.timeutil import fmt_local
+from src.db.models import Commitment
 from src.db.repo import (
+    add_memory,
     get_or_create_user,
     list_open_commitments,
     update_commitment_status,
@@ -27,8 +29,12 @@ def _format(c, tz_name: str) -> str:
 def _kb(commitment_id: int):
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="✅ Выполнено", callback_data=f"todo:done:{commitment_id}"),
-        InlineKeyboardButton(text="🚫 Отменить", callback_data=f"todo:cancel:{commitment_id}"),
+        InlineKeyboardButton(
+            text="✅ Выполнено", callback_data=f"todo:done:{commitment_id}"
+        ),
+        InlineKeyboardButton(
+            text="🚫 Отменить", callback_data=f"todo:cancel:{commitment_id}"
+        ),
     )
     return kb.as_markup()
 
@@ -53,7 +59,18 @@ async def cmd_todos(message: Message) -> None:
 async def cb_done(callback: CallbackQuery) -> None:
     cid = int(callback.data.split(":")[2])
     async with get_session() as session:
-        await update_commitment_status(session, cid, "done")
+        c = await session.get(Commitment, cid)
+        if c:
+            await update_commitment_status(session, cid, "done")
+            owner = await get_or_create_user(session, callback.from_user.id)
+            await add_memory(
+                session,
+                owner,
+                fact=f"Выполнено: {c.text}",
+                source="commitment",
+                memory_type="task",
+                contact_id=c.peer_id,
+            )
     if callback.message:
         await callback.message.edit_text(callback.message.html_text + "\n\n✅ Готово")
     await callback.answer()

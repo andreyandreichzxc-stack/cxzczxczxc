@@ -109,6 +109,23 @@ async def init_db() -> None:
             except Exception:
                 pass  # колонка уже существует
 
+        # Миграция: source_memory_id в commitments
+        try:
+            await conn.execute(
+                text("ALTER TABLE commitments ADD COLUMN source_memory_id BIGINT")
+            )
+        except Exception:
+            pass
+        try:
+            await conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_commitments_source_memory_id "
+                    "ON commitments(source_memory_id)"
+                )
+            )
+        except Exception:
+            pass
+
         # Миграция старых связей памяти (related_memory_id → memory_links)
         try:
             result = await conn.execute(

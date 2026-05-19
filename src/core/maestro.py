@@ -85,6 +85,7 @@ async def process(
     history_block: str | None = None,
     memory_context: str | None = None,
     global_style: str | None = None,
+    self_profile: str | None = None,
 ) -> dict[str, Any]:
     """Главная точка входа. Maestro понимает пользователя и составляет план."""
     ctx_parts = []
@@ -92,6 +93,8 @@ async def process(
         ctx_parts.append(f"Память о контактах:\n{memory_context}")
     if global_style:
         ctx_parts.append(f"Твой стиль общения:\n{global_style}")
+    if self_profile:
+        ctx_parts.append(f"ТВОЙ ПРОФИЛЬ (владелец):\n{self_profile}")
     if history_block:
         ctx_parts.append(f"История диалога:\n{history_block}")
 
@@ -312,6 +315,7 @@ async def run_pipeline(
     history_block: str | None = None,
     memory_context: str | None = None,
     global_style: str | None = None,
+    self_profile: str | None = None,
 ) -> dict[str, Any]:
     """Полный пайплайн: Maestro → агенты → финальный ответ.
 
@@ -322,6 +326,38 @@ async def run_pipeline(
           - used_agents: list[str] (какие агенты сработали)
           - agent_errors: list[str] (ошибки агентов)
     """
+    # --- Загружаем self-profile, если не передан ---
+    if self_profile is None:
+        try:
+            from src.db.models import SelfProfile
+            from src.db.repo import get_or_create_user, get_self_profile
+            from src.db.session import get_session
+
+            async with get_session() as session:
+                owner = await get_or_create_user(session, owner_id)
+                profile = await get_self_profile(session, owner)
+                if profile:
+                    lines = ["ТВОЙ ПРОФИЛЬ (владелец):"]
+                    if profile.preferences:
+                        lines.append(f"Предпочтения: {profile.preferences}")
+                    if profile.goals:
+                        lines.append(f"Цели: {profile.goals}")
+                    if profile.current_projects:
+                        lines.append(f"Проекты: {profile.current_projects}")
+                    if profile.decision_style:
+                        lines.append(f"Стиль решений: {profile.decision_style}")
+                    if profile.communication_preferences:
+                        lines.append(
+                            f"Коммуникация: {profile.communication_preferences}"
+                        )
+                    if profile.sleep_pattern:
+                        lines.append(f"Сон: {profile.sleep_pattern}")
+                    if profile.work_hours:
+                        lines.append(f"Рабочие часы: {profile.work_hours}")
+                    self_profile = "\n".join(lines)
+        except Exception:
+            logger.debug("Failed to load self_profile, continuing without")
+
     # --- Шаг 1: Maestro планирует ---
     plan = await process(
         provider,
@@ -330,6 +366,7 @@ async def run_pipeline(
         history_block=history_block,
         memory_context=memory_context,
         global_style=global_style,
+        self_profile=self_profile,
     )
 
     used_agents = []

@@ -40,7 +40,6 @@ class User(Base):
     global_style_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True
     )
-
     settings: Mapped["UserSettings"] = relationship(
         back_populates="user",
         uselist=False,
@@ -197,6 +196,63 @@ class Contact(Base):
     # null | "close_friend" | "family" | "colleague" | "acquaintance" | "toxic" | "romantic" | "unknown"
 
 
+class ContactProfile(Base):
+    """Профиль контакта — не просто archetype, а полноценная карточка."""
+
+    __tablename__ = "contact_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    contact_id: Mapped[int] = mapped_column(BigInteger, index=True)
+
+    closeness: Mapped[float] = mapped_column(Float, default=0.5)  # 0-1 близость
+    closeness_label: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )  # друг/работа/семья/клиент
+
+    communication_style: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # "мягко и коротко", "деловито"
+    key_topics: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON ["ремонт", "дети", "работа"]
+    sensitivity: Mapped[float] = mapped_column(
+        Float, default=0.5
+    )  # 0-1 чувствительность к тону
+    communication_dos: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON ["писать утром", "без голосовых"]
+    communication_donts: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON ["не критиковать", "не слать ночью"]
+
+    current_status: Mapped[str | None] = mapped_column(
+        String(16), nullable=True
+    )  # active/tension/resolved/distant
+    last_emotional_event: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_emotional_event_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+
+    relationship_phase: Mapped[str | None] = mapped_column(
+        String(16), nullable=True
+    )  # warming/cooling/stable
+    open_questions: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON ["договориться о встрече", "вернуть долг"]
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class Message(Base):
     """Кэш сообщений из чатов."""
 
@@ -242,6 +298,9 @@ class Commitment(Base):
     peer_id: Mapped[int] = mapped_column(BigInteger, index=True)
     peer_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_memory_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, index=True
+    )
     direction: Mapped[str] = mapped_column(String(8))  # mine | theirs
     text: Mapped[str] = mapped_column(Text)
     deadline_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -527,6 +586,46 @@ class MemoryCandidate(Base):
     decay_rate: Mapped[float] = mapped_column(Float, default=0.07)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class SelfProfile(Base):
+    """Память о владельце — предпочтения, цели, проекты, стиль."""
+
+    __tablename__ = "self_profile"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+    )
+
+    preferences: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON ["чай", "утренние созвоны", ...]
+    goals: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON ["закончить проект X", ...]
+    current_projects: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    decision_style: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # "быстрый"/"аналитический"/"советуется"
+    communication_preferences: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON
+    sleep_pattern: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # "сова"/"жаворонок"/"00:00-08:00"
+    work_hours: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )  # "09:00-18:00"
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
     )
 
 

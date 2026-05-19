@@ -39,6 +39,7 @@ from src.db.repo import (
     delete_news_topic,
     get_api_key,
     get_contact,
+    get_contact_profile,
     get_or_create_user,
     list_memories,
     list_news_topics,
@@ -247,6 +248,7 @@ async def _execute_intent(
                 )
                 # подгружаем факты о собеседнике
                 facts_hint = ""
+                profile_hint = ""
                 if target.peer_id:
                     try:
                         contact_facts = await get_prompt_facts(
@@ -258,10 +260,41 @@ async def _execute_intent(
                             )
                     except Exception:
                         pass
+                    # подгружаем профиль (стиль, dos/donts)
+                    try:
+                        profile = await get_contact_profile(
+                            session, owner, target.peer_id
+                        )
+                        if profile:
+                            hints = []
+                            if profile.communication_style:
+                                hints.append(profile.communication_style)
+                            if profile.communication_dos:
+                                import json as _json
+
+                                dos = (
+                                    _json.loads(profile.communication_dos)
+                                    if profile.communication_dos.startswith("[")
+                                    else [profile.communication_dos]
+                                )
+                                hints.append(f"✅ {', '.join(dos[:3])}")
+                            if profile.communication_donts:
+                                import json as _json
+
+                                donts = (
+                                    _json.loads(profile.communication_donts)
+                                    if profile.communication_donts.startswith("[")
+                                    else [profile.communication_donts]
+                                )
+                                hints.append(f"❌ {', '.join(donts[:3])}")
+                            if hints:
+                                profile_hint = "\n\n👤 Профиль: " + " | ".join(hints)
+                    except Exception:
+                        pass
             await message.answer(
                 f"🤔 <b>Готов отправить</b>\n\n"
                 f"→ <b>Кому:</b> {target.label()}\n"
-                f"→ <b>Текст:</b>\n{text}{facts_hint}",
+                f"→ <b>Текст:</b>\n{text}{facts_hint}{profile_hint}",
                 reply_markup=_confirm_keyboard(action.id),
             )
         else:
@@ -379,7 +412,10 @@ async def _execute_intent(
 
     elif kind == "tasks_for_chat":
         items = await extract_and_save_commitments(
-            provider, user_id=owner.id, contact=contact, messages=messages_loaded
+            provider,
+            telegram_id=owner.telegram_id,
+            contact=contact,
+            messages=messages_loaded,
         )
         if not items:
             body = "🤷 Явных обязательств не нашёл."
@@ -560,14 +596,16 @@ async def _exec_remove_news_topic(intent, message) -> None:
     await message.answer(f"🗑 Удалил: {names}")
 
 
-def memory_quick_keyboard() -> InlineKeyboardMarkup:
+def memory_quick_keyboard(contact_name: str = "") -> InlineKeyboardMarkup:
     """Inline-кнопки быстрых действий с памятью."""
+    explain_cb = f"memq:explain:{contact_name}" if contact_name else "memq:explain:"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="🧠 Что помню", callback_data="memq:list"),
                 InlineKeyboardButton(text="➕ Запомни", callback_data="memq:add"),
                 InlineKeyboardButton(text="❌ Забудь", callback_data="memq:forget"),
+                InlineKeyboardButton(text="🤔 Почему?", callback_data=explain_cb),
             ]
         ]
     )
@@ -611,7 +649,7 @@ async def _process_text(
         pipeline_result = await run_pipeline(
             provider,
             raw,
-            owner_id=owner.id,
+            owner_id=owner.telegram_id,
             history_block=history_block,
             memory_context=memory_context,
             global_style=getattr(owner, "global_style_profile", None),
@@ -642,7 +680,7 @@ async def _process_text(
             tz_name=tz_name,
             history_block=history_block,
             memory_context=memory_context,
-            user_id=owner.id,
+            user_id=owner.telegram_id,
         )
     except Exception as e:
         logger.exception("agent route_intent failed")
@@ -986,7 +1024,7 @@ async def _exec_add_reminders_from_chat(intent, message, userbot_manager) -> Non
         owner = await get_or_create_user(session, message.from_user.id)
         contact = await get_contact(session, owner, target.peer_id)
     items = await extract_and_save_commitments(
-        provider, user_id=owner.id, contact=contact, messages=msgs
+        provider, telegram_id=owner.telegram_id, contact=contact, messages=msgs
     )
     if not items:
         await message.answer("🤷 Явных обещаний в этом чате не нашёл.")
@@ -1405,4 +1443,42 @@ async def cb_memq_delete(callback: CallbackQuery) -> None:
             await callback.message.edit_text("✅ Забыто!")
         else:
             await callback.answer("Не удалось удалить", show_alert=True)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("memq:explain:"))
+async def cb_memq_explain(callback: CallbackQuery) -> None:
+    """Показать объяснение (почему бот так думает)."""
+    contact_name = callback.data.split(":", 2)[2] if ":" in callback.data else ""
+
+    contact_id = None
+    contact_label = ""
+    if contact_name:
+        # Пытаемся найти контакт
+        from src.userbot.manager import _MANAGER_SINGLETON
+
+        client = (
+            _MANAGER_SINGLETON.get_client(callback.from_user.id)
+            if _MANAGER_SINGLETON
+            else None
+        )
+        if client is not None:
+            async with get_session() as session:
+                owner = await get_or_create_user(session, callback.from_user.id)
+            from src.core.contact_resolver import resolve
+
+            candidates = await resolve(client, owner, contact_name)
+            if candidates:
+                contact_id = candidates[0].peer_id
+                contact_label = candidates[0].label()
+
+    from src.bot.handlers.explain_cmd import build_explain_text
+
+    text = await build_explain_text(
+        callback.from_user.id,
+        contact_id=contact_id,
+        contact_label=contact_label,
+    )
+    if callback.message:
+        await callback.message.answer(text)
     await callback.answer()
