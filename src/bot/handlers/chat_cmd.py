@@ -10,6 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from src.bot.filters import OwnerOnly
 from src.core.chat_service import load_chat
 from src.core.commitment_extractor import extract_and_save_commitments
+from src.core.memory_extractor import extract_and_save_memories
 from src.core.contact_resolver import ContactCandidate, resolve
 from src.core.summarizer import catchup, draft_reply, summarize_chat
 from src.db.repo import get_contact, get_or_create_user
@@ -132,6 +133,12 @@ async def _action_load(callback: CallbackQuery, userbot_manager: UserbotManager,
         contact = await get_contact(session, owner, peer_id)
         provider = await build_provider(session, owner)
         heavy = owner.settings.use_heavy_model
+
+        # авто-извлечение памяти о контакте (fire-and-forget, не блокируем UI)
+        import asyncio
+        asyncio.create_task(
+            extract_and_save_memories(provider, owner.id, contact, messages)
+        )
 
     if contact is None:
         if callback.message:

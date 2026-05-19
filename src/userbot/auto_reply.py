@@ -24,6 +24,7 @@ from src.db.repo import (
     add_auto_reply_log,
     get_contact,
     get_or_create_user,
+    list_memories,
     upsert_contact,
 )
 from src.db.session import get_session
@@ -92,10 +93,15 @@ async def _build_reply_text(
     sender_name: str,
     incoming_text: str,
 ) -> str | None:
+    memory_context = ""
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
         provider = await build_provider(session, owner)
         contact = await get_contact(session, owner, peer_id)
+        memories = await list_memories(session, owner, contact_id=peer_id)
+        if memories:
+            memory_lines = [f"- {m.fact}" for m in memories[-10:]]  # last 10 only
+            memory_context = "Что ты знаешь о собеседнике из памяти:\n" + "\n".join(memory_lines)
         heavy = owner.settings.use_heavy_model
 
     if provider is None:
@@ -115,7 +121,11 @@ async def _build_reply_text(
             logger.exception("auto-reply: load_chat failed")
 
     style_hint = style_profile_as_prompt_hint(contact.style_profile if contact else None)
-    system = AUTO_REPLY_SYSTEM_BASE + ("\n" + style_hint if style_hint else "")
+    system = AUTO_REPLY_SYSTEM_BASE
+    if memory_context:
+        system = system + "\n\n" + memory_context
+    if style_hint:
+        system = system + "\n" + style_hint
 
     user_prompt = (
         f"Собеседник: {sender_name}.\n"

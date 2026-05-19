@@ -12,6 +12,7 @@ from src.db.models import (
     AutoReplyLog,
     Commitment,
     Contact,
+    Memory,
     Message,
     NewsTopic,
     PendingAction,
@@ -487,3 +488,66 @@ async def toggle_news_topic(session: AsyncSession, user: User, topic_id: int) ->
         return None
     nt.enabled = not nt.enabled
     return nt.enabled
+
+
+async def add_memory(
+    session: AsyncSession,
+    user: User,
+    *,
+    fact: str,
+    contact_id: int | None = None,
+    sentiment: str | None = None,
+    source: str = "chat",
+) -> Memory:
+    m = Memory(
+        user_id=user.id,
+        fact=fact.strip(),
+        contact_id=contact_id,
+        sentiment=sentiment,
+        source=source,
+    )
+    session.add(m)
+    await session.flush()
+    return m
+
+
+async def list_memories(
+    session: AsyncSession,
+    user: User,
+    *,
+    contact_id: int | None = None,
+) -> list[Memory]:
+    query = select(Memory).where(Memory.user_id == user.id).order_by(Memory.created_at.desc())
+    if contact_id is not None:
+        query = query.where(Memory.contact_id == contact_id)
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+async def delete_memory(session: AsyncSession, user: User, memory_id: int) -> bool:
+    m = await session.get(Memory, memory_id)
+    if m is None or m.user_id != user.id:
+        return False
+    await session.delete(m)
+    return True
+
+
+async def search_memories(
+    session: AsyncSession,
+    user: User,
+    query: str,
+    *,
+    contact_id: int | None = None,
+) -> list[Memory]:
+    stmt = (
+        select(Memory)
+        .where(
+            Memory.user_id == user.id,
+            Memory.fact.ilike(f"%{query}%"),
+        )
+        .order_by(Memory.created_at.desc())
+    )
+    if contact_id is not None:
+        stmt = stmt.where(Memory.contact_id == contact_id)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())

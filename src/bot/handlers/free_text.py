@@ -23,20 +23,24 @@ from src.core.timeutil import fmt_local, is_valid_tz, now_in_tz, tz_short
 from src.core.transcription import transcription_service
 from src.db.repo import (
     add_commitment,
+    add_memory,
     add_news_topic,
     create_pending_action,
+    delete_memory,
     delete_news_topic,
     get_api_key,
     get_contact,
     get_or_create_user,
+    list_memories,
     list_news_topics,
     list_open_commitments,
+    search_memories,
     update_commitment_status,
     upsert_contact,
 )
 from src.db.session import get_session
 from src.llm.router import build_provider
-from src.userbot.manager import UserbotManager
+from src.userbot.manager import UserbotManager, _MANAGER_SINGLETON
 
 
 logger = logging.getLogger(__name__)
@@ -555,6 +559,14 @@ def _summarize_intent_for_memory(intent: dict) -> str:
         return "показал список обещаний"
     if kind == "chat":
         return (intent.get("reply") or "")[:160]
+    if kind == "store_memory":
+        return "запомнил факт"
+    if kind == "forget_memory":
+        return "удалил из памяти"
+    if kind == "list_memories":
+        return "посмотрел память"
+    if kind == "extract_memories_from_chat":
+        return "извлёк факты из переписки"
     return kind or ""
 
 
@@ -652,6 +664,18 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
         return
     if kind == "add_reminders_from_chat":
         await _exec_add_reminders_from_chat(intent, message, userbot_manager)
+        return
+    if kind == "store_memory":
+        await _exec_store_memory(intent, message)
+        return
+    if kind == "forget_memory":
+        await _exec_forget_memory(intent, message)
+        return
+    if kind == "list_memories":
+        await _exec_list_memories(intent, message)
+        return
+    if kind == "extract_memories_from_chat":
+        await _exec_extract_memories(intent, message, userbot_manager)
         return
     await _execute_intent(intent, message, state, userbot_manager, tz_name=tz_name)
 
@@ -783,3 +807,134 @@ async def _exec_add_reminders_from_chat(intent, message, userbot_manager) -> Non
         f"⏰ Поставил {len(items)} напоминаний из чата с {target.display_name}:\n\n"
         + "\n".join(lines)
     )
+
+
+async def _exec_store_memory(intent, message) -> None:
+    fact = (intent.get("fact") or "").strip()
+    if not fact:
+        await message.answer("Не понял, что запомнить. Уточни.")
+        return
+    contact_name = (intent.get("contact") or "").strip()
+    sentiment = (intent.get("sentiment") or "").strip()
+    if sentiment not in ("positive", "negative", "neutral"):
+        sentiment = None
+
+    contact_id = None
+    if contact_name:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+        client = _MANAGER_SINGLETON.get_client(message.from_user.id) if _MANAGER_SINGLETON else None
+        if client is not None:
+            candidates = await resolve(client, owner, contact_name)
+            if candidates:
+                contact_id = candidates[0].peer_id
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        mem = await add_memory(session, owner, fact=fact, contact_id=contact_id, sentiment=sentiment, source="user")
+
+    await message.answer(f"🧠 Запомнил: <i>{fact}</i>")
+
+
+async def _exec_forget_memory(intent, message) -> None:
+    query = (intent.get("query") or "").strip()
+    if not query:
+        await message.answer("Что удалить? Уточни.")
+        return
+    contact_name = (intent.get("contact") or "").strip()
+
+    contact_id = None
+    if contact_name:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+        client = _MANAGER_SINGLETON.get_client(message.from_user.id) if _MANAGER_SINGLETON else None
+        if client is not None:
+            candidates = await resolve(client, owner, contact_name)
+            if candidates:
+                contact_id = candidates[0].peer_id
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        found = await search_memories(session, owner, query, contact_id=contact_id)
+
+    if not found:
+        await message.answer("Ничего не нашёл по этому запросу.")
+        return
+
+    async with get_session() as session:
+        for m in found:
+            await delete_memory(session, owner, m.id)
+
+    names = ", ".join(f"«{m.fact[:50]}…»" if len(m.fact) > 50 else f"«{m.fact}»" for m in found)
+    await message.answer(f"🗑 Забыл: {names}")
+
+
+async def _exec_list_memories(intent, message) -> None:
+    contact_name = (intent.get("contact") or "").strip()
+
+    contact_id = None
+    label = ""
+    if contact_name:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+        client = _MANAGER_SINGLETON.get_client(message.from_user.id) if _MANAGER_SINGLETON else None
+        if client is not None:
+            candidates = await resolve(client, owner, contact_name)
+            if candidates:
+                contact_id = candidates[0].peer_id
+                label = f" — {candidates[0].label()}"
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        items = await list_memories(session, owner, contact_id=contact_id)
+
+    if not items:
+        await message.answer("Память пуста.")
+        return
+
+    lines = []
+    for m in items:
+        sent = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(m.sentiment or "", "")
+        lines.append(f"• {sent} {m.fact}")
+    body = "\n".join(lines)
+    await message.answer(f"🧠 <b>Память{label}</b>\n\n{body}")
+
+
+async def _exec_extract_memories(intent, message, userbot_manager) -> None:
+    contact_name = (intent.get("contact") or "").strip()
+    if not contact_name:
+        await message.answer("Про какой контакт извлечь память?")
+        return
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+
+    client = userbot_manager.get_client(message.from_user.id) if userbot_manager else None
+    if client is None:
+        await message.answer("Сначала /login.")
+        return
+
+    candidates = await resolve(client, owner, contact_name)
+    if not candidates:
+        await message.answer("Не нашёл такого контакта.")
+        return
+
+    peer_id = candidates[0].peer_id
+    await message.answer("🧠 Извлекаю факты из переписки…")
+
+    from src.core.chat_service import load_chat
+    from src.core.memory_extractor import extract_and_save_memories
+    from src.llm.router import build_provider
+
+    messages = await load_chat(client, message.from_user.id, peer_id, limit=100)
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        provider = await build_provider(session, owner)
+        contact = await get_contact(session, owner, peer_id)
+
+    if provider is None:
+        await message.answer("Не задан LLM-ключ.")
+        return
+
+    count = await extract_and_save_memories(provider, owner.id, contact, messages)
+    await message.answer(f"✅ Извлечено фактов: {count}")

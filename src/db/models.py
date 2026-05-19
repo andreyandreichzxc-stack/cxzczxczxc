@@ -218,3 +218,18 @@ class NewsTopic(Base):
     hours: Mapped[int] = mapped_column(Integer, default=24)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Memory(Base):
+    """Факты о владельце и контактах, извлекаемые из переписок и разговоров с ботом."""
+
+    __tablename__ = "memories"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    contact_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    fact: Mapped[str] = mapped_column(Text)
+    sentiment: Mapped[str | None] = mapped_column(String(16), nullable=True)  # positive, negative, neutral
+    source: Mapped[str] = mapped_column(String(16), default="chat")  # chat, user, auto
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
