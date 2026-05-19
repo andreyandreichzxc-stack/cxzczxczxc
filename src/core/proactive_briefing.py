@@ -4,7 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from src.core.memory_fuel import get_fuel_stats
+from src.core.memory_health import (
+    calculate_health_score,
+    format_health,
+    format_health_compact,
+)
 from src.core.notifier import notifier
+from src.core.temporal_layers import format_layer_stats, get_layer_stats
 from src.db.repo import (
     get_memory_stats,
     get_or_create_user,
@@ -28,6 +34,8 @@ class BriefingData:
     memory_stats: dict = None  # статистика по памяти
     fuel_stats: dict = None  # статистика топлива памяти
     bridges: list = None  # смысловые мосты между контактами
+    tag_stats: dict = None  # статистика по тегам
+    health: dict = None  # здоровье памяти
 
     def __post_init__(self) -> None:
         if self.waiting_reply is None:
@@ -83,10 +91,21 @@ async def collect_briefing_data(owner_id: int) -> BriefingData:
     # Статистика топлива памяти (открывает свою сессию)
     result.fuel_stats = await get_fuel_stats(owner_id)
 
+    # Статистика по временным слоям памяти
+    result.layer_stats = await get_layer_stats(owner_id)
+
+    # Статистика по тегам
+    from src.core.memory_tagger import get_tag_stats
+
+    result.tag_stats = await get_tag_stats(owner_id)
+
     # Смысловые мосты между контактами
     from src.core.memory_neighbors import find_cross_contact_bridges
 
     result.bridges = await find_cross_contact_bridges(owner_id)
+
+    # Здоровье памяти
+    result.health = await calculate_health_score(owner_id)
 
     return result
 
@@ -94,6 +113,11 @@ async def collect_briefing_data(owner_id: int) -> BriefingData:
 def format_briefing(data: BriefingData, title: str) -> str:
     """Форматирует брифинг в HTML."""
     lines = [f"<b>📋 {title}</b>", ""]
+
+    if data.health:
+        lines.append(format_health_compact(data.health))
+        lines.append("")
+
     if data.unread_total > 0:
         lines.append(
             f"📬 <b>Непрочитанные:</b> {data.unread_total} сообщений "
@@ -133,6 +157,15 @@ def format_briefing(data: BriefingData, title: str) -> str:
         if weekly_facts:
             lines.append(f"   📊 Из них {weekly_facts} с недельного саммари")
 
+    # Статистика тегов
+    if data.tag_stats:
+        from src.core.memory_tagger import format_tag_stats
+
+        tag_lines = format_tag_stats(data.tag_stats)
+        if tag_lines:
+            lines.append("")
+            lines.append(tag_lines)
+
     # Индикатор топлива памяти
     if data.fuel_stats:
         from src.core.memory_fuel import format_depleted_contacts, format_fuel_line
@@ -143,12 +176,21 @@ def format_briefing(data: BriefingData, title: str) -> str:
         if depleted_text:
             lines.append(depleted_text)
 
+    # Временные слои памяти
+    if data.layer_stats and data.layer_stats.get("total", 0) > 0:
+        lines.append("")
+        lines.append(format_layer_stats(data.layer_stats))
+
     # Смысловые мосты между контактами
     if data.bridges:
         from src.core.memory_neighbors import format_bridges
 
         lines.append("")
         lines.append(format_bridges(data.bridges))
+
+    if data.health:
+        lines.append("")
+        lines.append(format_health(data.health))
 
     lines.append("\n💬 <i>/threads — просмотреть переписки</i>")
     return "\n".join(lines)

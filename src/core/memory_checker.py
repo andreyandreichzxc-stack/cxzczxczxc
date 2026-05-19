@@ -5,6 +5,7 @@ import logging
 import math
 from datetime import datetime, timezone
 
+from src.core.temporal_layers import classify_layer, get_layer_config
 from src.core.timeutil import now_in_tz
 from src.db.repo import get_or_create_user, list_memories
 from src.db.session import get_session
@@ -47,7 +48,10 @@ async def _run_decay_and_validation(owner_id: int) -> None:
             if m.validity_start and m.decay_rate:
                 days = (now_utc - m.validity_start).total_seconds() / 86400
                 if days > 0:
-                    new_conf = m.confidence * math.exp(-m.decay_rate * days)
+                    layer = m.temporal_layer or classify_layer(m.created_at)
+                    cfg = get_layer_config(layer)
+                    effective_rate = m.decay_rate * cfg["decay_multiplier"]
+                    new_conf = m.confidence * math.exp(-effective_rate * days)
                     if new_conf < 0.2:  # забылся
                         m.is_active = False
                         m.validity_end = now_utc

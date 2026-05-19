@@ -40,6 +40,19 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
     """Показать память — всё или про конкретный контакт."""
     args = (message.text or "").replace("/memory", "").strip()
 
+    tag_mode = "--tag" in args
+    if tag_mode:
+        parts = args.split("--tag", 1)
+        tag = parts[1].strip().split()[0] if len(parts) > 1 and parts[1].strip() else ""
+        from src.core.memory_tagger import format_tagged, search_by_tag
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            facts = await search_by_tag(session, owner, tag)
+        text = format_tagged(facts, tag)
+        await message.answer(text)
+        return
+
     story_mode = "--story" in args
     if story_mode:
         args = args.replace("--story", "").strip()
@@ -91,6 +104,12 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
     neu = stats["by_sentiment"].get("neutral", 0)
     stat_line = f"🧠 <b>Память{label}</b>: {stats['total']} фактов ({pos} позитивных, {neg} негативных, {neu} нейтральных)\n"
 
+    # Индикатор здоровья памяти
+    from src.core.memory_health import calculate_health_score, format_health_compact
+
+    health = await calculate_health_score(message.from_user.id)
+    health_line = format_health_compact(health)
+
     # Индикатор топлива памяти
     fuel = await get_fuel_stats(message.from_user.id)
     fuel_line = format_fuel_line(fuel)
@@ -130,7 +149,7 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
         else:
             neutral_lines.append(line)
 
-    body_parts = [stat_line, fuel_line]
+    body_parts = [stat_line, health_line, fuel_line]
     if fuel_depleted:
         body_parts.append(fuel_depleted)
     if positive_lines:
@@ -175,6 +194,16 @@ async def cb_memory_clear_negative(callback: CallbackQuery) -> None:
     if callback.message:
         await callback.message.edit_text(f"🧹 Удалено {removed} негативных фактов.")
     await callback.answer(f"Удалено {removed}")
+
+
+@router.message(Command("health"))
+async def cmd_health(message: Message) -> None:
+    """Показать здоровье памяти — единый скоринг 0-100."""
+    from src.core.memory_health import calculate_health_score, format_health
+
+    health = await calculate_health_score(message.from_user.id)
+    text = format_health(health)
+    await message.answer(text)
 
 
 @router.callback_query(F.data == "memory:stats")
@@ -411,6 +440,19 @@ async def cb_pattern_action(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.message(Command("tag"))
+async def cmd_tag(message: Message) -> None:
+    """Проставить теги всем нетэгированным фактам."""
+    from src.core.memory_tagger import tag_all_untagged
+
+    await message.answer("🏷 Тегирую факты...")
+    count = await tag_all_untagged(message.from_user.id)
+    if count > 0:
+        await message.answer(f"✅ Протегировано {count} фактов.")
+    else:
+        await message.answer("✅ Все факты уже протегированы, или нет активных фактов.")
+
+
 @router.callback_query(F.data.startswith("mem:neighbors:"))
 async def cb_mem_neighbors(callback: CallbackQuery) -> None:
     """Показать семантических соседей для факта памяти."""
@@ -421,3 +463,33 @@ async def cb_mem_neighbors(callback: CallbackQuery) -> None:
         await callback.message.answer(text)  # type: ignore[union-attr]
     else:
         await callback.answer("Соседей не найдено")
+
+
+@router.message(Command("conflicts"))
+async def cmd_conflicts(message: Message) -> None:
+    """Показать и разрешить конфликты в памяти."""
+    from src.core.conflict_resolver import find_conflicts, format_conflicts
+
+    conflicts = await find_conflicts(message.from_user.id)
+    text = format_conflicts(conflicts)
+    await message.answer(text)
+
+
+@router.callback_query(F.data.startswith("conflict:resolve:"))
+async def cb_conflict_resolve(callback: CallbackQuery) -> None:
+    """Обработать разрешение конфликта памяти."""
+    parts = callback.data.split(":")
+    positive_id = int(parts[2])
+    negative_id = int(parts[3])
+    resolution = parts[4]
+    from src.core.conflict_resolver import resolve_conflict
+
+    success = await resolve_conflict(
+        callback.from_user.id, positive_id, negative_id, resolution
+    )
+    if success:
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            callback.message.text + "\n\n✅ Конфликт разрешён."
+        )
+    else:
+        await callback.answer("Ошибка при разрешении конфликта")

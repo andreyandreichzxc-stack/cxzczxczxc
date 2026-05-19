@@ -6,6 +6,7 @@ import logging
 from sqlalchemy import select
 
 from src.core.chat_service import message_to_text
+from src.core.memory_tagger import tag_new_fact
 from src.core.vector_store import vector_store
 from src.db.models import Contact, Memory, Message, User
 from src.db.repo import add_memory, link_memories
@@ -153,6 +154,8 @@ async def extract_and_save_memories(
                 importance=importance,
                 decay_rate=decay_rate,
             )
+            if mem is not None:
+                await tag_new_fact(provider, session, mem.id)
             saved.append(mem)
 
         # Второй проход: установка связей между фактами

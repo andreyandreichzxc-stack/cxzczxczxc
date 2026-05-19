@@ -388,6 +388,13 @@ class Memory(Base):
     memory_tier: Mapped[int] = mapped_column(
         Integer, default=1
     )  # 1=эпизод, 2=недельное, 3=месячное
+    temporal_layer: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # null | "recent" (≤7d) | "medium" (8-30d) | "longterm" (>30d)
+
+    tags: Mapped[str | None] = mapped_column(
+        String(256), nullable=True
+    )  # comma-separated: "работа,деньги"
+
     related_memory_id: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True, index=True
     )  # ссылка на другой Memory.id

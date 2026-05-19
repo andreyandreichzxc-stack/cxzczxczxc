@@ -24,11 +24,11 @@ from src.core.style_profile import style_profile_as_prompt_hint
 from src.core.timeutil import now_in_tz
 from src.core.vector_store import vector_store
 from src.db.models import AutoReplyLog, User
+from src.core.temporal_layers import get_prompt_facts
 from src.db.repo import (
     add_auto_reply_log,
     get_contact,
     get_or_create_user,
-    list_memories,
     upsert_contact,
 )
 from src.db.session import get_session
@@ -139,35 +139,17 @@ async def _build_reply_text(
         provider = await build_provider(session, owner)
         contact = await get_contact(session, owner, peer_id)
 
-        # Векторный поиск релевантных фактов
+        # Загрузка фактов памяти с учётом временных слоёв
         relevant_facts = []
         try:
-            if provider:
-                query_vec = await provider.embed(incoming_text[:300])
-                hits = await vector_store.search_similar_memories(
-                    user_id=owner.id,
-                    embedding=query_vec,
-                    limit=10,
-                    threshold=0.7,
-                    contact_id=peer_id,
-                )
-                for h in hits:
-                    # Скоринг: 0.5*sim + 0.3*conf + 0.2*importance
-                    sim = h.get("score", 0.5)
-                    conf = float(h.get("confidence", 0.5))
-                    imp = float(h.get("importance", 0.5))
-                    score = 0.5 * sim + 0.3 * conf + 0.2 * imp
-                    relevant_facts.append((score, h.get("fact", "")))
-                relevant_facts.sort(key=lambda x: x[0], reverse=True)
+            facts = await get_prompt_facts(
+                session, owner, contact_id=peer_id, total_limit=8
+            )
+            for f in facts:
+                relevant_facts.append((f.confidence, f.fact))
+            relevant_facts.sort(key=lambda x: x[0], reverse=True)
         except Exception:
-            logger.warning("Vector memory search failed, using fallback")
-            # fallback к старому поведению
-            try:
-                memories = await list_memories(session, owner, contact_id=peer_id)
-                if memories:
-                    relevant_facts = [(0.5, m.fact) for m in memories[-5:]]
-            except Exception:
-                pass
+            logger.warning("get_prompt_facts failed, skipping memory context")
 
         if relevant_facts:
             memory_lines = [f"- {f}" for _, f in relevant_facts[:5]]

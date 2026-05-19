@@ -7,6 +7,7 @@ from src.core.auto_sync import auto_sync_loop
 from src.core.digest import digest_scheduler_loop
 from src.core.follow_up import follow_up_loop
 from src.core.memory_checker import memory_decay_loop
+from src.core.temporal_layers import temporal_migration_loop
 from src.core.memory_patterns import patterns_loop
 from src.core.news import news_scheduler_loop
 from src.core.proactive_briefing import proactive_briefing_loop
@@ -15,6 +16,7 @@ from src.core.sleep_tracker import sleep_tracker_loop
 from src.core.smart_digest import smart_digest_loop
 from src.core.weekly_summarizer import weekly_summary_loop
 from src.core.knowledge_distiller import distillation_loop
+from src.core.conflict_resolver import conflict_check_loop
 from src.db.session import init_db
 from src.userbot.manager import UserbotManager
 
@@ -78,6 +80,14 @@ async def main() -> None:
         ),
         asyncio.create_task(
             distillation_loop(settings.owner_telegram_id), name="distillation"
+        ),
+        asyncio.create_task(
+            temporal_migration_loop(settings.owner_telegram_id),
+            name="temporal-migration",
+        ),
+        asyncio.create_task(
+            conflict_check_loop(settings.owner_telegram_id),
+            name="conflict-check",
         ),
     ]
 
