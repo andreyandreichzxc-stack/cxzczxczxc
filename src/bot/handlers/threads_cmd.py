@@ -13,6 +13,7 @@ from aiogram.types import (
 
 from src.bot.filters import OwnerOnly
 from src.core.memory_fuel import format_fuel_line, get_fuel_stats
+from src.core.memory_neighbors import format_neighbors, get_neighbors
 from src.db.repo import (
     fetch_chat_messages,
     get_contact,
@@ -186,6 +187,15 @@ async def cb_thread_open(callback: CallbackQuery) -> None:
                         "example_of": "пример",
                     }.get(lm.relation_type or "", lm.relation_type or "связь")
                     lines.append(f"  {lm.relation_type}: «{lm.fact}»")
+
+            # Семантические соседи для первого факта
+            neighbors = await get_neighbors(
+                callback.from_user.id, memories[0].id, limit=2
+            )
+            n_text = format_neighbors(neighbors)
+            if n_text:
+                lines.append("")
+                lines.append(n_text)
 
             # Компактная история отношений
             from src.core.memory_chain import build_chain_narrative

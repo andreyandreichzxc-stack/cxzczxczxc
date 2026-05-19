@@ -170,7 +170,15 @@ async def extract_and_save_memories(
                     and hasattr(mem, "id")
                     and hasattr(target, "id")
                 ):
-                    await link_memories(session, mem.id, target.id, rel_type)
+                    weight = 0.9 if rel_type in ("cause", "effect") else 0.7
+                    await link_memories(
+                        session,
+                        user,
+                        mem.id,
+                        target.id,
+                        weight=weight,
+                        relation_type=rel_type,
+                    )
 
     valid = [m for m in saved if m is not None]
     if valid:

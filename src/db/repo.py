@@ -19,6 +19,7 @@ from src.db.models import (
     Folder,
     Memory,
     MemoryCluster,
+    MemoryLink,
     Message,
     NewsTopic,
     PendingAction,
@@ -1041,30 +1042,153 @@ async def get_conversation_state(
 
 
 async def link_memories(
-    session: AsyncSession, memory_id: int, related_id: int, relation_type: str
-) -> None:
-    """Создать связь между двумя фактами памяти."""
-    mem = await session.get(Memory, memory_id)
-    if mem:
-        mem.related_memory_id = related_id
-        mem.relation_type = relation_type
+    session: AsyncSession,
+    user: User,
+    source_id: int,
+    target_id: int,
+    weight: float = 0.5,
+    relation_type: str | None = None,
+) -> MemoryLink | None:
+    """Создать/обновить связь между фактами памяти (many-to-many)."""
+    from sqlalchemy import and_, or_
+
+    # Проверить что оба факта принадлежат пользователю
+    result = await session.execute(
+        select(Memory).where(
+            Memory.id.in_([source_id, target_id]), Memory.user_id == user.id
+        )
+    )
+    if len(result.scalars().all()) < 2:
+        return None  # один из фактов не найден или чужой
+
+    # Проверить существующую связь
+    existing = await session.execute(
+        select(MemoryLink).where(
+            MemoryLink.user_id == user.id,
+            MemoryLink.source_id == source_id,
+            MemoryLink.target_id == target_id,
+        )
+    )
+    existing = existing.scalar_one_or_none()
+    if existing:
+        existing.weight = weight
+        if relation_type:
+            existing.relation_type = relation_type
         await session.flush()
+        return existing
+
+    # Создать новую + обратную
+    link = MemoryLink(
+        user_id=user.id,
+        source_id=source_id,
+        target_id=target_id,
+        weight=weight,
+        relation_type=relation_type,
+    )
+    session.add(link)
+
+    # Обратная связь (если не дубль)
+    reverse_check = await session.execute(
+        select(MemoryLink).where(
+            MemoryLink.user_id == user.id,
+            MemoryLink.source_id == target_id,
+            MemoryLink.target_id == source_id,
+        )
+    )
+    if not reverse_check.scalar_one_or_none():
+        rev = MemoryLink(
+            user_id=user.id,
+            source_id=target_id,
+            target_id=source_id,
+            weight=weight,
+            relation_type=relation_type,
+        )
+        session.add(rev)
+
+    await session.flush()
+    return link
+
+
+async def unlink_memories(
+    session: AsyncSession, user: User, source_id: int, target_id: int
+) -> None:
+    """Удалить связь между фактами (в обе стороны)."""
+    from sqlalchemy import and_, or_
+
+    from sqlalchemy import delete
+
+    await session.execute(
+        delete(MemoryLink).where(
+            MemoryLink.user_id == user.id,
+            or_(
+                and_(
+                    MemoryLink.source_id == source_id,
+                    MemoryLink.target_id == target_id,
+                ),
+                and_(
+                    MemoryLink.source_id == target_id,
+                    MemoryLink.target_id == source_id,
+                ),
+            ),
+        )
+    )
+    await session.flush()
 
 
 async def get_linked_memories(
-    session: AsyncSession, user: User, memory_id: int, limit: int = 5
-) -> list[Memory]:
-    """Получить факты, связанные с данным (в обе стороны)."""
+    session: AsyncSession, user: User, memory_id: int, limit: int = 10
+) -> list[dict]:
+    """Получить связанные факты с весами."""
     result = await session.execute(
-        select(Memory)
+        select(Memory, MemoryLink.weight, MemoryLink.relation_type)
+        .join(MemoryLink, MemoryLink.target_id == Memory.id)
         .where(
-            Memory.user_id == user.id,
-            or_(
-                Memory.id == memory_id,
-                Memory.related_memory_id == memory_id,
-            ),
+            MemoryLink.source_id == memory_id,
+            MemoryLink.user_id == user.id,
+            Memory.is_active == True,
         )
-        .order_by(Memory.created_at.desc())
-        .limit(limit + 1)
+        .order_by(MemoryLink.weight.desc())
+        .limit(limit)
     )
-    return [m for m in result.scalars().all() if m.id != memory_id][:limit]
+    rows = result.all()
+    linked: list[dict] = []
+    for mem, weight, rel_type in rows:
+        linked.append({"memory": mem, "weight": weight, "relation_type": rel_type})
+    return linked
+
+
+async def get_memory_graph(
+    session: AsyncSession,
+    user: User,
+    memory_id: int,
+    max_depth: int = 3,
+    max_nodes: int = 20,
+) -> list[dict]:
+    """Строит граф связанных фактов BFS от memory_id."""
+    visited: set[int] = set()
+    graph: list[dict] = []
+    queue: list[tuple[int, int]] = [(memory_id, 0)]
+    while queue and len(visited) < max_nodes:
+        mid, depth = queue.pop(0)
+        if mid in visited or depth > max_depth:
+            continue
+        visited.add(mid)
+        if depth > 0:  # не добавляем корневой узел в граф, только соседей
+            mem = await session.get(Memory, mid)
+            if mem:
+                graph.append({"memory": mem, "depth": depth})
+        if depth < max_depth:
+            result = await session.execute(
+                select(
+                    MemoryLink.target_id,
+                    MemoryLink.weight,
+                    MemoryLink.relation_type,
+                )
+                .where(MemoryLink.source_id == mid, MemoryLink.user_id == user.id)
+                .order_by(MemoryLink.weight.desc())
+                .limit(10)
+            )
+            for target_id, weight, rel_type in result.all():
+                if target_id not in visited:
+                    queue.append((target_id, depth + 1))
+    return graph

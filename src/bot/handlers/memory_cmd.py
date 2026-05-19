@@ -16,6 +16,7 @@ from src.core.memory_fuel import (
     format_fuel_line,
     get_fuel_stats,
 )
+from src.core.memory_neighbors import format_neighbors, get_neighbors
 from src.db.repo import (
     add_memory,
     delete_memory,
@@ -114,7 +115,14 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
             "example_of": "📌",
         }.get(m.relation_type or "", "")
         rel_prefix = f"{rel_icon} " if rel_icon else ""
-        line = f"• {sent} [{date_str}]{rel_prefix} {m.fact}"
+        # Distillation факты — с маркером 💡 и жирным шрифтом
+        if m.source == "distillation":
+            display_fact = m.fact
+            if display_fact.startswith("💡 "):
+                display_fact = display_fact[2:]
+            line = f"• 💡 <b>{display_fact}</b>"
+        else:
+            line = f"• {sent} [{date_str}]{rel_prefix} {m.fact}"
         if m.sentiment == "positive":
             positive_lines.append(line)
         elif m.sentiment == "negative":
@@ -319,6 +327,39 @@ async def cmd_archetypes(message: Message) -> None:
     await message.answer(text)
 
 
+@router.message(Command("distill"))
+async def cmd_distill(message: Message, userbot_manager: UserbotManager) -> None:
+    """Запустить дистилляцию фактов (10+ → 1 summary)."""
+    from src.core.knowledge_distiller import run_distillation
+
+    args = (message.text or "").split()
+    contact_name = args[1] if len(args) > 1 else None
+    contact_id = None
+    if contact_name:
+        client = (
+            userbot_manager.get_client(message.from_user.id)
+            if userbot_manager
+            else None
+        )
+        if client is not None:
+            async with get_session() as session:
+                owner = await get_or_create_user(session, message.from_user.id)
+            candidates = await resolve(client, owner, contact_name)
+            if candidates:
+                contact_id = candidates[0].peer_id
+
+    await message.answer("🧠 Запускаю дистилляцию...")
+    result = await run_distillation(message.from_user.id, contact_id)
+    if result["success"]:
+        await message.answer(
+            f"✅ <b>Дистилляция завершена:</b>\n"
+            f"Сжато {result['deactivated']} фактов →\n"
+            f"<i>«{result['fact'][:200]}»</i>"
+        )
+    else:
+        await message.answer("❌ Недостаточно фактов для дистилляции (нужно 10+).")
+
+
 @router.callback_query(F.data.startswith("pattern:"))
 async def cb_pattern_action(callback: CallbackQuery) -> None:
     """Обрабатывает нажатия на inline-кнопки паттернов."""
@@ -368,3 +409,15 @@ async def cb_pattern_action(callback: CallbackQuery) -> None:
         return
 
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("mem:neighbors:"))
+async def cb_mem_neighbors(callback: CallbackQuery) -> None:
+    """Показать семантических соседей для факта памяти."""
+    mid = int(callback.data.split(":")[2])
+    neighbors = await get_neighbors(callback.from_user.id, mid)
+    text = format_neighbors(neighbors)
+    if text:
+        await callback.message.answer(text)  # type: ignore[union-attr]
+    else:
+        await callback.answer("Соседей не найдено")

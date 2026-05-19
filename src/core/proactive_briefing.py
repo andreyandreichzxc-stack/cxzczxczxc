@@ -27,6 +27,7 @@ class BriefingData:
     recent_memories: int = 0
     memory_stats: dict = None  # статистика по памяти
     fuel_stats: dict = None  # статистика топлива памяти
+    bridges: list = None  # смысловые мосты между контактами
 
     def __post_init__(self) -> None:
         if self.waiting_reply is None:
@@ -35,6 +36,8 @@ class BriefingData:
             self.overdue_commitments = []
         if self.today_commitments is None:
             self.today_commitments = []
+        if self.bridges is None:
+            self.bridges = []
 
 
 async def collect_briefing_data(owner_id: int) -> BriefingData:
@@ -79,6 +82,11 @@ async def collect_briefing_data(owner_id: int) -> BriefingData:
 
     # Статистика топлива памяти (открывает свою сессию)
     result.fuel_stats = await get_fuel_stats(owner_id)
+
+    # Смысловые мосты между контактами
+    from src.core.memory_neighbors import find_cross_contact_bridges
+
+    result.bridges = await find_cross_contact_bridges(owner_id)
 
     return result
 
@@ -134,6 +142,13 @@ def format_briefing(data: BriefingData, title: str) -> str:
         depleted_text = format_depleted_contacts(data.fuel_stats)
         if depleted_text:
             lines.append(depleted_text)
+
+    # Смысловые мосты между контактами
+    if data.bridges:
+        from src.core.memory_neighbors import format_bridges
+
+        lines.append("")
+        lines.append(format_bridges(data.bridges))
 
     lines.append("\n💬 <i>/threads — просмотреть переписки</i>")
     return "\n".join(lines)

@@ -90,6 +90,34 @@ async def init_db() -> None:
         for stmt in _MEMORY_FTS_SETUP:
             await conn.execute(text(stmt))
 
+        # Миграция старых связей памяти (related_memory_id → memory_links)
+        try:
+            result = await conn.execute(
+                text(
+                    "SELECT id, related_memory_id, relation_type FROM memories WHERE related_memory_id IS NOT NULL"
+                )
+            )
+            for row in result.all():
+                mid, related_id, rel_type = row
+                # Проверить нет ли уже связи в memory_links
+                check = await conn.execute(
+                    text(
+                        "SELECT id FROM memory_links WHERE source_id = :sid AND target_id = :tid"
+                    ),
+                    {"sid": mid, "tid": related_id},
+                )
+                if not check.first():
+                    await conn.execute(
+                        text(
+                            "INSERT INTO memory_links (user_id, source_id, target_id, weight, relation_type, created_at) "
+                            "SELECT user_id, :sid, :tid, 0.7, :rel, datetime('now') FROM memories WHERE id = :sid"
+                        ),
+                        {"sid": mid, "tid": related_id, "rel": rel_type},
+                    )
+            await conn.commit()
+        except Exception:
+            pass  # таблица ещё не существует — ок
+
 
 @asynccontextmanager
 async def get_session() -> AsyncIterator[AsyncSession]:

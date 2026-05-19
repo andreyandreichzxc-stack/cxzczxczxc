@@ -396,6 +396,30 @@ class Memory(Base):
     )  # cause, effect, contradicts, supports, continues, example_of
 
 
+class MemoryLink(Base):
+    """Many-to-many связи между фактами памяти с весами."""
+
+    __tablename__ = "memory_links"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("memories.id", ondelete="CASCADE"), index=True
+    )
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("memories.id", ondelete="CASCADE"), index=True
+    )
+    weight: Mapped[float] = mapped_column(Float, default=0.5)  # 0.0-1.0 сила связи
+    relation_type: Mapped[str | None] = mapped_column(
+        String(16), nullable=True
+    )  # cause/effect/contradicts/supports/continues
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+
 class MemoryCluster(Base):
     """Группа связанных фактов по теме."""
 

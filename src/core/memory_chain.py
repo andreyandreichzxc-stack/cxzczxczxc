@@ -51,7 +51,8 @@ async def build_chain(
             continue
         seen.add(mid)
         linked = await get_linked_memories(session, owner, mid, limit=5)
-        for m in linked:
+        for item in linked:
+            m = item["memory"]
             if m.id not in seen:
                 queue.append(m.id)
                 chain.append(
@@ -59,8 +60,9 @@ async def build_chain(
                         "memory_id": m.id,
                         "fact": m.fact,
                         "sentiment": m.sentiment,
-                        "relation_type": m.relation_type,
+                        "relation_type": item.get("relation_type"),
                         "related_to": mid,
+                        "weight": item.get("weight", 0.5),
                         "created_at": m.created_at,
                     }
                 )
