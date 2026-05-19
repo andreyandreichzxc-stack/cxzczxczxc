@@ -107,10 +107,14 @@ def format_briefing(data: BriefingData, title: str) -> str:
         by_sentiment = data.memory_stats.get("by_sentiment", {})
         positive = by_sentiment.get("positive", 0)
         negative = by_sentiment.get("negative", 0)
+        by_source = data.memory_stats.get("by_source", {})
+        weekly_facts = by_source.get("weekly", 0)
         lines.append(
             f"\n🧠 Память: {total} фактов "
             f"({positive} позитивных, {negative} негативных)"
         )
+        if weekly_facts:
+            lines.append(f"   📊 Из них {weekly_facts} с недельного саммари")
 
     lines.append("\n💬 <i>/threads — просмотреть переписки</i>")
     return "\n".join(lines)

@@ -8,6 +8,7 @@ import logging
 import re
 from typing import Any
 
+from src.core.vector_store import vector_store
 from src.llm.base import ChatMessage
 
 
@@ -77,6 +78,7 @@ async def process(
     provider,  # LLMProvider
     user_text: str,
     *,
+    owner_id: int | None = None,
     history_block: str | None = None,
     memory_context: str | None = None,
     global_style: str | None = None,
@@ -97,10 +99,33 @@ async def process(
         else f"Пользователь: {user_text}"
     )
 
+    # --- RAG: релевантный контекст из истории переписок ---
+    rag_context = ""
+    if owner_id is not None:
+        try:
+            query_vec = await provider.embed(user_text)
+            hits = await vector_store.search(
+                user_id=owner_id, embedding=query_vec, limit=5
+            )
+            if hits:
+                rag_lines = []
+                for h in hits:
+                    prefix = f"[{h.peer_name}]" if h.peer_name else ""
+                    rag_lines.append(f"{prefix} {h.text[:200]}")
+                rag_context = "\n".join(rag_lines)
+        except Exception:
+            logger.debug("RAG search non-critical fail", exc_info=True)
+
+    system = MAESTRO_SYSTEM
+    if rag_context:
+        system = (
+            system + "\n\nРелевантный контекст из истории переписок:\n" + rag_context
+        )
+
     try:
         raw = await provider.chat(
             [
-                ChatMessage(role="system", content=MAESTRO_SYSTEM),
+                ChatMessage(role="system", content=system),
                 ChatMessage(role="user", content=user_msg),
             ],
             heavy=True,
@@ -266,6 +291,7 @@ async def run_pipeline(
     plan = await process(
         provider,
         user_text,
+        owner_id=owner_id,
         history_block=history_block,
         memory_context=memory_context,
         global_style=global_style,

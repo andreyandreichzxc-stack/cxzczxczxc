@@ -177,7 +177,12 @@ async def cb_thread_reply(callback: CallbackQuery, userbot_manager=None) -> None
 
         if provider and contact and msgs:
             draft = await draft_reply(
-                provider, contact, msgs, heavy=False, global_style=None
+                provider,
+                contact,
+                msgs,
+                heavy=False,
+                global_style=None,
+                owner_id=owner.id,
             )
             if draft:
                 safe_draft = sanitize_html(draft)[:350]

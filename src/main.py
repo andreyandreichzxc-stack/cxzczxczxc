@@ -12,6 +12,7 @@ from src.core.proactive_briefing import proactive_briefing_loop
 from src.core.reminders import reminders_loop
 from src.core.sleep_tracker import sleep_tracker_loop
 from src.core.smart_digest import smart_digest_loop
+from src.core.weekly_summarizer import weekly_summary_loop
 from src.db.session import init_db
 from src.userbot.manager import UserbotManager
 
@@ -64,6 +65,9 @@ async def main() -> None:
         ),
         asyncio.create_task(
             sleep_tracker_loop(settings.owner_telegram_id), name="sleep-tracker"
+        ),
+        asyncio.create_task(
+            weekly_summary_loop(settings.owner_telegram_id), name="weekly-summary"
         ),
     ]
 

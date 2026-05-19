@@ -14,7 +14,7 @@ from src.bot.filters import OwnerOnly
 from src.core.digest import build_digest
 from src.core.smart_digest import build_smart_digest, collect_recent_messages
 from src.core.timeutil import tz_short
-from src.db.repo import get_or_create_user
+from src.db.repo import add_memory, get_or_create_user, list_contacts
 from src.db.session import get_session
 
 
@@ -135,3 +135,55 @@ async def cmd_smart_digest(message: Message) -> None:
         text = build_smart_digest(messages, interval)
         owner.settings.smart_digest_last_sent = datetime.utcnow()
     await message.answer(text)
+
+
+@router.message(Command("weekly"))
+async def cmd_weekly(message: Message) -> None:
+    """Ручной запуск недельного саммари."""
+    from src.core.weekly_summarizer import summarize_contact_week
+    from src.llm.router import build_provider
+
+    await message.answer("📊 Запускаю недельное саммари...")
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        provider = await build_provider(session, owner)
+        if not provider:
+            await message.answer("❌ Нет LLM провайдера.")
+            return
+
+        import json as _json
+
+        contacts = await list_contacts(
+            session, owner, kinds=("user",), include_bots=False
+        )
+        monitored = (
+            _json.loads(owner.settings.monitored_folders)
+            if owner.settings.monitored_folders
+            else []
+        )
+        if monitored:
+            contacts = [
+                c
+                for c in contacts
+                if any(
+                    f.strip() in monitored for f in (c.folder_names or "").split(",")
+                )
+            ]
+
+        total = 0
+        for c in contacts[:10]:
+            facts = await summarize_contact_week(provider, message.from_user.id, c)
+            for f in facts:
+                await add_memory(
+                    session,
+                    owner,
+                    fact=f.get("fact", ""),
+                    contact_id=c.peer_id,
+                    sentiment=f.get("sentiment"),
+                    source="weekly",
+                )
+                total += 1
+        await message.answer(
+            f"✅ Готово! {total} фактов сохранено в память "
+            f"из {len(contacts[:10])} контактов."
+        )

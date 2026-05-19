@@ -67,6 +67,7 @@ async def suggest_draft(
             messages,
             heavy=False,
             global_style=None,
+            owner_id=owner_id,
         )
         return draft
     except Exception:

@@ -1,8 +1,14 @@
 """Промпты для саммари, черновика ответа и «где мы остановились»."""
 
+import logging
+
 from src.core.chat_service import message_to_text
+
+
+logger = logging.getLogger(__name__)
 from src.core.style_profile import style_profile_as_prompt_hint
 from src.core.text_sanitizer import sanitize_html
+from src.core.vector_store import vector_store
 from src.db.models import Contact, Message
 from src.llm.base import ChatMessage, LLMProvider
 
@@ -35,6 +41,7 @@ async def summarize_chat(
     contact: Contact,
     messages: list[Message],
     *,
+    owner_id: int | None = None,
     heavy: bool = False,
     global_style: str | None = None,
 ) -> str:
@@ -46,6 +53,27 @@ async def summarize_chat(
     system = SUMMARY_SYSTEM
     if global_style:
         system = system + "\n\n" + global_style
+
+    # --- RAG: контекст про этого собеседника из всей истории ---
+    if owner_id is not None:
+        try:
+            query_vec = await provider.embed(contact.display_name)
+            hits = await vector_store.search(
+                user_id=owner_id, embedding=query_vec, limit=3
+            )
+            if hits:
+                rag_lines = []
+                for h in hits:
+                    prefix = f"[{h.peer_name}]" if h.peer_name else ""
+                    rag_lines.append(f"{prefix} {h.text[:200]}")
+                system = (
+                    system
+                    + "\n\nРелевантный контекст из истории переписок:\n"
+                    + "\n".join(rag_lines)
+                )
+        except Exception:
+            logger.debug("RAG search non-critical fail", exc_info=True)
+
     raw = await provider.chat(
         [
             ChatMessage(role="system", content=system),
@@ -62,6 +90,7 @@ async def draft_reply(
     messages: list[Message],
     *,
     instruction: str | None = None,
+    owner_id: int | None = None,
     heavy: bool = False,
     global_style: str | None = None,
 ) -> str:
@@ -70,6 +99,27 @@ async def draft_reply(
     system = DRAFT_SYSTEM
     if style_hint:
         system = system + "\n" + style_hint
+
+    # --- RAG: контекст про этого собеседника из всей истории ---
+    if owner_id is not None:
+        try:
+            query_vec = await provider.embed(contact.display_name)
+            hits = await vector_store.search(
+                user_id=owner_id, embedding=query_vec, limit=3
+            )
+            if hits:
+                rag_lines = []
+                for h in hits:
+                    prefix = f"[{h.peer_name}]" if h.peer_name else ""
+                    rag_lines.append(f"{prefix} {h.text[:200]}")
+                system = (
+                    system
+                    + "\n\nРелевантный контекст из истории переписок:\n"
+                    + "\n".join(rag_lines)
+                )
+        except Exception:
+            logger.debug("RAG search non-critical fail", exc_info=True)
+
     user_prompt = (
         f"Собеседник: {contact.display_name}\n\n"
         f"Контекст переписки:\n{transcript}\n\n"
@@ -94,6 +144,7 @@ async def catchup(
     contact: Contact,
     messages: list[Message],
     *,
+    owner_id: int | None = None,
     heavy: bool = False,
     global_style: str | None = None,
 ) -> str:
@@ -102,6 +153,27 @@ async def catchup(
     system = CATCHUP_SYSTEM
     if style_hint:
         system = system + "\n" + style_hint
+
+    # --- RAG: контекст про этого собеседника из всей истории ---
+    if owner_id is not None:
+        try:
+            query_vec = await provider.embed(contact.display_name)
+            hits = await vector_store.search(
+                user_id=owner_id, embedding=query_vec, limit=3
+            )
+            if hits:
+                rag_lines = []
+                for h in hits:
+                    prefix = f"[{h.peer_name}]" if h.peer_name else ""
+                    rag_lines.append(f"{prefix} {h.text[:200]}")
+                system = (
+                    system
+                    + "\n\nРелевантный контекст из истории переписок:\n"
+                    + "\n".join(rag_lines)
+                )
+        except Exception:
+            logger.debug("RAG search non-critical fail", exc_info=True)
+
     user_prompt = (
         f"Собеседник: {contact.display_name}\n\nПоследние сообщения:\n{transcript}"
     )

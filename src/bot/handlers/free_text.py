@@ -353,6 +353,7 @@ async def _execute_intent(
             messages_loaded,
             heavy=heavy,
             global_style=owner.global_style_profile,
+            owner_id=owner.id,
         )
         await message.answer(f"📝 <b>Саммари — {contact.display_name}</b>\n\n{text}")
 
@@ -383,6 +384,7 @@ async def _execute_intent(
             instruction=instruction,
             heavy=heavy,
             global_style=owner.global_style_profile,
+            owner_id=owner.id,
         )
         payload = json.dumps(
             {"peer_id": target.peer_id, "text": draft}, ensure_ascii=False
@@ -404,6 +406,7 @@ async def _execute_intent(
             messages_loaded,
             heavy=heavy,
             global_style=owner.global_style_profile,
+            owner_id=owner.id,
         )
         await message.answer(
             f"⏪ <b>Где мы остановились — {contact.display_name}</b>\n\n{text}"
@@ -604,6 +607,7 @@ async def _process_text(
             tz_name=tz_name,
             history_block=history_block,
             memory_context=memory_context,
+            user_id=owner.id,
         )
     except Exception as e:
         logger.exception("agent route_intent failed")

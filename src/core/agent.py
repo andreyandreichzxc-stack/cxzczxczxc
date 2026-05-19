@@ -9,6 +9,7 @@ import json
 import logging
 from typing import Any
 
+from src.core.vector_store import vector_store
 from src.llm.base import ChatMessage, LLMProvider
 
 
@@ -194,6 +195,7 @@ async def route_intent(
     provider: LLMProvider,
     user_text: str,
     *,
+    user_id: int | None = None,
     heavy: bool = False,
     now_local: str | None = None,
     tz_name: str | None = None,
@@ -216,6 +218,28 @@ async def route_intent(
         system = system + "\n\nФакты из памяти:\n" + memory_context
     if history_block:
         system = system + "\n\n" + history_block
+
+    # --- RAG: релевантный контекст из истории (легковесный — 3 сообщения) ---
+    if user_id is not None:
+        try:
+            query_vec = await provider.embed(user_text)
+            hits = await vector_store.search(
+                user_id=user_id, embedding=query_vec, limit=3
+            )
+            if hits:
+                rag_lines = []
+                for h in hits:
+                    prefix = f"[{h.peer_name}]" if h.peer_name else ""
+                    rag_lines.append(f"{prefix} {h.text[:200]}")
+                rag_context = "\n".join(rag_lines)
+                system = (
+                    system
+                    + "\n\nРелевантный контекст из истории переписок:\n"
+                    + rag_context
+                )
+        except Exception:
+            logger.debug("RAG search non-critical fail", exc_info=True)
+
     raw = await provider.chat(
         [
             ChatMessage(role="system", content=system),

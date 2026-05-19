@@ -243,7 +243,9 @@ async def cb_summary(callback: CallbackQuery, userbot_manager: UserbotManager) -
         return
     _client, _owner, contact, messages, provider, heavy = bundle
 
-    text = await summarize_chat(provider, contact, messages, heavy=heavy)
+    text = await summarize_chat(
+        provider, contact, messages, heavy=heavy, owner_id=_owner.id
+    )
     if callback.message:
         await callback.message.edit_text(
             f"📝 <b>Саммари — {contact.display_name}</b>\n\n{text}",
@@ -298,6 +300,7 @@ async def cb_draft(callback: CallbackQuery, userbot_manager: UserbotManager) -> 
         messages,
         heavy=heavy,
         global_style=_owner.global_style_profile,
+        owner_id=_owner.id,
     )
     payload = json.dumps({"peer_id": peer_id, "text": draft}, ensure_ascii=False)
 
@@ -340,6 +343,7 @@ async def cb_catchup(callback: CallbackQuery, userbot_manager: UserbotManager) -
         messages,
         heavy=heavy,
         global_style=_owner.global_style_profile,
+        owner_id=_owner.id,
     )
     if callback.message:
         await callback.message.edit_text(
