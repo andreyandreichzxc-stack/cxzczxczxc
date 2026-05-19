@@ -681,6 +681,8 @@ def _summarize_intent_for_memory(intent: dict) -> str:
         return "посмотрел входящие"
     if kind == "full_analysis":
         return "запустил полный анализ"
+    if kind == "clarify":
+        return f"переспросил: {intent.get('question', '')[:100]}"
     return kind or ""
 
 
@@ -805,6 +807,13 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
         return
     if kind == "full_analysis":
         await _exec_full_analysis(intent, message)
+        return
+    if kind == "clarify":
+        question = (intent.get("question") or "").strip()
+        if question:
+            await message.answer(f"🤔 {question}")
+        else:
+            await message.answer("Не совсем понял. Уточни, что имеешь в виду?")
         return
     await _execute_intent(intent, message, state, userbot_manager, tz_name=tz_name)
 
