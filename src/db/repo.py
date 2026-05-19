@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -8,6 +9,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.crypto import decrypt, encrypt
+from src.core.vector_store import VectorStore
 from src.db.models import (
     ApiKey,
     AutoReplyLog,
@@ -25,6 +27,8 @@ from src.db.models import (
     User,
     UserSettings,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # Фоновые таски (digest, news, reminders, auto_sync) одновременно тыкаются в
@@ -583,10 +587,19 @@ async def add_memory(
     message_id: int | None = None,
     cluster_topic: str | None = None,
     deduplicate: bool = True,
+    embedding: list[float] | None = None,
+    vector_store_obj: VectorStore | None = None,
 ) -> Memory | None:
     """
     Добавляет факт в память с дедупликацией.
-    При deduplicate=True проверяет нет ли уже такого факта (по хешу).
+
+    Два уровня дедупликации (при deduplicate=True):
+      1. SHA256 хеш — точные повторы.
+      2. Если передан embedding + vector_store_obj — семантическая
+         дедупликация через Qdrant (cosine similarity > 0.85).
+
+    При обнаружении дубликата повышает confidence и times_mentioned.
+    Если embedding передан, индексирует факт в Qdrant для будущих проверок.
     """
     fact = fact.strip()
     if len(fact) < 3:
@@ -596,7 +609,7 @@ async def add_memory(
     emb_hash = hashlib.sha256(fact.lower().strip().encode()).hexdigest()[:16]
 
     if deduplicate:
-        # Поиск дубликата по хешу
+        # --- Уровень 1: SHA256 хеш (точные повторы) ---
         result = await session.execute(
             select(Memory)
             .where(
@@ -615,6 +628,26 @@ async def add_memory(
             await session.flush()
             return existing
 
+        # --- Уровень 2: семантическая дедупликация через Qdrant ---
+        if embedding is not None and vector_store_obj is not None:
+            similar = await vector_store_obj.search_similar_memories(
+                user_id=user.id,
+                embedding=embedding,
+                threshold=0.85,
+                limit=3,
+            )
+            if similar:
+                best = similar[0]
+                existing = await session.get(Memory, best["memory_id"])
+                if existing and existing.user_id == user.id:
+                    existing.times_mentioned = (existing.times_mentioned or 1) + 1
+                    existing.confidence = min(1.0, existing.confidence + 0.1)
+                    existing.updated_at = datetime.now(timezone.utc)
+                    if sentiment and existing.sentiment != sentiment:
+                        existing.sentiment = "contradictory"
+                    await session.flush()
+                    return existing
+
     mem = Memory(
         user_id=user.id,
         contact_id=contact_id,
@@ -630,6 +663,20 @@ async def add_memory(
     )
     session.add(mem)
     await session.flush()
+
+    # Индексируем эмбеддинг в Qdrant для будущей дедупликации
+    if embedding is not None and vector_store_obj is not None:
+        try:
+            await vector_store_obj.upsert_memory(
+                memory_id=mem.id,
+                user_id=user.id,
+                contact_id=contact_id,
+                fact=fact,
+                embedding=embedding,
+            )
+        except Exception:
+            logger.exception("Failed to index memory embedding in Qdrant")
+
     return mem
 
 
@@ -728,6 +775,10 @@ async def search_memories(
     *,
     contact_id: int | None = None,
 ) -> list[Memory]:
+    # Пробуем FTS5 сначала; если пусто — ILIKE fallback
+    results = await search_memories_fts(session, user, query, contact_id=contact_id)
+    if results:
+        return results
     stmt = (
         select(Memory)
         .where(
@@ -740,6 +791,45 @@ async def search_memories(
         stmt = stmt.where(Memory.contact_id == contact_id)
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def search_memories_fts(
+    session: AsyncSession,
+    user: User,
+    query: str,
+    *,
+    contact_id: int | None = None,
+    limit: int = 50,
+) -> list[Memory]:
+    """Полнотекстовый поиск по памяти через FTS5 с ранжированием по bm25().
+
+    Использует _fts_query_for() для преобразования запроса в FTS5-safe формат.
+    """
+    fts_q = _fts_query_for(query)
+    if not fts_q:
+        return []
+
+    base_sql = """
+        SELECT m.id FROM memories_fts
+        JOIN memories m ON m.id = memories_fts.rowid
+        WHERE memories_fts MATCH :q AND m.user_id = :uid
+    """
+    if contact_id is not None:
+        base_sql += " AND m.contact_id = :cid"
+    base_sql += " ORDER BY bm25(memories_fts) LIMIT :lim"
+
+    params = {"q": fts_q, "uid": user.id, "lim": limit}
+    if contact_id is not None:
+        params["cid"] = contact_id
+
+    result = await session.execute(sql_text(base_sql), params)
+    ids = [r[0] for r in result.fetchall()]
+    if not ids:
+        return []
+
+    rows = await session.execute(select(Memory).where(Memory.id.in_(ids)))
+    mem_map = {m.id: m for m in rows.scalars().all()}
+    return [mem_map[mid] for mid in ids if mid in mem_map]
 
 
 async def find_similar_memories(

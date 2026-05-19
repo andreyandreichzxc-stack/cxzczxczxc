@@ -6,6 +6,7 @@ import logging
 from sqlalchemy import select
 
 from src.core.chat_service import message_to_text
+from src.core.vector_store import vector_store
 from src.db.models import Contact, Message, User
 from src.db.repo import add_memory
 from src.db.session import get_session
@@ -98,6 +99,16 @@ async def extract_and_save_memories(
             sentiment = item.get("sentiment")
             if sentiment not in {"positive", "negative", "neutral"}:
                 sentiment = None
+
+            # Вычисляем эмбеддинг для семантической дедупликации
+            embedding = None
+            try:
+                embedding = await provider.embed(fact)
+            except Exception:
+                logger.warning(
+                    "Failed to embed fact, skipping vector dedup: %r", fact[:60]
+                )
+
             await add_memory(
                 session,
                 user,
@@ -106,6 +117,8 @@ async def extract_and_save_memories(
                 sentiment=sentiment,
                 source="chat",
                 message_id=None,
+                embedding=embedding,
+                vector_store_obj=vector_store if embedding else None,
             )
             saved.append(item)
 

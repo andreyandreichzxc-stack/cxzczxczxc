@@ -21,6 +21,7 @@ from src.config import settings as app_settings
 from src.core.chat_service import load_chat, message_to_text
 from src.core.notifier import notifier
 from src.core.style_profile import style_profile_as_prompt_hint
+from src.core.timeutil import now_in_tz
 from src.db.models import AutoReplyLog, User
 from src.db.repo import (
     add_auto_reply_log,
@@ -55,7 +56,8 @@ AUTO_REPLY_SYSTEM_BASE = (
     "Не пиши длиннее 1–3 коротких предложений.\n"
     "Если просят что-то конкретное — не обещай за меня, скажи: «передам, сейчас занят».\n"
     "Никогда не выдавай, что ты ИИ. Не упоминай ассистента, бота.\n"
-    "Не исользуй «уважаемый», «господин» — я так не общаюсь."
+    "Не исользуй «уважаемый», «господин» — я так не общаюсь.\n"
+    "- Если я СПЛЮ (ночное время): честно скажи что я сплю, с эмодзи 😴💤🌙🛏️. Не используй «занят»/«не у телефона»."
 )
 
 
@@ -67,12 +69,38 @@ async def _check_and_track_offline(
         status = getattr(me, "status", None)
         if isinstance(status, UserStatusOnline):
             owner.last_seen_online = datetime.utcnow()
+            # Сброс sleeping статуса — владелец онлайн
+            if owner.absence_status == "sleeping":
+                owner.absence_status = None
+                owner.absence_message = None
             await session.commit()
             return False
         if isinstance(status, UserStatusOffline):
             now = datetime.utcnow()
             last_seen = owner.last_seen_online
             if last_seen is None or (now - last_seen) > timedelta(minutes=10):
+                # Sleep detection — определяем, не спит ли владелец
+                tz_name = owner.settings.timezone if owner.settings else "UTC"
+                local_now = now_in_tz(tz_name)
+                hour = local_now.hour
+                is_night = hour >= 22 or hour < 8
+
+                if is_night:
+                    if last_seen is not None:
+                        offline_minutes = (now - last_seen).total_seconds() / 60
+                        if offline_minutes > 30 and owner.absence_status != "sleeping":
+                            owner.absence_status = "sleeping"
+                            owner.absence_message = (
+                                f"Спит с {local_now.strftime('%H:%M')}"
+                            )
+                            await session.commit()
+                else:
+                    # Дневное время — сброс sleeping статуса
+                    if owner.absence_status == "sleeping":
+                        owner.absence_status = None
+                        owner.absence_message = None
+                        await session.commit()
+
                 return True
             return False
         return True
@@ -160,6 +188,14 @@ async def _build_reply_text(
         system += f"\n\nВАЖНО: Владелец сказал перед уходом: «{owner.absence_message}». Учти это в ответе. Он отсутствует."
     elif owner.absence_status == "soon_back":
         system += f"\n\nВладелец скоро вернётся: «{owner.absence_message}». Ответь обнадёживающе, он скоро будет."
+    elif owner.absence_status == "sleeping":
+        system += (
+            f"\n\n🌙💤 Владелец СПИТ ({owner.absence_message}). "
+            "Никаких «занят» или «не у телефона» — честно скажи что он спит. "
+            "Используй эмодзи: 😴🛏️🌙💤🌌. Тон: заботливый, сонный. "
+            "Пример: «Владелец сейчас спит сладким сном 😴💤 "
+            "Как проснётся — обязательно ответит! 🌙»"
+        )
     if style_hint:
         system = system + "\n" + style_hint
 

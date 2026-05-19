@@ -48,12 +48,46 @@ _FTS_SETUP = [
     """,
 ]
 
+# Memory FTS5: virtual table + триггеры синхронизации с memories.
+_MEMORY_FTS_SETUP = [
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+        fact, sentiment, cluster_topic,
+        content='memories',
+        content_rowid='id',
+        tokenize='unicode61 remove_diacritics 2'
+    );
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+        INSERT INTO memories_fts(rowid, fact, sentiment, cluster_topic)
+        VALUES (new.id, new.fact, new.sentiment, new.cluster_topic);
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, fact, sentiment, cluster_topic)
+        VALUES('delete', old.id, old.fact, old.sentiment, old.cluster_topic);
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, fact, sentiment, cluster_topic)
+        VALUES('delete', old.id, old.fact, old.sentiment, old.cluster_topic);
+        INSERT INTO memories_fts(rowid, fact, sentiment, cluster_topic)
+        VALUES (new.id, new.fact, new.sentiment, new.cluster_topic);
+    END;
+    """,
+]
+
 
 async def init_db() -> None:
     settings.data_dir  # триггерит создание директории
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         for stmt in _FTS_SETUP:
+            await conn.execute(text(stmt))
+        for stmt in _MEMORY_FTS_SETUP:
             await conn.execute(text(stmt))
 
 
