@@ -193,6 +193,8 @@ class Contact(Base):
     folder_names: Mapped[str | None] = mapped_column(
         Text, nullable=True
     )  # comma-separated folder titles
+    archetype: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # null | "close_friend" | "family" | "colleague" | "acquaintance" | "toxic" | "romantic" | "unknown"
 
 
 class Message(Base):

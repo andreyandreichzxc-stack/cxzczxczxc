@@ -187,6 +187,15 @@ async def cb_thread_open(callback: CallbackQuery) -> None:
                     }.get(lm.relation_type or "", lm.relation_type or "связь")
                     lines.append(f"  {lm.relation_type}: «{lm.fact}»")
 
+            # Компактная история отношений
+            from src.core.memory_chain import build_chain_narrative
+
+            narrative = await build_chain_narrative(peer_id, callback.from_user.id)
+            if narrative:
+                lines.append("")
+                n_src = narrative.split("\n")
+                lines.extend(n_src[: min(len(n_src), 10)])
+
     lines.append("")
     lines.append("<i>Ответь в Telegram или через /send</i>")
     await callback.message.answer("\n".join(lines))

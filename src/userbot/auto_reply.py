@@ -173,6 +173,15 @@ async def _build_reply_text(
             memory_lines = [f"- {f}" for _, f in relevant_facts[:5]]
             memory_context = "Релевантные факты из памяти:\n" + "\n".join(memory_lines)
 
+        # Contact Archetype — вычисляем если ещё не задан
+        if contact and contact.archetype is None:
+            from src.core.contact_archetypes import classify_contact
+
+            archetype = await classify_contact(owner_telegram_id, peer_id)
+            if archetype:
+                contact.archetype = archetype
+                await session.commit()
+
         heavy = owner.settings.use_heavy_model
         global_profile = owner.global_style_profile
 
@@ -219,6 +228,14 @@ async def _build_reply_text(
         )
     if style_hint:
         system = system + "\n" + style_hint
+
+    # Архетип контакта (подсказка для тона)
+    if contact and contact.archetype:
+        from src.core.contact_archetypes import archetype_reply_hint
+
+        hint = archetype_reply_hint(contact.archetype)
+        if hint:
+            system += hint
 
     user_prompt = (
         f"Собеседник: {sender_name}.\n"

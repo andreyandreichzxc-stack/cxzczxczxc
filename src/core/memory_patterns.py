@@ -7,6 +7,8 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
 from src.core.notifier import notifier
 from src.core.timeutil import now_in_tz
 from src.db.repo import (
@@ -53,6 +55,7 @@ async def detect_patterns(owner_id: int) -> list[dict]:
                     insights.append(
                         {
                             "type": "periodic_contact",
+                            "contact_id": contact_id,
                             "title": f"📅 Регулярный контакт: {name}",
                             "detail": f"Ты общаешься с {name} каждую {day_names[best_day]} ({wdays[best_day]} раз за период).",
                             "action": f"Поставить еженедельное напоминание на {day_names[best_day]}?",
@@ -82,6 +85,7 @@ async def detect_patterns(owner_id: int) -> list[dict]:
                 insights.append(
                     {
                         "type": "stale_negative",
+                        "contact_id": contact_id,
                         "title": f"⚠️ Давно без контакта: {name}",
                         "detail": f"Последний негативный факт {days_since} дн. назад: «{fact[:80]}». Может написать?",
                         "action": f"Открыть /threads и проверить переписку с {name}",
@@ -112,6 +116,7 @@ async def detect_patterns(owner_id: int) -> list[dict]:
                     insights.append(
                         {
                             "type": "sentiment_shift",
+                            "contact_id": contact_id,
                             "title": f"📉 Ухудшение отношений: {name}",
                             "detail": f"Негатив вырос с {int(old_neg * 100)}% до {int(new_neg * 100)}%. Проверь что происходит.",
                             "action": f"Написать {name} или /chat {name}",
@@ -123,6 +128,7 @@ async def detect_patterns(owner_id: int) -> list[dict]:
                     insights.append(
                         {
                             "type": "sentiment_shift",
+                            "contact_id": contact_id,
                             "title": f"📈 Улучшение отношений: {name}",
                             "detail": f"Негатив снизился с {int(old_neg * 100)}% до {int(new_neg * 100)}%. Отлично!",
                             "action": f"Закрепить успех — написать {name}",
@@ -132,17 +138,84 @@ async def detect_patterns(owner_id: int) -> list[dict]:
     return insights
 
 
-def format_insights(insights: list[dict]) -> str:
-    """Форматирует инсайты в HTML для отправки."""
+def insights_keyboard(insight: dict) -> InlineKeyboardMarkup | None:
+    """Возвращает inline-клавиатуру для инсайта по его типу."""
+    t = insight["type"]
+    contact_id = insight.get("contact_id", 0)
+
+    if t == "periodic_contact":
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📅 Поставить напоминание",
+                        callback_data=f"pattern:remind:{contact_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="🔕 Не сейчас", callback_data="pattern:dismiss"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="📊 История контакта",
+                        callback_data=f"pattern:history:{contact_id}",
+                    ),
+                ],
+            ]
+        )
+    if t == "stale_negative":
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="💬 Написать",
+                        callback_data=f"pattern:write:{contact_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="🔕 Не сейчас", callback_data="pattern:dismiss"
+                    ),
+                ],
+            ]
+        )
+    if t == "sentiment_shift":
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="💬 Написать",
+                        callback_data=f"pattern:write:{contact_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="📊 Анализ",
+                        callback_data=f"pattern:history:{contact_id}",
+                    ),
+                ],
+            ]
+        )
+    return None
+
+
+def format_insights(
+    insights: list[dict],
+) -> tuple[str, list[InlineKeyboardMarkup | None]]:
+    """Форматирует инсайты в HTML для отправки.
+
+    Возвращает (текст, список клавиатур) — клавиатура для каждого инсайта.
+    """
     if not insights:
-        return "🧠 Анализ паттернов: всё стабильно. Необычных паттернов не обнаружено."
+        return (
+            "🧠 Анализ паттернов: всё стабильно. Необычных паттернов не обнаружено.",
+            [None],
+        )
     lines: list[str] = ["<b>🧠 Инсайты из памяти:</b>", ""]
+    keyboards: list[InlineKeyboardMarkup | None] = []
     for i, ins in enumerate(insights[:5]):
         lines.append(f"{i + 1}. {ins['title']}")
         lines.append(f"   {ins['detail']}")
         lines.append(f"   💡 {ins['action']}")
         lines.append("")
-    return "\n".join(lines)
+        keyboards.append(insights_keyboard(ins))
+    return "\n".join(lines), keyboards
 
 
 async def patterns_loop(owner_id: int) -> None:
@@ -159,8 +232,13 @@ async def patterns_loop(owner_id: int) -> None:
             if now.hour == 10 and last_run_date != today:
                 last_run_date = today
                 insights = await detect_patterns(owner_id)
-                text = format_insights(insights)
-                await notifier.notify(text)
+                text, keyboards = format_insights(insights)
+                for ins, kb in zip(insights[:5], keyboards):
+                    detail = (
+                        f"<b>{ins['title']}</b>\n{ins['detail']}\n💡 {ins['action']}"
+                    )
+                    await notifier.notify(detail, reply_markup=kb)
+                    await asyncio.sleep(0.5)
                 await asyncio.sleep(600)  # не повторять в этот час
             await asyncio.sleep(600)  # проверка каждые 10 минут
         except Exception as e:

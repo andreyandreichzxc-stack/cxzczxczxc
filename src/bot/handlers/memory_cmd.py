@@ -39,6 +39,10 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
     """Показать память — всё или про конкретный контакт."""
     args = (message.text or "").replace("/memory", "").strip()
 
+    story_mode = "--story" in args
+    if story_mode:
+        args = args.replace("--story", "").strip()
+
     contact_id = None
     label = ""
     if args:
@@ -55,6 +59,21 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
             if candidates:
                 contact_id = candidates[0].peer_id
                 label = f" — {candidates[0].label()}"
+
+    if story_mode:
+        if contact_id:
+            from src.core.memory_chain import build_chain_narrative
+
+            narrative = await build_chain_narrative(contact_id, message.from_user.id)
+            if narrative:
+                await message.answer(narrative)
+            else:
+                await message.answer(
+                    "Недостаточно данных для истории (нужно минимум 3 факта)."
+                )
+        else:
+            await message.answer("Укажи контакт: <code>/memory --story имя</code>")
+        return
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -247,8 +266,15 @@ async def cmd_insights(message: Message) -> None:
     from src.core.memory_patterns import detect_patterns, format_insights
 
     insights = await detect_patterns(message.from_user.id)
-    text = format_insights(insights)
-    await message.answer(text)
+    text, keyboards = format_insights(insights)
+    # Если инсайтов нет — шлём один текст
+    if not insights:
+        await message.answer(text)
+        return
+    # Если есть — каждый инсайт отдельным сообщением с клавиатурой
+    for ins, kb in zip(insights[:5], keyboards):
+        detail = f"<b>{ins['title']}</b>\n{ins['detail']}\n💡 {ins['action']}"
+        await message.answer(detail, reply_markup=kb)
 
 
 @router.message(Command("forget"))
@@ -277,3 +303,68 @@ async def cmd_forget(
         f"«{m.fact[:50]}…»" if len(m.fact) > 50 else f"«{m.fact}»" for m in found
     )
     await message.answer(f"🗑 Забыл: {names}")
+
+
+@router.message(Command("archetypes"))
+async def cmd_archetypes(message: Message) -> None:
+    """Показать архетипы всех контактов."""
+    from src.core.contact_archetypes import (
+        classify_all_contacts,
+        format_archetype_stats,
+    )
+
+    await message.answer("🏷 Анализирую контакты...")
+    stats = await classify_all_contacts(message.from_user.id)
+    text = format_archetype_stats(stats)
+    await message.answer(text)
+
+
+@router.callback_query(F.data.startswith("pattern:"))
+async def cb_pattern_action(callback: CallbackQuery) -> None:
+    """Обрабатывает нажатия на inline-кнопки паттернов."""
+    data = callback.data.split(":")
+    action = data[1]  # remind, dismiss, history, write
+    contact_id = int(data[2]) if len(data) > 2 else 0
+
+    if action == "dismiss":
+        if callback.message:
+            await callback.message.edit_text(
+                callback.message.text + "\n\n🔕 Ок, не сейчас."
+            )
+        await callback.answer()
+        return
+
+    if action == "remind":
+        from src.db.repo import get_contact, get_or_create_user
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, callback.from_user.id)
+            contact = await get_contact(session, owner, contact_id)
+            name = contact.display_name if contact else str(contact_id)
+            # Сохраняем факт в память
+            await add_memory(
+                session,
+                owner,
+                fact=f"Пользователь хочет напоминание о созвоне с {name}",
+                source="user",
+                sentiment="neutral",
+            )
+        if callback.message:
+            await callback.message.edit_text(
+                f"📅 Напоминание для <b>{name}</b>\n"
+                f"Напиши: <code>/remind за час до созвона с {name}</code>"
+            )
+        await callback.answer(f"Напоминание для {name}")
+        return
+
+    if action == "history":
+        await callback.answer(
+            f"История контакта {contact_id} — открой /chat {contact_id} или /memory"
+        )
+        return
+
+    if action == "write":
+        await callback.answer("Напиши: /send контакт текст")
+        return
+
+    await callback.answer()

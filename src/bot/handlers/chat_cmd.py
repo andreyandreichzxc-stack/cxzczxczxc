@@ -66,6 +66,7 @@ def _actions_keyboard(peer_id: int) -> InlineKeyboardMarkup:
         ),
     )
     kb.row(
+        InlineKeyboardButton(text="📖 История", callback_data=f"chat:story:{peer_id}"),
         InlineKeyboardButton(text="🧠 Полный анализ", callback_data="chat:analyze:all"),
     )
     return kb.as_markup()
@@ -575,6 +576,27 @@ async def cmd_recent(message: Message) -> None:
 
     body = "\n\n".join(lines)
     await message.answer(f"📋 <b>Последняя активность</b>\n\n{body}")
+
+
+@router.callback_query(F.data.startswith("chat:story:"))
+async def cb_story(callback: CallbackQuery) -> None:
+    """Показать историю отношений с контактом."""
+    peer_id = int(callback.data.split(":")[2])
+    from src.core.memory_chain import build_chain_narrative
+
+    narrative = await build_chain_narrative(peer_id, callback.from_user.id)
+    if callback.message:
+        if narrative:
+            await callback.message.edit_text(
+                narrative,
+                reply_markup=_actions_keyboard(peer_id),
+            )
+        else:
+            await callback.message.edit_text(
+                "Недостаточно данных для истории (нужно минимум 3 факта).",
+                reply_markup=_actions_keyboard(peer_id),
+            )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("chat:analyze:"))
