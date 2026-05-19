@@ -94,6 +94,21 @@ async def init_db() -> None:
         for stmt in _MEMORY_FTS_SETUP:
             await conn.execute(text(stmt))
 
+        # Миграция: добавляем колонки adaptive scoring если их нет
+        for col, col_def in [
+            ("memory_type", "VARCHAR(24)"),
+            ("use_count", "INTEGER DEFAULT 0"),
+            ("last_used_at", "TIMESTAMP"),
+            ("expires_at", "TIMESTAMP"),
+            ("pinned", "BOOLEAN DEFAULT 0"),
+        ]:
+            try:
+                await conn.execute(
+                    text(f"ALTER TABLE memories ADD COLUMN {col} {col_def}")
+                )
+            except Exception:
+                pass  # колонка уже существует
+
         # Миграция старых связей памяти (related_memory_id → memory_links)
         try:
             result = await conn.execute(

@@ -19,11 +19,14 @@ from src.core.memory_fuel import (
 from src.core.memory_neighbors import format_neighbors, get_neighbors
 from src.db.repo import (
     add_memory,
+    add_memory_candidate,
     delete_memory,
+    delete_memory_candidate,
     get_linked_memories,
     get_memory_stats,
     get_or_create_user,
     list_memories,
+    list_memory_candidates,
     search_memories,
 )
 from src.db.session import get_session
@@ -37,8 +40,61 @@ router.message.filter(OwnerOnly())
 
 @router.message(Command("memory"))
 async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
-    """Показать память — всё или про конкретный контакт."""
+    """Показать память — всё или про конкретный контакт, или --inbox."""
     args = (message.text or "").replace("/memory", "").strip()
+
+    inbox_mode = "--inbox" in args
+    if inbox_mode:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            candidates = await list_memory_candidates(session, owner)
+        if not candidates:
+            await message.answer("📭 Входящих фактов на подтверждение нет.")
+            return
+        lines = ["📬 <b>Входящие факты (Memory Inbox):</b>", ""]
+        for i, c in enumerate(candidates, 1):
+            sent_emoji = {
+                "positive": "🟢",
+                "negative": "🔴",
+                "neutral": "⚪",
+            }.get(c.sentiment or "", "⚪")
+            mem_type = f" ({c.memory_type})" if c.memory_type else ""
+            lines.append(
+                f"{i}. {sent_emoji} <i>{c.fact}</i>{mem_type}\n"
+                f"   важность={c.importance}, затухание={c.decay_rate}, источник={c.source}"
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="✅ Запомнить",
+                            callback_data=f"memb:confirm:{c.id}",
+                        ),
+                        InlineKeyboardButton(
+                            text="✏️ Исправить",
+                            callback_data=f"memb:edit:{c.id}",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="⏳ На неделю",
+                            callback_data=f"memb:temporary:{c.id}",
+                        ),
+                        InlineKeyboardButton(
+                            text="♾ Навсегда",
+                            callback_data=f"memb:permanent:{c.id}",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="❌ Удалить",
+                            callback_data=f"memb:discard:{c.id}",
+                        ),
+                    ],
+                ]
+            )
+            await message.answer(lines[-1], reply_markup=kb)
+        return
 
     tag_mode = "--tag" in args
     if tag_mode:
@@ -473,6 +529,100 @@ async def cmd_conflicts(message: Message) -> None:
     conflicts = await find_conflicts(message.from_user.id)
     text = format_conflicts(conflicts)
     await message.answer(text)
+
+
+# ── Memory Inbox (memb:*) handlers ──────────────────────────────────
+
+
+@router.callback_query(F.data.startswith("memb:"))
+async def cb_memory_inbox(callback: CallbackQuery) -> None:
+    """Обрабатывает кнопки Inbox для MemoryCandidate."""
+    from datetime import datetime, timezone
+
+    parts = callback.data.split(":")
+    action = parts[1]
+    candidate_id = int(parts[2])
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        candidate = await session.get(MemoryCandidate, candidate_id)
+
+        if candidate is None or candidate.user_id != owner.id:
+            await callback.answer("Факт не найден", show_alert=True)
+            return
+
+        if action == "confirm":
+            # Перенести в Memory как есть
+            await add_memory(
+                session,
+                owner,
+                fact=candidate.fact,
+                contact_id=candidate.contact_id,
+                sentiment=candidate.sentiment or None,
+                source=candidate.source,
+                importance=candidate.importance,
+                decay_rate=candidate.decay_rate,
+            )
+            await session.delete(candidate)
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                f"✅ Запомнил: <i>{candidate.fact}</i>"
+            )
+            await callback.answer("Факт сохранён")
+
+        elif action == "discard":
+            await session.delete(candidate)
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                f"🗑 Удалил: <i>{candidate.fact}</i>"
+            )
+            await callback.answer("Факт удалён")
+
+        elif action == "temporary":
+            # Перенести с memory_type="temporary", decay_rate=0.3 (быстро протухнет)
+            await add_memory(
+                session,
+                owner,
+                fact=candidate.fact,
+                contact_id=candidate.contact_id,
+                sentiment=candidate.sentiment or None,
+                source=candidate.source,
+                memory_type="temporary",
+                importance=candidate.importance,
+                decay_rate=0.3,
+            )
+            await session.delete(candidate)
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                f"⏳ Сохранено на неделю: <i>{candidate.fact}</i>"
+            )
+            await callback.answer("Факт сохранён временно")
+
+        elif action == "permanent":
+            # Перенести с decay_rate=0.01 (почти не протухнет)
+            await add_memory(
+                session,
+                owner,
+                fact=candidate.fact,
+                contact_id=candidate.contact_id,
+                sentiment=candidate.sentiment or None,
+                source=candidate.source,
+                importance=min(1.0, candidate.importance + 0.2),
+                decay_rate=0.01,
+            )
+            await session.delete(candidate)
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                f"♾ Сохранено навсегда: <i>{candidate.fact}</i>"
+            )
+            await callback.answer("Факт сохранён навсегда")
+
+        elif action == "edit":
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                f"✏️ Напиши исправленный текст для факта:\n\n"
+                f"<i>{candidate.fact}</i>\n\n"
+                f"<code>/remember исправленный текст</code>"
+            )
+            await callback.answer()
+
+        else:
+            await callback.answer("Неизвестное действие")
 
 
 @router.callback_query(F.data.startswith("conflict:resolve:"))

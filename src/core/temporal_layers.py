@@ -133,6 +133,9 @@ async def get_prompt_facts(
     all_facts = list(result.scalars().all())
     now = datetime.now(timezone.utc)
     buckets: dict[str, list] = {"recent": [], "medium": [], "longterm": []}
+    # Сортируем: pinned всегда первыми, затем по use_count, затем по confidence
+    all_facts.sort(key=lambda m: (m.pinned, m.use_count, m.confidence), reverse=True)
+
     for m in all_facts:
         layer = m.temporal_layer or (
             classify_layer(m.created_at, now) if m.created_at else "recent"

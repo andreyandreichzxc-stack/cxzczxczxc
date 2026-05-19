@@ -28,9 +28,11 @@ from src.core import conversation_context as ctx_store
 from src.core.text_sanitizer import sanitize_html
 from src.core.timeutil import fmt_local, is_valid_tz, now_in_tz, tz_short
 from src.core.transcription import transcription_service
+from src.core.temporal_layers import get_prompt_facts
 from src.db.repo import (
     add_commitment,
     add_memory,
+    add_memory_candidate,
     add_news_topic,
     create_pending_action,
     delete_memory,
@@ -243,10 +245,23 @@ async def _execute_intent(
                 action = await create_pending_action(
                     session, user_id=owner.id, kind="send_message", payload=payload
                 )
+                # подгружаем факты о собеседнике
+                facts_hint = ""
+                if target.peer_id:
+                    try:
+                        contact_facts = await get_prompt_facts(
+                            session, owner, contact_id=target.peer_id, total_limit=3
+                        )
+                        if contact_facts:
+                            facts_hint = "\n\n📝 О собеседнике: " + "; ".join(
+                                m.fact[:60] for m in contact_facts
+                            )
+                    except Exception:
+                        pass
             await message.answer(
                 f"🤔 <b>Готов отправить</b>\n\n"
                 f"→ <b>Кому:</b> {target.label()}\n"
-                f"→ <b>Текст:</b>\n{text}",
+                f"→ <b>Текст:</b>\n{text}{facts_hint}",
                 reply_markup=_confirm_keyboard(action.id),
             )
         else:
@@ -578,17 +593,16 @@ async def _process_text(
     now_local_str = now_in_tz(tz_name).strftime("%Y-%m-%d %H:%M")
     history_block = ctx_store.render_history_block(message.from_user.id)
 
-    # грузим память для контекста
+    # грузим память для контекста с временными слоями
     memory_context = ""
     try:
         async with get_session() as session:
-            memories = await list_memories(session, owner)
-            active = [m for m in memories if m.is_active][:20]
-            if active:
-                memory_context = "Факты из памяти:\n" + "\n".join(
-                    f"[#{m.id}] {m.fact} (sentiment={m.sentiment or 'neutral'})"
-                    for m in active
-                )
+            owner_obj = await get_or_create_user(session, message.from_user.id)
+            facts = await get_prompt_facts(session, owner_obj, total_limit=8)
+            memory_lines = []
+            for m in facts:
+                memory_lines.append(f"- {m.fact}")
+            memory_context = "\n".join(memory_lines) if memory_lines else ""
     except Exception:
         pass
 
@@ -999,6 +1013,9 @@ async def _exec_store_memory(intent, message) -> None:
     if sentiment not in ("positive", "negative", "neutral"):
         sentiment = None
 
+    # Confidence из интента; если нет — считаем низкой (→ кандидат)
+    confidence = float(intent.get("confidence") or 0.0)
+
     contact_id = None
     if contact_name:
         async with get_session() as session:
@@ -1015,16 +1032,32 @@ async def _exec_store_memory(intent, message) -> None:
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        mem = await add_memory(
-            session,
-            owner,
-            fact=fact,
-            contact_id=contact_id,
-            sentiment=sentiment,
-            source="user",
-        )
 
-    await message.answer(f"🧠 Запомнил: <i>{fact}</i>")
+        if confidence >= 0.85:
+            # Высокая уверенность — сразу в память
+            mem = await add_memory(
+                session,
+                owner,
+                fact=fact,
+                contact_id=contact_id,
+                sentiment=sentiment,
+                source="user",
+            )
+            await message.answer(f"🧠 Запомнил: <i>{fact}</i>")
+        else:
+            # Низкая уверенность — в черновик (MemoryCandidate)
+            await add_memory_candidate(
+                session,
+                owner,
+                fact=fact,
+                contact_id=contact_id,
+                sentiment=sentiment,
+                source="user",
+            )
+            await message.answer(
+                f"📬 Сохранил как черновик: <i>{fact}</i>\n"
+                f"Подтверди через <code>/memory --inbox</code>"
+            )
 
 
 async def _exec_forget_memory(intent, message) -> None:
@@ -1088,6 +1121,7 @@ async def _exec_list_memories(intent, message) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         items = await list_memories(session, owner, contact_id=contact_id)
+        items = [m for m in items if m.is_active]
 
     if not items:
         await message.answer("Память пуста.")
@@ -1306,11 +1340,12 @@ async def cb_memq_list(callback: CallbackQuery) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         memories = await list_memories(session, owner)
-        if not memories:
+        active = [m for m in memories if m.is_active]
+        if not active:
             await callback.answer("Память пуста 📭", show_alert=True)
             return
         lines = ["<b>🧠 Последние факты:</b>", ""]
-        for m in memories[:10]:
+        for m in active[:10]:
             emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(
                 m.sentiment, "⚪"
             )
@@ -1338,7 +1373,8 @@ async def cb_memq_forget(callback: CallbackQuery) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         memories = await list_memories(session, owner)
-        if not memories:
+        active = [m for m in memories if m.is_active]
+        if not active:
             await callback.answer("Нечего забывать 📭", show_alert=True)
             return
         kb = InlineKeyboardMarkup(
@@ -1348,7 +1384,7 @@ async def cb_memq_forget(callback: CallbackQuery) -> None:
                         text=f"❌ {m.fact[:40]}", callback_data=f"memq:del:{m.id}"
                     )
                 ]
-                for m in memories[:8]
+                for m in active[:8]
             ]
         )
         await callback.message.answer(

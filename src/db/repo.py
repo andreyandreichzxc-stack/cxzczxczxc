@@ -18,6 +18,7 @@ from src.db.models import (
     ConversationState,
     Folder,
     Memory,
+    MemoryCandidate,
     MemoryCluster,
     MemoryLink,
     Message,
@@ -751,6 +752,59 @@ async def delete_memory(session: AsyncSession, user: User, memory_id: int) -> bo
     await session.delete(m)
     await invalidate("mem_")
     return True
+
+
+async def add_memory_candidate(
+    session: AsyncSession,
+    user: User,
+    *,
+    fact: str,
+    contact_id: int | None = None,
+    sentiment: str | None = None,
+    memory_type: str | None = None,
+    source: str = "chat",
+    importance: float = 0.5,
+    decay_rate: float = 0.07,
+) -> MemoryCandidate:
+    candidate = MemoryCandidate(
+        user_id=user.id,
+        contact_id=contact_id,
+        fact=fact,
+        sentiment=sentiment,
+        memory_type=memory_type,
+        source=source,
+        importance=importance,
+        decay_rate=decay_rate,
+    )
+    session.add(candidate)
+    await session.flush()
+    return candidate
+
+
+async def list_memory_candidates(
+    session: AsyncSession,
+    user: User,
+    limit: int = 20,
+) -> list[MemoryCandidate]:
+    result = await session.execute(
+        select(MemoryCandidate)
+        .where(MemoryCandidate.user_id == user.id)
+        .order_by(MemoryCandidate.created_at.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def delete_memory_candidate(
+    session: AsyncSession,
+    user: User,
+    candidate_id: int,
+) -> bool:
+    obj = await session.get(MemoryCandidate, candidate_id)
+    if obj and obj.user_id == user.id:
+        await session.delete(obj)
+        return True
+    return False
 
 
 async def fetch_my_messages_global(

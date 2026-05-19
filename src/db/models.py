@@ -401,6 +401,16 @@ class Memory(Base):
         String(256), nullable=True
     )  # comma-separated: "работа,деньги"
 
+    memory_type: Mapped[str | None] = mapped_column(
+        String(24), nullable=True, index=True
+    )
+    # personal | contact_fact | relationship | task | preference | temporary
+
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
     related_memory_id: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True, index=True
     )  # ссылка на другой Memory.id
@@ -494,6 +504,27 @@ class ConversationState(Base):
     last_incoming_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_outgoing_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_auto_reply_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class MemoryCandidate(Base):
+    """Факты на подтверждение — черновик памяти."""
+
+    __tablename__ = "memory_candidates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    contact_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    fact: Mapped[str] = mapped_column(Text)
+    sentiment: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    memory_type: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    source: Mapped[str] = mapped_column(String(16), default="chat")
+    importance: Mapped[float] = mapped_column(Float, default=0.5)
+    decay_rate: Mapped[float] = mapped_column(Float, default=0.07)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

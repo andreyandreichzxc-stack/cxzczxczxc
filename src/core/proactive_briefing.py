@@ -6,12 +6,14 @@ from datetime import datetime, timedelta, timezone
 from src.core.memory_fuel import get_fuel_stats
 from src.core.memory_health import (
     calculate_health_score,
+    compute_emotional_trend,
     format_health,
     format_health_compact,
 )
 from src.core.notifier import notifier
 from src.core.temporal_layers import format_layer_stats, get_layer_stats
 from src.db.repo import (
+    get_contact,
     get_memory_stats,
     get_or_create_user,
     list_active_conversations,
@@ -36,6 +38,8 @@ class BriefingData:
     bridges: list = None  # смысловые мосты между контактами
     tag_stats: dict = None  # статистика по тегам
     health: dict = None  # здоровье памяти
+    emotional_trend: str | None = None  # эмоциональный тренд
+    conversation_starters: list = None  # предложения написать контактам
 
     def __post_init__(self) -> None:
         if self.waiting_reply is None:
@@ -46,6 +50,8 @@ class BriefingData:
             self.today_commitments = []
         if self.bridges is None:
             self.bridges = []
+        if self.conversation_starters is None:
+            self.conversation_starters = []
 
 
 async def collect_briefing_data(owner_id: int) -> BriefingData:
@@ -106,6 +112,28 @@ async def collect_briefing_data(owner_id: int) -> BriefingData:
 
     # Здоровье памяти
     result.health = await calculate_health_score(owner_id)
+
+    # Эмоциональный тренд
+    result.emotional_trend = await compute_emotional_trend(owner_id)
+
+    # Conversation starters: контакты с waiting_reply >2 дней
+    stale_waiting = await list_active_conversations(
+        session, owner, status="waiting_reply", limit=50
+    )
+    now = datetime.now(timezone.utc)
+    for conv in stale_waiting:
+        # если последнее входящее сообщение было >2 дней назад
+        if conv.last_incoming_at and (now - conv.last_incoming_at).days >= 2:
+            contact_obj = await get_contact(session, owner, conv.peer_id)
+            name = contact_obj.display_name if contact_obj else f"id{conv.peer_id}"
+            days_since = (now - conv.last_incoming_at).days
+            result.conversation_starters.append(
+                {
+                    "peer_id": conv.peer_id,
+                    "name": name,
+                    "days_since": days_since,
+                }
+            )
 
     return result
 
@@ -187,6 +215,18 @@ def format_briefing(data: BriefingData, title: str) -> str:
 
         lines.append("")
         lines.append(format_bridges(data.bridges))
+
+    # Эмоциональный тренд
+    if data.emotional_trend:
+        lines.append("")
+        lines.append(data.emotional_trend)
+
+    # Conversation starters
+    if data.conversation_starters:
+        lines.append("")
+        lines.append("💬 <b>Напомнить о себе:</b>")
+        for cs in data.conversation_starters[:3]:
+            lines.append(f"  • <b>{cs['name']}</b> — не общались {cs['days_since']} д.")
 
     if data.health:
         lines.append("")

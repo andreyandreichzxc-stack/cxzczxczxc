@@ -73,7 +73,34 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
                         layer = mem.temporal_layer or classify_layer(mem.created_at)
                         cfg = get_layer_config(layer)
                         effective_rate = mem.decay_rate * cfg["decay_multiplier"]
-                        new_conf = mem.confidence * math.exp(-effective_rate * days)
+
+                        # Базовый decay (экспоненциальный)
+                        base_decay = 2.71828 ** (-effective_rate * days)
+
+                        # Adaptive multiplier от use_count
+                        use_mult = 1.0
+                        if mem.use_count > 10:
+                            use_mult = 0.5  # очень медленно
+                        elif mem.use_count > 5:
+                            use_mult = 0.7
+                        elif mem.use_count > 0:
+                            use_mult = 0.85
+                        elif mem.use_count == 0 and days > 14:
+                            use_mult = 1.3  # неиспользуемый + старый → быстрее
+
+                        # Adaptive multiplier от memory_type
+                        type_mult = 1.0
+                        if mem.memory_type == "temporary":
+                            type_mult = 3.0  # быстро протухает
+                        elif mem.memory_type == "preference":
+                            type_mult = 0.3  # почти не протухает
+                        elif mem.memory_type == "personal":
+                            type_mult = 0.5
+                        elif mem.memory_type == "contact_fact":
+                            type_mult = 0.8
+
+                        new_conf = mem.confidence * (base_decay * use_mult * type_mult)
+
                         if new_conf < 0.2:  # забылся
                             mem.is_active = False
                             mem.validity_end = now_utc

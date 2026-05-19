@@ -193,3 +193,51 @@ def format_health_compact(health: dict) -> str:
     score = health["score"]
     bar = "█" * int(score / 10) + "░" * (10 - int(score / 10))
     return f"🧠 Здоровье памяти: {score}/100 [{bar}]"
+
+
+async def compute_emotional_trend(owner_id: int) -> str | None:
+    """
+    Сравнивает sentiment за последние 7 дней vs предыдущие 7 дней.
+    Возвращает строку с эмоциональным трендом или None, если данных недостаточно.
+    """
+    async with get_session() as session:
+        owner = await get_or_create_user(session, owner_id)
+        memories = await list_memories(session, owner)
+    now = datetime.now(timezone.utc)
+    recent_cutoff = now - timedelta(days=7)
+    prior_cutoff = now - timedelta(days=14)
+
+    recent = [
+        m
+        for m in memories
+        if m.is_active
+        and m.sentiment in ("positive", "negative")
+        and m.created_at
+        and recent_cutoff <= m.created_at <= now
+    ]
+    prior = [
+        m
+        for m in memories
+        if m.is_active
+        and m.sentiment in ("positive", "negative")
+        and m.created_at
+        and prior_cutoff <= m.created_at < recent_cutoff
+    ]
+
+    if not recent or not prior:
+        return None
+
+    def positivity_ratio(ms: list) -> float:
+        pos = sum(1 for m in ms if m.sentiment == "positive")
+        return pos / len(ms) if ms else 0.0
+
+    recent_ratio = positivity_ratio(recent)
+    prior_ratio = positivity_ratio(prior)
+    diff = recent_ratio - prior_ratio
+
+    if diff > 0.1:
+        return "📈 Эмоциональный тренд: отношения улучшаются ✨"
+    elif diff < -0.1:
+        return "📉 Эмоциональный тренд: растёт напряжение ⚠️"
+    else:
+        return "➖ Эмоциональный тренд: стабильно"
