@@ -46,6 +46,8 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         f"🌍 Часовой пояс: <b>{tz_short(s.timezone)}</b>\n"
         f"🔄 Авто-ответ: {_check(s.auto_reply_enabled)} (кулдаун {s.auto_reply_cooldown_min}м)\n"
         f"🔄 Авто-синк: {_check(getattr(s, 'auto_sync_enabled', True))} (каждые {getattr(s, 'auto_sync_interval_sec', 7200)}с)\n"
+        f"🧠 Авто-память: {_check(getattr(s, 'auto_extract_memories', False))}\n"
+        f"⭐ Избранное: {_check(getattr(s, 'include_saved_messages', False))}\n"
         f"☀ Дайджест: {_check(s.digest_enabled)} ({s.digest_time})\n"
         f"⏰ Напоминания: {_check(s.reminders_enabled)} (за {s.reminder_lead_hours}ч; просрочки {_check(s.reminder_overdue_enabled)})\n"
         f"📰 Новости: {_check(s.news_enabled)} (окно {s.news_window_hours}ч)\n"
@@ -119,6 +121,8 @@ BOOL_KEYS = {
     "news_enabled",
     "use_heavy_model",
     "auto_sync_enabled",
+    "auto_extract_memories",
+    "include_saved_messages",
 }
 
 CHOICE_KEYS = {
@@ -443,6 +447,8 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
     elif section == "sync":
         sync_enabled = getattr(s, "auto_sync_enabled", True)
         sync_sec = getattr(s, "auto_sync_interval_sec", 7200)
+        auto_mem = getattr(s, "auto_extract_memories", False)
+        saved_msgs = getattr(s, "include_saved_messages", False)
         if sync_sec >= 3600:
             intv = f"{sync_sec // 3600}ч"
         elif sync_sec >= 60:
@@ -450,14 +456,23 @@ async def _render_section(telegram_id: int, section: str) -> tuple[str, InlineKe
         else:
             intv = f"{sync_sec}с"
         text = (
-            "🔄 <b>Авто-синхронизация</b>\n\n"
+            "🔄 <b>Синхронизация и разведка</b>\n\n"
             "Раз в указанный интервал бот обновляет список контактов и архивный статус.\n\n"
-            f"Статус: <b>{'ВКЛ' if sync_enabled else 'ВЫКЛ'}</b>\n"
-            f"Интервал: <b>{intv} ({sync_sec} сек)</b>"
+            f"Авто-синк: <b>{'ВКЛ' if sync_enabled else 'ВЫКЛ'}</b> · {intv}\n"
+            f"Авто-память: <b>{'ВКЛ' if auto_mem else 'ВЫКЛ'}</b> (после синка извлекает факты без вопроса)\n"
+            f"Избранное: <b>{'ВКЛ' if saved_msgs else 'ВЫКЛ'}</b> (индексировать и искать в Избранном)"
         )
         kb.row(InlineKeyboardButton(
             text=f"{_check(sync_enabled)} Включить авто-синк",
             callback_data="set:tog:auto_sync_enabled",
+        ))
+        kb.row(InlineKeyboardButton(
+            text=f"{_check(auto_mem)} Авто-извлечение памяти",
+            callback_data="set:tog:auto_extract_memories",
+        ))
+        kb.row(InlineKeyboardButton(
+            text=f"{_check(saved_msgs)} Индексировать Избранное",
+            callback_data="set:tog:include_saved_messages",
         ))
         for v, label in [(60, "1м"), (300, "5м"), (1800, "30м"), (3600, "1ч"), (7200, "2ч"), (14400, "4ч"), (86400, "24ч")]:
             kb.row(InlineKeyboardButton(

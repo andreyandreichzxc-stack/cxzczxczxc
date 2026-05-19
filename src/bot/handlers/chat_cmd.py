@@ -281,7 +281,12 @@ async def cmd_sync(message: Message, userbot_manager: UserbotManager) -> None:
                 f"📥 Prefetch готов: {ps['chats']} чатов, {ps['messages']} сообщений в БД."
             )
             # после prefetch — предложить извлечь память из топ-чатов
-            await _offer_memory_extraction(message)
+            auto_mem = getattr(owner.settings, "auto_extract_memories", False)
+            if auto_mem:
+                # авто-режим: дёргаем без вопроса
+                await _auto_extract_memories(message, client, owner)
+            else:
+                await _offer_memory_extraction(message)
 
         except Exception:
             logger.exception("prefetch failed")
@@ -381,3 +386,60 @@ async def cb_extract_memories(callback: CallbackQuery, userbot_manager: UserbotM
             f"✅ Извлечено <b>{total}</b> фактов из {len(targets)} контактов."
         )
     await callback.answer()
+
+
+async def _auto_extract_memories(message: Message, client, owner) -> None:
+    """Авто-извлечение памяти без вопроса (fire-and-forget)."""
+    from src.db.repo import list_contacts
+    from src.llm.router import build_provider
+    import asyncio
+
+    async with get_session() as session:
+        contacts = await list_contacts(session, owner, kinds=("user",), include_archived=False)
+        provider = await build_provider(session, owner)
+    if provider is None:
+        return
+
+    targets = [c for c in contacts[:10] if not c.is_bot]
+    if not targets:
+        return
+
+    total = 0
+    for ct in targets:
+        try:
+            msgs = await load_chat(client, message.from_user.id, ct.peer_id, limit=60)
+            count = await extract_and_save_memories(provider, owner.id, ct, msgs)
+            total += count
+        except Exception:
+            pass
+
+    if total:
+        await message.answer(f"🧠 Авто-память: +{total} фактов из {len(targets)} контактов.")
+
+
+@router.message(Command("recent"))
+async def cmd_recent(message: Message) -> None:
+    """Показать сводку по последней активности в чатах."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        from src.db.repo import list_contacts, fetch_chat_messages
+        contacts = await list_contacts(session, owner, kinds=("user",), include_archived=False)
+        active = [c for c in contacts if not c.is_bot]
+
+    if not active:
+        await message.answer("Нет активных чатов.")
+        return
+
+    lines = []
+    for ct in active[:10]:
+        async with get_session() as session:
+            msgs = await fetch_chat_messages(session, owner, ct.peer_id, limit=3)
+        last_date = msgs[0].date.strftime("%d.%m %H:%M") if msgs else "?"
+        last_msg = msgs[0].text or msgs[0].transcript or f"[{msgs[0].kind}]" if msgs else "?"
+        if len(last_msg) > 50:
+            last_msg = last_msg[:47] + "…"
+        who = "→" if msgs and msgs[0].is_outgoing else "←"
+        lines.append(f"<b>{ct.display_name}</b> {who} {last_date}\n<i>{last_msg}</i>")
+
+    body = "\n\n".join(lines)
+    await message.answer(f"📋 <b>Последняя активность</b>\n\n{body}")

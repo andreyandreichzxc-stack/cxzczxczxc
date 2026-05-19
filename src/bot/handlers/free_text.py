@@ -71,7 +71,9 @@ SETTING_FIELDS: dict[str, str] = {
     "transcription_mode":         "choice:local,api,hybrid",
     "transcription_api_provider": "choice:openai,gemini,mistral",
     "auto_sync_enabled":          "bool",
-    "auto_sync_interval_min":      "int",
+    "auto_sync_interval_sec":      "int",
+    "auto_extract_memories":       "bool",
+    "include_saved_messages":      "bool",
     "timezone":                   "tz",
 }
 
