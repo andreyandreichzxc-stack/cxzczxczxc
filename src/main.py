@@ -4,6 +4,7 @@ import logging
 from src.bot.app import run_bot
 from src.core.auto_sync import auto_sync_loop
 from src.core.digest import digest_scheduler_loop
+from src.core.memory_checker import memory_checker_loop
 from src.core.news import news_scheduler_loop
 from src.core.reminders import reminders_loop
 from src.db.session import init_db
@@ -30,6 +31,7 @@ async def main() -> None:
         asyncio.create_task(reminders_loop(), name="reminders-loop"),
         asyncio.create_task(news_scheduler_loop(), name="news-scheduler"),
         asyncio.create_task(auto_sync_loop(), name="auto-sync"),
+        asyncio.create_task(memory_checker_loop(), name="memory-checker"),
     ]
 
     try:

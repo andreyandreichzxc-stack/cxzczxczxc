@@ -6,7 +6,7 @@ from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardButton, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
@@ -495,6 +495,20 @@ async def _process_text(
 
     now_local_str = now_in_tz(tz_name).strftime("%Y-%m-%d %H:%M")
     history_block = ctx_store.render_history_block(message.from_user.id)
+
+    # грузим память для контекста
+    memory_context = ""
+    try:
+        async with get_session() as session:
+            memories = await list_memories(session, owner)
+            if memories:
+                recent = memories[-20:]  # последние 20 фактов
+                memory_context = "Факты из памяти:\n" + "\n".join(
+                    f"[#{m.id}] {m.fact} (sentiment={m.sentiment or 'neutral'})" for m in recent
+                )
+    except Exception:
+        pass
+
     try:
         intent = await route_intent(
             provider, raw,
@@ -502,6 +516,7 @@ async def _process_text(
             now_local=now_local_str,
             tz_name=tz_name,
             history_block=history_block,
+            memory_context=memory_context,
         )
     except Exception as e:
         logger.exception("agent route_intent failed")
@@ -569,6 +584,8 @@ def _summarize_intent_for_memory(intent: dict) -> str:
         return "посмотрел память"
     if kind == "extract_memories_from_chat":
         return "извлёк факты из переписки"
+    if kind == "check_memories":
+        return "проверил актуальность памяти"
     return kind or ""
 
 
@@ -678,6 +695,9 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
         return
     if kind == "extract_memories_from_chat":
         await _exec_extract_memories(intent, message, userbot_manager)
+        return
+    if kind == "check_memories":
+        await _exec_check_memories(intent, message)
         return
     await _execute_intent(intent, message, state, userbot_manager, tz_name=tz_name)
 
@@ -940,3 +960,49 @@ async def _exec_extract_memories(intent, message, userbot_manager) -> None:
 
     count = await extract_and_save_memories(provider, owner.id, contact, messages)
     await message.answer(f"✅ Извлечено фактов: {count}")
+
+
+async def _exec_check_memories(intent, message) -> None:
+    """Бот сам задаёт вопросы про устаревшие факты из памяти."""
+    questions = intent.get("questions") or []
+    if not isinstance(questions, list) or not questions:
+        return
+
+    for q in questions[:2]:  # не больше 2 вопросов за раз
+        mid = q.get("memory_id")
+        question = q.get("question", "")
+        if not question:
+            continue
+        kb = InlineKeyboardBuilder()
+        kb.row(
+            InlineKeyboardButton(text="✅ Да, всё ок", callback_data=f"mem:ok:{mid}"),
+            InlineKeyboardButton(text="❌ Уже неактуально", callback_data=f"mem:del:{mid}"),
+        )
+        await message.answer(f"🤔 {question}", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("mem:ok:"))
+async def cb_mem_ok(callback: CallbackQuery) -> None:
+    from src.db.repo import get_or_create_user, list_memories
+    mid = int(callback.data.split(":")[2])
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        memories = await list_memories(session, owner)
+    for m in memories:
+        if m.id == mid:
+            m.sentiment = "neutral"
+    if callback.message:
+        await callback.message.edit_text(f"✅ {callback.message.text}\n\n<i>Понял, память обновлена.</i>")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("mem:del:"))
+async def cb_mem_del(callback: CallbackQuery) -> None:
+    from src.db.repo import delete_memory, get_or_create_user
+    mid = int(callback.data.split(":")[2])
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        await delete_memory(session, owner, mid)
+    if callback.message:
+        await callback.message.edit_text(f"🗑 {callback.message.text}\n\n<i>Удалил из памяти.</i>")
+    await callback.answer()
