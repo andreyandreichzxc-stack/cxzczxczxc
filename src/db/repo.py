@@ -1,8 +1,9 @@
 import asyncio
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, func, select, text as sql_text
+from sqlalchemy import delete, func, or_, select, text as sql_text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +16,7 @@ from src.db.models import (
     ConversationState,
     Folder,
     Memory,
+    MemoryCluster,
     Message,
     NewsTopic,
     PendingAction,
@@ -577,17 +579,58 @@ async def add_memory(
     contact_id: int | None = None,
     sentiment: str | None = None,
     source: str = "chat",
-) -> Memory:
-    m = Memory(
+    confidence: float = 0.5,
+    message_id: int | None = None,
+    cluster_topic: str | None = None,
+    deduplicate: bool = True,
+) -> Memory | None:
+    """
+    Добавляет факт в память с дедупликацией.
+    При deduplicate=True проверяет нет ли уже такого факта (по хешу).
+    """
+    fact = fact.strip()
+    if len(fact) < 3:
+        return None
+
+    # Хеш для дедупликации (первые 64 бита SHA256)
+    emb_hash = hashlib.sha256(fact.lower().strip().encode()).hexdigest()[:16]
+
+    if deduplicate:
+        # Поиск дубликата по хешу
+        result = await session.execute(
+            select(Memory)
+            .where(
+                Memory.user_id == user.id,
+                Memory.embedding_hash == emb_hash,
+            )
+            .limit(1)
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            existing.times_mentioned = (existing.times_mentioned or 1) + 1
+            existing.confidence = min(1.0, existing.confidence + 0.1)
+            existing.updated_at = datetime.now(timezone.utc)
+            if sentiment and existing.sentiment != sentiment:
+                existing.sentiment = "contradictory"  # маркируем противоречие
+            await session.flush()
+            return existing
+
+    mem = Memory(
         user_id=user.id,
-        fact=fact.strip(),
         contact_id=contact_id,
+        fact=fact,
         sentiment=sentiment,
         source=source,
+        confidence=confidence,
+        times_mentioned=1,
+        message_id=message_id,
+        is_active=True,
+        cluster_topic=cluster_topic,
+        embedding_hash=emb_hash,
     )
-    session.add(m)
+    session.add(mem)
     await session.flush()
-    return m
+    return mem
 
 
 async def list_memories(
@@ -696,6 +739,74 @@ async def search_memories(
     if contact_id is not None:
         stmt = stmt.where(Memory.contact_id == contact_id)
     result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def find_similar_memories(
+    session: AsyncSession, user: User, fact: str, threshold: float = 0.7
+) -> list[Memory]:
+    """Поиск похожих фактов через ILIKE (падёт на векторный поиск когда Qdrant будет готов)."""
+    # Упрощённо: поиск по подстроке с грубой оценкой сходства
+    words = [w for w in fact.lower().split() if len(w) > 2]
+    if not words:
+        return []
+    # Ищем факты где есть хотя бы 2 общих слова
+    conditions = [Memory.fact.ilike(f"%{w}%") for w in words[:5]]
+    result = await session.execute(
+        select(Memory).where(Memory.user_id == user.id, or_(*conditions))
+    )
+    return list(result.scalars().all())
+
+
+async def get_memory_stats(session: AsyncSession, user: User) -> dict:
+    """Статистика по памяти."""
+    result = await session.execute(
+        select(Memory).where(Memory.user_id == user.id, Memory.is_active == True)
+    )
+    memories = list(result.scalars().all())
+    by_sentiment = {}
+    for m in memories:
+        s = m.sentiment or "neutral"
+        by_sentiment[s] = by_sentiment.get(s, 0) + 1
+    by_source = {}
+    for m in memories:
+        by_source[m.source] = by_source.get(m.source, 0) + 1
+    return {
+        "total": len(memories),
+        "by_sentiment": by_sentiment,
+        "by_source": by_source,
+        "high_confidence": sum(1 for m in memories if m.confidence >= 0.8),
+        "with_contact": sum(1 for m in memories if m.contact_id is not None),
+    }
+
+
+async def upsert_memory_cluster(
+    session: AsyncSession, user: User, topic: str
+) -> MemoryCluster:
+    """Создаёт или возвращает существующий кластер по теме."""
+    result = await session.execute(
+        select(MemoryCluster).where(
+            MemoryCluster.user_id == user.id,
+            MemoryCluster.topic == topic.lower().strip(),
+        )
+    )
+    cluster = result.scalar_one_or_none()
+    if cluster is None:
+        cluster = MemoryCluster(user_id=user.id, topic=topic.lower().strip())
+        session.add(cluster)
+        await session.flush()
+    return cluster
+
+
+async def list_memory_clusters(
+    session: AsyncSession, user: User
+) -> list[MemoryCluster]:
+    """Список кластеров памяти."""
+    result = await session.execute(
+        select(MemoryCluster)
+        .where(MemoryCluster.user_id == user.id)
+        .order_by(MemoryCluster.fact_count.desc())
+    )
     return list(result.scalars().all())
 
 

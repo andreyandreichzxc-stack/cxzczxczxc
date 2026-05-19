@@ -101,6 +101,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         InlineKeyboardButton(text="🔑 API-ключи", callback_data="set:sec:keys"),
     )
     kb.row(InlineKeyboardButton(text="📁 Папки", callback_data="set:sec:folders"))
+    kb.row(InlineKeyboardButton(text="🧠 Полный анализ", callback_data="set:analyze"))
     kb.row(InlineKeyboardButton(text="❌ Закрыть", callback_data="set:close"))
     return text, kb.as_markup()
 
@@ -134,6 +135,19 @@ async def cb_close(callback: CallbackQuery) -> None:
     if callback.message:
         await callback.message.delete()
     await callback.answer()
+
+
+@router.callback_query(F.data == "set:analyze")
+async def cb_settings_analyze(callback: CallbackQuery) -> None:
+    await callback.answer("Запускаю анализ...")
+    await callback.message.answer(
+        "🧠 <b>Полный анализ переписок</b>\n\n"
+        "Используй команду /analyze для полного анализа.\n\n"
+        "<b>Примеры:</b>\n"
+        "<code>/analyze</code> — все контакты из выбранных папок\n"
+        "<code>/analyze Работа</code> — только папка «Работа»\n"
+        "<code>/analyze Работа Семья</code> — папки «Работа» и «Семья»"
+    )
 
 
 # ---------- Универсальные ручки тогглов и выбора ----------

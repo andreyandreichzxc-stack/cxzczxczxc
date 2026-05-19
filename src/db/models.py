@@ -351,6 +351,48 @@ class Memory(Base):
         String(16), nullable=True
     )  # positive, negative, neutral
     source: Mapped[str] = mapped_column(String(16), default="chat")  # chat, user, auto
+    confidence: Mapped[float] = mapped_column(
+        Float, default=0.5
+    )  # 0.0–1.0 уверенность в факте
+    times_mentioned: Mapped[int] = mapped_column(
+        Integer, default=1
+    )  # сколько раз подтверждён
+    message_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
+    )  # исходное сообщение
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True
+    )  # активен / опровергнут
+    cluster_topic: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )  # тема-кластер
+    embedding_hash: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, index=True
+    )  # хеш для дедупликации
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class MemoryCluster(Base):
+    """Группа связанных фактов по теме."""
+
+    __tablename__ = "memory_clusters"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    topic: Mapped[str] = mapped_column(String(128))
+    summary: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # LLM-саммари кластера
+    fact_count: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

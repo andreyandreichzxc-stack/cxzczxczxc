@@ -105,6 +105,7 @@ async def extract_and_save_memories(
                 contact_id=contact.peer_id if contact else None,
                 sentiment=sentiment,
                 source="chat",
+                message_id=None,
             )
             saved.append(item)
 

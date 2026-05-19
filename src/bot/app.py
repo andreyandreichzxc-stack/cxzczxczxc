@@ -7,6 +7,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import ClientSession
 
 from src.bot.handlers import (
+    analyze_cmd,
     catchup_cmd,
     chat_cmd,
     digest_cmd,
@@ -49,6 +50,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp["userbot_manager"] = userbot_manager
 
     dp.include_router(start.router)
+    dp.include_router(analyze_cmd.router)
     dp.include_router(login.router)
     dp.include_router(settings_handlers.router)
     dp.include_router(chat_cmd.router)

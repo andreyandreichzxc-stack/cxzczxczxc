@@ -679,6 +679,8 @@ def _summarize_intent_for_memory(intent: dict) -> str:
         return "настроил тихие часы"
     if kind == "show_inbox":
         return "посмотрел входящие"
+    if kind == "full_analysis":
+        return "запустил полный анализ"
     return kind or ""
 
 
@@ -800,6 +802,9 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
         return
     if kind == "show_inbox":
         await _exec_show_inbox(intent, message, userbot_manager)
+        return
+    if kind == "full_analysis":
+        await _exec_full_analysis(intent, message)
         return
     await _execute_intent(intent, message, state, userbot_manager, tz_name=tz_name)
 
@@ -1168,6 +1173,36 @@ async def _exec_show_inbox(intent, message, userbot_manager) -> None:
             lines.append(f"  • {name}")
 
     await message.answer("\n".join(lines))
+
+
+async def _exec_full_analysis(intent, message) -> None:
+    folders = intent.get("folders") or []
+    await message.answer(
+        f"🧠 Запускаю полный анализ{' папок: ' + ', '.join(folders) if folders else ' всех контактов'}..."
+    )
+    status_msg = await message.answer("⏳ Подготовка...")
+
+    async def _run():
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            provider = await build_provider(session, owner)
+            if not provider:
+                await status_msg.edit_text("❌ Нет LLM провайдера.")
+                return
+        from src.core.full_analyzer import run_full_analysis, format_analysis_report
+
+        result = await run_full_analysis(
+            owner_id=message.from_user.id,
+            provider=provider,
+            message_limit=500,
+            folder_names=folders if folders else None,
+        )
+        report = format_analysis_report(result)
+        await status_msg.edit_text(report)
+
+    import asyncio
+
+    asyncio.create_task(_run())
 
 
 async def _exec_check_memories(intent, message) -> None:

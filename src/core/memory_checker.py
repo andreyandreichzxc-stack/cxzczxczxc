@@ -29,6 +29,7 @@ async def memory_checker_loop() -> None:
                 m
                 for m in memories
                 if m.sentiment in ("negative", "contradictory")
+                and m.is_active == True
                 and m.created_at < cutoff
             ]
 

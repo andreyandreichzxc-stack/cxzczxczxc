@@ -22,6 +22,7 @@ from src.db.repo import get_contact, get_or_create_user
 from src.db.session import get_session
 from src.llm.router import build_provider
 from src.userbot.manager import UserbotManager
+from src.bot.handlers.analyze_cmd import cmd_analyze
 
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,9 @@ def _actions_keyboard(peer_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text="⏪ Где мы остановились", callback_data=f"chat:catchup:{peer_id}"
         ),
+    )
+    kb.row(
+        InlineKeyboardButton(text="🧠 Полный анализ", callback_data="chat:analyze:all"),
     )
     return kb.as_markup()
 
@@ -517,3 +521,14 @@ async def cmd_recent(message: Message) -> None:
 
     body = "\n\n".join(lines)
     await message.answer(f"📋 <b>Последняя активность</b>\n\n{body}")
+
+
+@router.callback_query(F.data.startswith("chat:analyze:"))
+async def cb_analyze(callback: CallbackQuery) -> None:
+    """Показать инструкцию по /analyze."""
+    await callback.answer()
+    await callback.message.answer(
+        "🧠 <b>Полный анализ</b>\n\n"
+        "Используй команду /analyze для полного анализа всех чатов.\n"
+        "Или <code>/analyze Работа Семья</code> — только для указанных папок."
+    )
