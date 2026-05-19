@@ -39,7 +39,9 @@ from src.db.repo import (
     get_api_key,
     get_contact,
     get_contact_profile,
+    get_memory_stats,
     get_or_create_user,
+    get_self_profile,
     list_memories,
     list_news_topics,
     list_open_commitments,
@@ -248,6 +250,7 @@ async def _execute_intent(
                 # подгружаем факты о собеседнике
                 facts_hint = ""
                 profile_hint = ""
+                neg_warning = ""
                 if target.peer_id:
                     contact_facts: list = []
                     try:
@@ -304,10 +307,33 @@ async def _execute_intent(
                                 profile_hint = "\n\n👤 Профиль: " + " | ".join(hints)
                     except Exception:
                         pass
+
+                    # Негативные факты о контакте — предупреждение
+                    try:
+                        from datetime import datetime, timezone
+
+                        neg_mems = await list_memories(
+                            session, owner, contact_id=target.peer_id
+                        )
+                        recent_neg = [
+                            m
+                            for m in neg_mems
+                            if m.sentiment == "negative"
+                            and m.created_at
+                            and (datetime.now(timezone.utc) - m.created_at).days < 7
+                        ]
+                        if recent_neg:
+                            neg_warning = (
+                                "\n\n⚠️ <b>Внимание:</b> за последнюю неделю негативные факты: "
+                                + "; ".join(m.fact[:50] for m in recent_neg[:2])
+                            )
+                    except Exception:
+                        pass
+
             await message.answer(
                 f"🤔 <b>Готов отправить</b>\n\n"
                 f"→ <b>Кому:</b> {target.label()}\n"
-                f"→ <b>Текст:</b>\n{text}{facts_hint}{profile_hint}",
+                f"→ <b>Текст:</b>\n{text}{facts_hint}{neg_warning}{profile_hint}",
                 reply_markup=_confirm_keyboard(action.id),
             )
         else:
@@ -652,7 +678,7 @@ async def _process_text(
         recall_result = await recall(
             owner.telegram_id,
             query=raw[:200],
-            limit=8,
+            limit=12,
             include_self=True,
             include_pinned=True,
             include_tasks=True,
@@ -898,6 +924,9 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
         return
     if kind == "show_inbox":
         await _exec_show_inbox(intent, message, userbot_manager)
+        return
+    if kind == "show_self":
+        await _exec_show_self(intent, message)
         return
     if kind == "full_analysis":
         await _exec_full_analysis(intent, message)
@@ -1300,6 +1329,61 @@ async def _exec_show_inbox(intent, message, userbot_manager) -> None:
             lines.append(f"  • {name}")
 
     await message.answer("\n".join(lines))
+
+
+async def _exec_show_self(intent: dict, message: Message) -> None:
+    """Показать что бот знает о пользователе (self-profile + recall + fuel)."""
+    from src.core.memory_fuel import get_fuel_stats, format_depleted_contacts
+    from src.core.memory_recall import recall, format_recall_human
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        prof = await get_self_profile(session, owner)
+
+    lines = ["🧑 <b>Что я знаю о тебе:</b>", ""]
+
+    if prof:
+        if prof.preferences:
+            lines.append(f"❤️ Предпочтения: {prof.preferences}")
+        if prof.goals:
+            lines.append(f"🎯 Цели: {prof.goals}")
+        if prof.current_projects:
+            lines.append(f"📂 Проекты: {prof.current_projects}")
+        if prof.decision_style:
+            lines.append(f"🤔 Стиль решений: {prof.decision_style}")
+        if prof.sleep_pattern:
+            lines.append(f"😴 Сон: {prof.sleep_pattern}")
+        if prof.work_hours:
+            lines.append(f"💼 Работа: {prof.work_hours}")
+
+    # Recall (self-факты)
+    try:
+        result = await recall(
+            owner.telegram_id,
+            limit=5,
+            include_self=True,
+            include_pinned=True,
+            include_tasks=False,
+        )
+        if result.facts:
+            lines.append("")
+            lines.append("🧠 <b>Что помню:</b>")
+            lines.append(format_recall_human(result))
+    except Exception:
+        pass
+
+    # Чего НЕ знаю (fuel gauge — истощённые зоны)
+    try:
+        fuel = await get_fuel_stats(owner.telegram_id)
+        if fuel.get("depleted"):
+            lines.append("")
+            lines.append("🤷 <b>Чего НЕ знаю:</b>")
+            lines.append(format_depleted_contacts(fuel))
+    except Exception:
+        pass
+
+    text = "\n".join(lines)
+    await message.answer(text)
 
 
 async def _exec_full_analysis(intent, message) -> None:
