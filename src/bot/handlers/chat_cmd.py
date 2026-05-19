@@ -280,8 +280,104 @@ async def cmd_sync(message: Message, userbot_manager: UserbotManager) -> None:
             await message.answer(
                 f"📥 Prefetch готов: {ps['chats']} чатов, {ps['messages']} сообщений в БД."
             )
+            # после prefetch — предложить извлечь память из топ-чатов
+            await _offer_memory_extraction(message)
+
         except Exception:
             logger.exception("prefetch failed")
             await message.answer("⚠ Prefetch завершился с ошибкой — см. логи.")
 
     asyncio.create_task(_bg_prefetch())
+
+
+async def _offer_memory_extraction(message: Message) -> None:
+    """Предлагает извлечь память из топ-чатов после prefetch."""
+    from src.db.repo import list_contacts
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        contacts = await list_contacts(
+            session, owner, kinds=("user",), include_archived=False,
+        )
+
+    people = [c for c in contacts[:15] if not c.is_bot]
+    if not people:
+        return
+
+    kb = InlineKeyboardBuilder()
+    for c in people[:8]:
+        kb.row(InlineKeyboardButton(
+            text=f"🧠 {c.display_name}",
+            callback_data=f"sync:mem:{c.peer_id}:{message.from_user.id}",
+        ))
+    kb.row(
+        InlineKeyboardButton(text="🧠 Все контакты", callback_data=f"sync:mem:all:{message.from_user.id}"),
+        InlineKeyboardButton(text="❌ Пропустить", callback_data=f"sync:mem:skip:{message.from_user.id}"),
+    )
+    await message.answer(
+        "🧠 <b>Извлечь факты в память?</b>\n\n"
+        "Выбери контакты, из чатов с которыми извлечь важные факты (отношения, договорённости, эмоции). "
+        "Или «Все контакты» — обработаю всех людей.",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("sync:mem:"))
+async def cb_extract_memories(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
+    _, _, target, caller_id = callback.data.split(":")
+    if int(caller_id) != callback.from_user.id:
+        await callback.answer("Не твоя кнопка", show_alert=True)
+        return
+
+    if target == "skip":
+        if callback.message:
+            await callback.message.edit_text("Ок, пропустил.")
+        await callback.answer()
+        return
+
+    if callback.message:
+        await callback.message.edit_text("🧠 Извлекаю факты из переписок…")
+
+    client = userbot_manager.get_client(callback.from_user.id)
+    if client is None:
+        await callback.answer("Сначала /login", show_alert=True)
+        return
+
+    from src.db.repo import list_contacts
+    from src.llm.router import build_provider
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        provider = await build_provider(session, owner)
+        if provider is None:
+            if callback.message:
+                await callback.message.edit_text("Не задан LLM-ключ.")
+            return
+
+        if target == "all":
+            contacts = await list_contacts(session, owner, kinds=("user",), include_archived=False)
+            targets = [c for c in contacts[:20] if not c.is_bot]
+        else:
+            contact = await get_contact(session, owner, int(target))
+            targets = [contact] if contact else []
+
+    if not targets:
+        if callback.message:
+            await callback.message.edit_text("Нет подходящих контактов.")
+        await callback.answer()
+        return
+
+    total = 0
+    for ct in targets:
+        try:
+            messages = await load_chat(client, callback.from_user.id, ct.peer_id, limit=80)
+            count = await extract_and_save_memories(provider, owner.id, ct, messages)
+            if count:
+                total += count
+        except Exception:
+            logger.exception("memory extraction failed for %s", ct.display_name)
+
+    if callback.message:
+        await callback.message.edit_text(
+            f"✅ Извлечено <b>{total}</b> фактов из {len(targets)} контактов."
+        )
+    await callback.answer()
