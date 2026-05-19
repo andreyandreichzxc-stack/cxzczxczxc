@@ -495,9 +495,17 @@ async def _process_text(
             tz_name=tz_name,
             history_block=history_block,
         )
-    except Exception:
+    except Exception as e:
         logger.exception("agent route_intent failed")
-        await message.answer("Не получилось разобрать запрос (LLM ошибся).")
+        err_msg = str(e)
+        if len(err_msg) > 300:
+            err_msg = err_msg[:300] + "…"
+        await message.answer(
+            f"❌ Ошибка при обработке запроса.\n\n"
+            f"<code>{err_msg}</code>\n\n"
+            "<i>Если ошибка повторяется — проверь ключ в /settings → 🔑 API-ключи "
+            "и модель в /settings → 🤖 LLM.</i>"
+        )
         return
 
     if intent.get("intent") == "multi":
@@ -646,16 +654,21 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
     await _execute_intent(intent, message, state, userbot_manager, tz_name=tz_name)
 
 
-def _parse_iso_to_utc_naive(value):
+def _parse_iso_to_utc_naive(value, tz_name: str | None = None):
     if not value:
         return None
     try:
         from datetime import datetime, timezone
+        from src.core.timeutil import parse_tz
         s = str(value).replace("Z", "+00:00")
         dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            return dt
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        if tz_name:
+            tz = parse_tz(tz_name)
+            local_dt = dt.replace(tzinfo=tz)
+            return local_dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
     except Exception:
         return None
 
@@ -665,7 +678,7 @@ async def _exec_add_reminder(intent, message, *, tz_name: str) -> None:
     if not text:
         await message.answer("Не понял, о чём напомнить. Уточни.")
         return
-    when = _parse_iso_to_utc_naive(intent.get("when"))
+    when = _parse_iso_to_utc_naive(intent.get("when"), tz_name)
     peer_query = (intent.get("peer_query") or "").strip()
 
     peer_id = 0
