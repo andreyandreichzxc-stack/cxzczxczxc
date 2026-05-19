@@ -102,10 +102,10 @@ async def cb_draft_send(callback: CallbackQuery) -> None:
     try:
         await client.send_message(entity=int(peer_id), message=draft_text)
         if callback.message:
-            await callback.message.edit_text("✅ Отправлено")
+            await callback.message.edit_text("✅ Отправлено! 🚀")
     except ValueError as e:
         if callback.message:
-            await callback.message.edit_text(f"❌ Ошибка: {e}")
+            await callback.message.edit_text(f"❌ Ошибка 😞: {e}")
         else:
             await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
     except Exception as e:
@@ -113,7 +113,7 @@ async def cb_draft_send(callback: CallbackQuery) -> None:
 
         if isinstance(e, FloodWaitError):
             if callback.message:
-                await callback.message.edit_text(f"❌ Flood wait: {e.seconds}с")
+                await callback.message.edit_text(f"❌ Flood wait ⏳: {e.seconds}с")
             else:
                 await callback.answer(f"❌ Flood wait: {e.seconds}с", show_alert=True)
         else:
@@ -172,7 +172,7 @@ async def step_draft_edit(message: Message, state: FSMContext) -> None:
 
     try:
         await client.send_message(entity=int(peer_id), message=new_text)
-        await message.answer("✅ Отправлено")
+        await message.answer("✅ Отправлено! 🚀")
     except Exception as e:
-        await message.answer(f"❌ Ошибка отправки: {e}")
+        await message.answer(f"❌ Ошибка отправки 😞: {e}")
     await state.clear()

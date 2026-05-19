@@ -92,7 +92,7 @@ async def collect_recent_messages(
 def build_smart_digest(messages_by_peer: dict[int, dict], interval: int) -> str:
     """Собирает HTML-текст дайджеста с группировкой по срочности."""
     if not messages_by_peer:
-        return "✅ Нет новых сообщений"
+        return "✅ Нет новых сообщений 🌙"
 
     urgent: list[dict] = []
     important: list[dict] = []

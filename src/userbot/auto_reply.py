@@ -115,6 +115,15 @@ async def _build_reply_text(
             memory_context = "Что ты знаешь о собеседнике из памяти:\n" + "\n".join(
                 memory_lines
             )
+        # Также загружаем контекст владельца (общие факты)
+        general_memories = await list_memories(session, owner, contact_id=None)
+        if general_memories:
+            general_lines = [f"- {m.fact}" for m in general_memories[:3]]
+            if memory_context:
+                memory_context += "\n\n"
+            memory_context += "Контекст владельца (общие факты):\n" + "\n".join(
+                general_lines
+            )
         heavy = owner.settings.use_heavy_model
         global_profile = owner.global_style_profile
 

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.core.notifier import notifier
 from src.db.repo import (
+    get_memory_stats,
     get_or_create_user,
     list_active_conversations,
     list_memories,
@@ -23,6 +24,7 @@ class BriefingData:
     overdue_commitments: list = None  # list[dict]
     today_commitments: list = None  # list[dict]
     recent_memories: int = 0
+    memory_stats: dict = None  # статистика по памяти
 
     def __post_init__(self) -> None:
         if self.waiting_reply is None:
@@ -70,6 +72,9 @@ async def collect_briefing_data(owner_id: int) -> BriefingData:
             1 for m in memories if m.created_at and m.created_at >= cutoff
         )
 
+        # Общая статистика памяти
+        result.memory_stats = await get_memory_stats(session, owner)
+
     return result
 
 
@@ -85,19 +90,29 @@ def format_briefing(data: BriefingData, title: str) -> str:
         lines.append("📬 Непрочитанных нет.")
 
     if data.overdue_commitments:
-        lines.append(f"\n🔴 <b>Просрочено ({len(data.overdue_commitments)}):</b>")
+        lines.append(f"\n🚨 <b>Просрочено ({len(data.overdue_commitments)}):</b>")
         for c in data.overdue_commitments[:5]:
             lines.append(f"• {c['text']}")
 
     if data.today_commitments:
-        lines.append(f"\n🟡 <b>Сегодня ({len(data.today_commitments)}):</b>")
+        lines.append(f"\n📋 <b>Сегодня ({len(data.today_commitments)}):</b>")
         for c in data.today_commitments[:5]:
             lines.append(f"• {c['text']}")
 
     if data.recent_memories > 0:
         lines.append(f"\n🧠 Новых фактов в памяти: {data.recent_memories}")
 
-    lines.append("\n<i>/threads — просмотреть переписки</i>")
+    if data.memory_stats:
+        total = data.memory_stats.get("total", 0)
+        by_sentiment = data.memory_stats.get("by_sentiment", {})
+        positive = by_sentiment.get("positive", 0)
+        negative = by_sentiment.get("negative", 0)
+        lines.append(
+            f"\n🧠 Память: {total} фактов "
+            f"({positive} позитивных, {negative} негативных)"
+        )
+
+    lines.append("\n💬 <i>/threads — просмотреть переписки</i>")
     return "\n".join(lines)
 
 
@@ -120,12 +135,12 @@ async def proactive_briefing_loop(owner_id: int) -> None:
 
             if hour == 9:
                 data = await collect_briefing_data(owner_id)
-                text = format_briefing(data, "Утренний брифинг")
+                text = format_briefing(data, "☀️ Утренний брифинг")
                 await notifier.notify(text)
                 await asyncio.sleep(3600)  # не повторять в этот час
             elif hour == 21:
                 data = await collect_briefing_data(owner_id)
-                text = format_briefing(data, "Вечерний брифинг")
+                text = format_briefing(data, "🌙 Вечерний брифинг")
                 await notifier.notify(text)
                 await asyncio.sleep(3600)
 

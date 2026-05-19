@@ -18,7 +18,7 @@ from src.core.commitment_extractor import extract_and_save_commitments
 from src.core.memory_extractor import extract_and_save_memories
 from src.core.contact_resolver import ContactCandidate, resolve
 from src.core.summarizer import catchup, draft_reply, summarize_chat
-from src.db.repo import get_contact, get_or_create_user
+from src.db.repo import get_contact, get_or_create_user, list_memories
 from src.db.session import get_session
 from src.llm.router import build_provider
 from src.userbot.manager import UserbotManager
@@ -89,7 +89,47 @@ async def cmd_chat(
 
     query = (command.args or "").strip()
     if not query:
-        await message.answer("Использование: <code>/chat имя или @username</code>")
+        # Показываем недавние контакты
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            from src.db.repo import fetch_chat_messages, list_contacts
+
+            contacts = await list_contacts(
+                session, owner, kinds=("user",), include_bots=False
+            )
+            # Берём последние сообщения для каждого контакта, сортируем по дате
+            recent = []  # (display_name, peer_id, date)
+            for ct in contacts[:30]:
+                if ct.is_bot:
+                    continue
+                msgs = await fetch_chat_messages(session, owner, ct.peer_id, limit=1)
+                if msgs:
+                    recent.append((ct.display_name, ct.peer_id, msgs[0].date))
+
+            recent.sort(key=lambda x: x[2], reverse=True)
+            top5 = recent[:5]
+
+        if not top5:
+            await message.answer(
+                "Использование: <code>/chat имя или @username</code>\n"
+                "Пока нет недавних контактов. Попробуй /sync."
+            )
+            return
+
+        lines = ["<b>💬 Недавние контакты</b>", "", "Выбери для действий:"]
+        kb = InlineKeyboardBuilder()
+        for name, pid, _date in top5:
+            kb.row(
+                InlineKeyboardButton(
+                    text=f"💬 {name}",
+                    callback_data=f"chat:pick:{pid}",
+                )
+            )
+        kb.row(InlineKeyboardButton(text="❌ Отмена", callback_data="chat:cancel:0"))
+        await message.answer(
+            "\n".join(lines),
+            reply_markup=kb.as_markup(),
+        )
         return
 
     async with get_session() as session:
@@ -113,8 +153,18 @@ async def cmd_chat(
 
 
 async def _show_actions(message: Message, candidate: ContactCandidate) -> None:
+    memory_line = ""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        memories = await list_memories(session, owner, contact_id=candidate.peer_id)
+        if memories:
+            facts_short = [m.fact[:40] for m in memories[:3]]
+            memory_line = "🧠 Память: " + ", ".join(facts_short)
+        else:
+            memory_line = "🧠 Память: пока пусто"
+    label = candidate.label()
     await message.answer(
-        f"Выбран: <b>{candidate.label()}</b>. Что сделать?",
+        f"Выбран: <b>{label}</b>\n{memory_line}\n\nЧто сделать?",
         reply_markup=_actions_keyboard(candidate.peer_id),
     )
 

@@ -1,9 +1,14 @@
 import re
 from datetime import datetime
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from src.bot.filters import OwnerOnly
 from src.core.digest import build_digest
@@ -15,6 +20,7 @@ from src.db.session import get_session
 
 router = Router(name="digest_cmd")
 router.message.filter(OwnerOnly())
+router.callback_query.filter(OwnerOnly())
 
 
 HM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
@@ -78,7 +84,45 @@ async def cmd_briefing(message: Message) -> None:
 
     data = await collect_briefing_data(message.from_user.id)
     text = format_briefing(data, "Брифинг")
-    await message.answer(text)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📬 Треды", callback_data="thread:refresh"),
+                InlineKeyboardButton(text="📋 Задачи", callback_data="nav:todos"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Обновить", callback_data="briefing:refresh"
+                ),
+            ],
+        ]
+    )
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "briefing:refresh")
+async def cb_briefing_refresh(callback: CallbackQuery) -> None:
+    """Обновить брифинг."""
+    from src.core.proactive_briefing import collect_briefing_data, format_briefing
+
+    data = await collect_briefing_data(callback.from_user.id)
+    text = format_briefing(data, "Брифинг")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📬 Треды", callback_data="thread:refresh"),
+                InlineKeyboardButton(text="📋 Задачи", callback_data="nav:todos"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Обновить", callback_data="briefing:refresh"
+                ),
+            ],
+        ]
+    )
+    if callback.message:
+        await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer("Обновлено")
 
 
 @router.message(Command("smart_digest"))

@@ -186,7 +186,7 @@ async def _execute_intent(
 
     if kind == "unknown" or kind is None:
         await message.answer(
-            "Не понял, что нужно сделать. Я умею: писать сообщения людям, делать саммари переписок, "
+            "🤷 Не понял, что нужно сделать. Я умею: писать сообщения людям, делать саммари переписок, "
             "извлекать задачи, ловить «где мы остановились», искать по сообщениям, собирать новостной "
             "дайджест по теме, показывать обещания. Попробуй сформулировать иначе или открой /help."
         )
@@ -197,7 +197,7 @@ async def _execute_intent(
             owner = await get_or_create_user(session, message.from_user.id)
             items = await list_open_commitments(session, owner)
         if not items:
-            await message.answer("Открытых обязательств нет 🎉")
+            await message.answer("🎉 Открытых обязательств нет")
             return
         from src.core.timeutil import fmt_local
 
@@ -219,7 +219,7 @@ async def _execute_intent(
         recipient = (intent.get("recipient") or "").strip()
         text = (intent.get("text") or "").strip()
         if not recipient or not text:
-            await message.answer("Не хватает кому/что отправить. Уточни.")
+            await message.answer("🤷 Не хватает кому/что отправить. Уточни.")
             return
         candidates = await resolve_with_llm(client, owner, recipient, provider)
         if not candidates:
@@ -276,7 +276,7 @@ async def _execute_intent(
         if action not in {"catchup", "summary", "tasks", "draft"}:
             action = "catchup"
         if not query:
-            await message.answer("Не понял, по какой теме искать.")
+            await message.answer("🤷 Не понял, по какой теме искать.")
             return
         await message.answer(f"🔎 Ищу по моим чатам: «<i>{query}</i>»…")
         await _find_chats_and_offer(message, client, query, action)
@@ -300,12 +300,12 @@ async def _execute_intent(
     # ниже — интенты, требующие конкретного контакта
     contact_query = (intent.get("contact") or "").strip()
     if not contact_query:
-        await message.answer("Не понял, с каким контактом работать. Уточни имя.")
+        await message.answer("🤷 Не понял, с каким контактом работать. Уточни имя.")
         return
 
     candidates = await resolve(client, owner, contact_query)
     if not candidates:
-        await message.answer(f"Не нашёл контакт «{contact_query}». Попробуй /sync.")
+        await message.answer(f"🙅 Не нашёл контакт «{contact_query}». Попробуй /sync.")
         return
 
     action_map = {
@@ -316,7 +316,7 @@ async def _execute_intent(
     }
     cb_action = action_map.get(kind)
     if cb_action is None:
-        await message.answer("Неизвестное действие.")
+        await message.answer("❓ Неизвестное действие.")
         return
 
     if len(candidates) > 1 and candidates[0].score < 90:
@@ -343,7 +343,7 @@ async def _execute_intent(
         heavy = owner.settings.use_heavy_model
 
     if contact is None or provider is None:
-        await message.answer("Не удалось подготовить контекст.")
+        await message.answer("⚠️ Не удалось подготовить контекст.")
         return
 
     if kind == "summarize_chat":
@@ -361,7 +361,7 @@ async def _execute_intent(
             provider, user_id=owner.id, contact=contact, messages=messages_loaded
         )
         if not items:
-            body = "Явных обязательств не нашёл."
+            body = "🤷 Явных обязательств не нашёл."
         else:
             lines = []
             for it in items:
@@ -841,7 +841,7 @@ def _parse_iso_to_utc_naive(value, tz_name: str | None = None):
 async def _exec_add_reminder(intent, message, *, tz_name: str) -> None:
     text = (intent.get("text") or "").strip()
     if not text:
-        await message.answer("Не понял, о чём напомнить. Уточни.")
+        await message.answer("🤷 Не понял, о чём напомнить. Уточни.")
         return
     when = _parse_iso_to_utc_naive(intent.get("when"), tz_name)
     peer_query = (intent.get("peer_query") or "").strip()
@@ -904,7 +904,7 @@ async def _exec_remove_reminder(intent, message) -> None:
             or (c.peer_name and needle in c.peer_name.lower())
         ]
         if not matched:
-            await message.answer(f"Не нашёл напоминаний по «{needle}».")
+            await message.answer(f"🙅 Не нашёл напоминаний по «{needle}».")
             return
         for c in matched:
             await update_commitment_status(session, c.id, "cancelled")
@@ -950,7 +950,7 @@ async def _exec_add_reminders_from_chat(intent, message, userbot_manager) -> Non
         provider, user_id=owner.id, contact=contact, messages=msgs
     )
     if not items:
-        await message.answer("Явных обещаний в этом чате не нашёл.")
+        await message.answer("🤷 Явных обещаний в этом чате не нашёл.")
         return
     lines = []
     for it in items:
@@ -967,7 +967,7 @@ async def _exec_add_reminders_from_chat(intent, message, userbot_manager) -> Non
 async def _exec_store_memory(intent, message) -> None:
     fact = (intent.get("fact") or "").strip()
     if not fact:
-        await message.answer("Не понял, что запомнить. Уточни.")
+        await message.answer("🤷 Не понял, что запомнить. Уточни.")
         return
     contact_name = (intent.get("contact") or "").strip()
     sentiment = (intent.get("sentiment") or "").strip()

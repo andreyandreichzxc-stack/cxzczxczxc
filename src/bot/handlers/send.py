@@ -179,7 +179,7 @@ async def _create_and_confirm(
         )
 
     await message.answer(
-        f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{text}",
+        f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{text}\n\n<i>Подтверди отправку 👇</i>",
         reply_markup=_confirm_keyboard(action.id),
     )
 
@@ -225,7 +225,7 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
             await delete_pending_action(session, action_id, user)
     await state.clear()
     if callback.message:
-        await callback.message.edit_text("❌ Отправка отменена.")
+        await callback.message.edit_text("❌ Отправка отменена. 🚫")
     await callback.answer()
 
 
@@ -299,10 +299,22 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
         await callback.answer("Ошибка при отправке", show_alert=True)
         if callback.message:
             await callback.message.edit_text(
-                f"❌ Не удалось отправить: <code>{e}</code>"
+                f"❌ Не удалось отправить 😞: <code>{e}</code>"
             )
         return
 
+    # Получаем имя контакта для красивого отчёта
+    label = str(peer_id)
+    async with get_session() as session:
+        user = await get_or_create_user(session, callback.from_user.id)
+        contact = await get_contact(session, user, peer_id)
+        if contact:
+            label = contact.display_name
+
+    snippet = (text or "")[:60]
+    if len(text or "") > 60:
+        snippet += "…"
+
     if callback.message:
-        await callback.message.edit_text("✅ Сообщение отправлено.")
+        await callback.message.edit_text(f"✅ Отправлено «{label}»: {snippet}")
     await callback.answer("Отправлено")

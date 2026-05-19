@@ -3,7 +3,7 @@
 import logging
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -17,6 +17,8 @@ from src.db.repo import (
     get_contact,
     get_or_create_user,
     list_active_conversations,
+    list_contacts,
+    list_folders,
 )
 from src.db.session import get_session
 
@@ -35,16 +37,54 @@ STATUS_EMOJI = {
 
 
 @router.message(Command("threads"))
-async def cmd_threads(message: Message) -> None:
-    """Показать активные переписки."""
+async def cmd_threads(message: Message, command: CommandObject | None = None) -> None:
+    """Показать активные переписки. /threads — все, /threads Работа — по папке."""
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        convos = await list_active_conversations(session, owner, limit=20)
+
+        folder_name: str | None = None
+        matched: str | None = None
+        if command and command.args:
+            folder_name = command.args.strip()
+
+        if folder_name:
+            folders = await list_folders(session, owner)
+            folder_titles = {f.title.lower(): f.title for f in folders}
+            matched = folder_titles.get(folder_name.lower())
+            if not matched:
+                available = (
+                    ", ".join(f.title for f in folders) if folders else "нет папок"
+                )
+                await message.answer(
+                    f"❌ Папка «{folder_name}» не найдена.\nДоступные: {available}"
+                )
+                return
+
+            # Фильтруем контакты по папке
+            contacts = await list_contacts(
+                session, owner, kinds=("user",), include_bots=False
+            )
+            peer_ids = {
+                c.peer_id
+                for c in contacts
+                if c.folder_names and matched in c.folder_names.split(",")
+            }
+            convos = await list_active_conversations(session, owner, limit=50)
+            convos = [c for c in convos if c.peer_id in peer_ids][:20]
+
+            title = f"📬 Папка «{matched}» — активные переписки"
+        else:
+            convos = await list_active_conversations(session, owner, limit=20)
+            title = "<b>📬 Активные переписки</b>"
+
         if not convos:
-            await message.answer("📭 Нет активных переписок.")
+            if folder_name:
+                await message.answer(f"📭 В папке «{matched}» нет активных переписок.")
+            else:
+                await message.answer("📭 Нет активных переписок.")
             return
 
-        lines = ["<b>📬 Активные переписки</b>", ""]
+        lines = [title, ""]
         kb_rows = []
         for i, conv in enumerate(convos[:15]):
             contact = await get_contact(session, owner, conv.peer_id)
@@ -65,7 +105,7 @@ async def cmd_threads(message: Message) -> None:
                 ]
             )
         text = "\n".join(lines)
-        text += "\n\n<i>Нажми на кнопку для действий</i>"
+        text += "\n\n<i>👆 Нажми на кнопку для действий</i>"
         kb = InlineKeyboardMarkup(
             inline_keyboard=kb_rows
             + [
@@ -104,6 +144,17 @@ async def cb_thread_open(callback: CallbackQuery) -> None:
         sender = "Вы" if m.is_outgoing else (m.sender_name or name)
         txt = (m.text or m.transcript or "")[:100]
         lines.append(f"{direction} <b>{sender}:</b> {txt}")
+
+    # Показываем факты памяти о контакте
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        memories = await list_memories(session, owner, contact_id=peer_id)
+        if memories:
+            lines.append("")
+            lines.append("<b>🧠 Память о контакте:</b>")
+            for m in memories[:5]:
+                lines.append(f"• {m.fact}")
+
     lines.append("")
     lines.append("<i>Ответь в Telegram или через /send</i>")
     await callback.message.answer("\n".join(lines))
