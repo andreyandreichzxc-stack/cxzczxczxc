@@ -22,6 +22,7 @@ from src.bot.handlers import (
     settings as settings_handlers,
     start,
     style_cmd,
+    threads_cmd,
     todos,
 )
 from src.config import settings
@@ -64,6 +65,7 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(news_cmd.router)
     dp.include_router(draft_actions.router)
     dp.include_router(news_topics.router)
+    dp.include_router(threads_cmd.router)
     # ВАЖНО: free_text — самым последним, чтобы команды и FSM перехватили текст раньше
     dp.include_router(free_text.router)
 

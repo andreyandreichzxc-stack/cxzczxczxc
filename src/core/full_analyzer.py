@@ -82,14 +82,23 @@ async def run_full_analysis(
             include_bots=False,
         )
 
-    # Фильтр по папкам
+    # Фильтр по папкам (fuzzy matching, ~25% tolerance)
     if folder_names:
+        from rapidfuzz import fuzz
+
+        FUZZY_THRESHOLD = 70  # ~25% допустимых ошибок
         filtered = []
         for c in contacts:
             cf = (c.folder_names or "").split(",")
-            cf = [f.strip() for f in cf if f.strip()]
-            if any(f in folder_names for f in cf):
-                filtered.append(c)
+            cf = [f.strip().lower() for f in cf if f.strip()]
+            if not cf:
+                continue
+            for user_folder in folder_names:
+                user_lower = user_folder.strip().lower()
+                best = max(fuzz.ratio(user_lower, f) for f in cf)
+                if best >= FUZZY_THRESHOLD:
+                    filtered.append(c)
+                    break
         contacts = filtered
 
     total = len(contacts)

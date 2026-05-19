@@ -5,8 +5,10 @@ from src.config import settings
 from src.bot.app import run_bot
 from src.core.auto_sync import auto_sync_loop
 from src.core.digest import digest_scheduler_loop
+from src.core.follow_up import follow_up_loop
 from src.core.memory_checker import memory_checker_loop
 from src.core.news import news_scheduler_loop
+from src.core.proactive_briefing import proactive_briefing_loop
 from src.core.reminders import reminders_loop
 from src.core.smart_digest import smart_digest_loop
 from src.db.session import init_db
@@ -51,6 +53,13 @@ async def main() -> None:
         ),
         asyncio.create_task(
             smart_digest_loop(settings.owner_telegram_id), name="smart-digest"
+        ),
+        asyncio.create_task(
+            proactive_briefing_loop(settings.owner_telegram_id),
+            name="proactive-briefing",
+        ),
+        asyncio.create_task(
+            follow_up_loop(settings.owner_telegram_id), name="follow-up"
         ),
     ]
 

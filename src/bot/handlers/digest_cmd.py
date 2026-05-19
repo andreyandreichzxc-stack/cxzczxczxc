@@ -71,6 +71,16 @@ async def cmd_digest(message: Message, command: CommandObject) -> None:
     )
 
 
+@router.message(Command("briefing"))
+async def cmd_briefing(message: Message) -> None:
+    """Ручной запрос брифинга."""
+    from src.core.proactive_briefing import collect_briefing_data, format_briefing
+
+    data = await collect_briefing_data(message.from_user.id)
+    text = format_briefing(data, "Брифинг")
+    await message.answer(text)
+
+
 @router.message(Command("smart_digest"))
 async def cmd_smart_digest(message: Message) -> None:
     """Ручной запуск smart-дайджеста."""
