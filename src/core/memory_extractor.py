@@ -23,8 +23,19 @@ MEMORIES_SYSTEM = (
     "Возвращай JSON-массив (только массив, без обёрток):\n"
     "[\n"
     '  {"fact": "краткий факт одной фразой на русском",\n'
-    '   "sentiment": "positive" | "negative" | "neutral"}\n'
+    '   "sentiment": "positive" | "negative" | "neutral",\n'
+    '   "importance": 7,\n'
+    '   "decay_rate": 0.05}\n'
     "]\n"
+    "importance (1-10):\n"
+    "  1-3 — мелкая деталь, быстро забывается\n"
+    "  4-7 — значимый факт, живёт недели\n"
+    "  8-10 — критично (аллергии, адреса, отношения, контакты)\n"
+    "decay_rate:\n"
+    "  0.01 — почти не забывается (критичные факты)\n"
+    "  0.07 — норма (неделя-две)\n"
+    "  0.15 — быстро устаревает (настроения, планы на день)\n"
+    "  0.30 — моментально (погода, «я поел»)\n"
     "Если значимых фактов нет — пустой массив [].\n"
     "Не выдумывай то, чего нет в переписке. Пиши на русском."
 )
@@ -100,6 +111,18 @@ async def extract_and_save_memories(
             if sentiment not in {"positive", "negative", "neutral"}:
                 sentiment = None
 
+            # importance 1-10 → 0.0-1.0
+            raw_importance = item.get("importance")
+            if isinstance(raw_importance, (int, float)):
+                importance = max(0.0, min(1.0, raw_importance / 10.0))
+            else:
+                importance = None
+
+            # decay_rate из LLM (0.01-0.30)
+            decay_rate = item.get("decay_rate")
+            if not isinstance(decay_rate, (int, float)):
+                decay_rate = None
+
             # Вычисляем эмбеддинг для семантической дедупликации
             embedding = None
             try:
@@ -119,6 +142,8 @@ async def extract_and_save_memories(
                 message_id=None,
                 embedding=embedding,
                 vector_store_obj=vector_store if embedding else None,
+                importance=importance,
+                decay_rate=decay_rate,
             )
             saved.append(item)
 

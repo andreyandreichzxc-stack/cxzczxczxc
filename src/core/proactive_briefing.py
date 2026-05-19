@@ -108,10 +108,14 @@ def format_briefing(data: BriefingData, title: str) -> str:
         positive = by_sentiment.get("positive", 0)
         negative = by_sentiment.get("negative", 0)
         by_source = data.memory_stats.get("by_source", {})
+        by_tier = data.memory_stats.get("by_tier", {})
         weekly_facts = by_source.get("weekly", 0)
+        tier_1 = by_tier.get("tier_1", 0)
+        tier_2 = by_tier.get("tier_2", 0)
+        tier_3 = by_tier.get("tier_3", 0)
         lines.append(
             f"\n🧠 Память: {total} фактов "
-            f"({positive} позитивных, {negative} негативных)"
+            f"({tier_1} эпизодов, {tier_2} недельных, {tier_3} месячных)"
         )
         if weekly_facts:
             lines.append(f"   📊 Из них {weekly_facts} с недельного саммари")

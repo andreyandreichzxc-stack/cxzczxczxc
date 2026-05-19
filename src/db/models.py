@@ -377,6 +377,15 @@ class Memory(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+    validity_start: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    validity_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    importance: Mapped[float] = mapped_column(Float, default=0.5)  # 0.0–1.0
+    decay_rate: Mapped[float] = mapped_column(Float, default=0.07)  # скорость забывания
+    memory_tier: Mapped[int] = mapped_column(
+        Integer, default=1
+    )  # 1=эпизод, 2=недельное, 3=месячное
 
 
 class MemoryCluster(Base):

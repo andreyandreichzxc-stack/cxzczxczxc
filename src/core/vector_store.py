@@ -120,6 +120,9 @@ class VectorStore:
         contact_id: int | None,
         fact: str,
         embedding: list[float],
+        importance: float = 0.5,
+        confidence: float = 0.5,
+        created_at: str | None = None,
     ) -> None:
         """Сохраняет эмбеддинг факта памяти в коллекцию memory_facts."""
         await self._ensure_memory_collection(len(embedding))
@@ -136,6 +139,9 @@ class VectorStore:
                             "contact_id": contact_id,
                             "fact": fact,
                             "memory_id": memory_id,
+                            "importance": importance,
+                            "confidence": confidence,
+                            "created_at": created_at,
                         },
                     )
                 ],
@@ -150,8 +156,13 @@ class VectorStore:
         embedding: list[float],
         threshold: float = 0.85,
         limit: int = 5,
+        contact_id: int | None = None,
     ) -> list[dict]:
-        """Поиск похожих фактов в коллекции memory_facts по cosine similarity."""
+        """Поиск похожих фактов в коллекции memory_facts по cosine similarity.
+
+        Если contact_id передан — возвращаются только факты о контакте или общие
+        (contact_id == null).
+        """
         if self._memory_dim is None:
             return []
 
@@ -162,6 +173,13 @@ class VectorStore:
                 )
             ]
         )
+        if contact_id is not None:
+            flt.should = [
+                qmodels.FieldCondition(
+                    key="contact_id", match=qmodels.MatchValue(value=contact_id)
+                ),
+                qmodels.FieldCondition(key="contact_id", is_null=True),
+            ]
 
         def _do() -> list[qmodels.ScoredPoint]:
             return self._client.search(
@@ -179,6 +197,9 @@ class VectorStore:
                 "fact": p.payload.get("fact", ""),
                 "score": float(p.score),
                 "contact_id": p.payload.get("contact_id"),
+                "importance": p.payload.get("importance", 0.5),
+                "confidence": p.payload.get("confidence", 0.5),
+                "created_at": p.payload.get("created_at"),
             }
             for p in raw
         ]

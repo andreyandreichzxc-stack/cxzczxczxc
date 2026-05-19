@@ -589,6 +589,9 @@ async def add_memory(
     deduplicate: bool = True,
     embedding: list[float] | None = None,
     vector_store_obj: VectorStore | None = None,
+    importance: float | None = None,
+    decay_rate: float | None = None,
+    memory_tier: int = 1,
 ) -> Memory | None:
     """
     Добавляет факт в память с дедупликацией.
@@ -596,9 +599,15 @@ async def add_memory(
     Два уровня дедупликации (при deduplicate=True):
       1. SHA256 хеш — точные повторы.
       2. Если передан embedding + vector_store_obj — семантическая
-         дедупликация через Qdrant (cosine similarity > 0.85).
+         дедупликация через Qdrant с динамическим порогом:
+           - 0.92 — тот же source, возраст <7 дней (строже)
+           - 0.78 — разные source (мягче)
+           - 0.85 — остальные случаи
 
-    При обнаружении дубликата повышает confidence и times_mentioned.
+    При обнаружении дубликата повышает confidence (вес от source)
+    и times_mentioned. Если факт содержит временные маркеры
+    ("сейчас", "раньше", "уже не", "больше не", "перестал") —
+    всегда создаётся новая запись.
     Если embedding передан, индексирует факт в Qdrant для будущих проверок.
     """
     fact = fact.strip()
@@ -608,7 +617,14 @@ async def add_memory(
     # Хеш для дедупликации (первые 64 бита SHA256)
     emb_hash = hashlib.sha256(fact.lower().strip().encode()).hexdigest()[:16]
 
-    if deduplicate:
+    # Вес source для повышения confidence при мерже
+    source_weight = {"chat": 0.3, "user": 0.6, "weekly": 0.15}.get(source, 0.3)
+
+    # Временные маркеры — не мерджим, создаём как новый факт
+    temporal_markers = {"сейчас", "раньше", "уже не", "больше не", "перестал"}
+    has_temporal_marker = any(m in fact.lower() for m in temporal_markers)
+
+    if deduplicate and not has_temporal_marker:
         # --- Уровень 1: SHA256 хеш (точные повторы) ---
         result = await session.execute(
             select(Memory)
@@ -621,7 +637,7 @@ async def add_memory(
         existing = result.scalar_one_or_none()
         if existing:
             existing.times_mentioned = (existing.times_mentioned or 1) + 1
-            existing.confidence = min(1.0, existing.confidence + 0.1)
+            existing.confidence = min(1.0, existing.confidence + source_weight)
             existing.updated_at = datetime.now(timezone.utc)
             if sentiment and existing.sentiment != sentiment:
                 existing.sentiment = "contradictory"  # маркируем противоречие
@@ -630,23 +646,40 @@ async def add_memory(
 
         # --- Уровень 2: семантическая дедупликация через Qdrant ---
         if embedding is not None and vector_store_obj is not None:
+            # Ищем кандидатов с запасом (порог 0.7)
             similar = await vector_store_obj.search_similar_memories(
                 user_id=user.id,
                 embedding=embedding,
-                threshold=0.85,
+                threshold=0.7,
                 limit=3,
             )
             if similar:
                 best = similar[0]
                 existing = await session.get(Memory, best["memory_id"])
                 if existing and existing.user_id == user.id:
-                    existing.times_mentioned = (existing.times_mentioned or 1) + 1
-                    existing.confidence = min(1.0, existing.confidence + 0.1)
-                    existing.updated_at = datetime.now(timezone.utc)
-                    if sentiment and existing.sentiment != sentiment:
-                        existing.sentiment = "contradictory"
-                    await session.flush()
-                    return existing
+                    # Динамический порог
+                    now = datetime.now(timezone.utc)
+                    age_days = (
+                        (now - existing.created_at).days if existing.created_at else 999
+                    )
+                    same_source = existing.source == source
+                    if same_source and age_days < 7:
+                        dyn_threshold = 0.92
+                    elif not same_source:
+                        dyn_threshold = 0.78
+                    else:
+                        dyn_threshold = 0.85
+
+                    if best["score"] >= dyn_threshold:
+                        existing.times_mentioned = (existing.times_mentioned or 1) + 1
+                        existing.confidence = min(
+                            1.0, existing.confidence + source_weight
+                        )
+                        existing.updated_at = now
+                        if sentiment and existing.sentiment != sentiment:
+                            existing.sentiment = "contradictory"
+                        await session.flush()
+                        return existing
 
     mem = Memory(
         user_id=user.id,
@@ -660,6 +693,9 @@ async def add_memory(
         is_active=True,
         cluster_topic=cluster_topic,
         embedding_hash=emb_hash,
+        importance=importance if importance is not None else 0.5,
+        decay_rate=decay_rate if decay_rate is not None else 0.07,
+        memory_tier=memory_tier,
     )
     session.add(mem)
     await session.flush()
@@ -861,17 +897,27 @@ async def get_memory_stats(session: AsyncSession, user: User) -> dict:
     by_source = {}
     for m in memories:
         by_source[m.source] = by_source.get(m.source, 0) + 1
+    by_tier = {"tier_1": 0, "tier_2": 0, "tier_3": 0}
+    for m in memories:
+        key = f"tier_{m.memory_tier}"
+        by_tier[key] = by_tier.get(key, 0) + 1
     return {
         "total": len(memories),
         "by_sentiment": by_sentiment,
         "by_source": by_source,
+        "by_tier": by_tier,
         "high_confidence": sum(1 for m in memories if m.confidence >= 0.8),
         "with_contact": sum(1 for m in memories if m.contact_id is not None),
     }
 
 
 async def upsert_memory_cluster(
-    session: AsyncSession, user: User, topic: str
+    session: AsyncSession,
+    user: User,
+    topic: str,
+    *,
+    summary: str | None = None,
+    fact_count: int | None = None,
 ) -> MemoryCluster:
     """Создаёт или возвращает существующий кластер по теме."""
     result = await session.execute(
@@ -884,7 +930,11 @@ async def upsert_memory_cluster(
     if cluster is None:
         cluster = MemoryCluster(user_id=user.id, topic=topic.lower().strip())
         session.add(cluster)
-        await session.flush()
+    if summary is not None:
+        cluster.summary = summary
+    if fact_count is not None:
+        cluster.fact_count = fact_count
+    await session.flush()
     return cluster
 
 

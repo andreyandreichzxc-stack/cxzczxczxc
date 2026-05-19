@@ -22,6 +22,7 @@ from src.core.chat_service import load_chat, message_to_text
 from src.core.notifier import notifier
 from src.core.style_profile import style_profile_as_prompt_hint
 from src.core.timeutil import now_in_tz
+from src.core.vector_store import vector_store
 from src.db.models import AutoReplyLog, User
 from src.db.repo import (
     add_auto_reply_log,
@@ -137,21 +138,41 @@ async def _build_reply_text(
         owner = await get_or_create_user(session, owner_telegram_id)
         provider = await build_provider(session, owner)
         contact = await get_contact(session, owner, peer_id)
-        memories = await list_memories(session, owner, contact_id=peer_id)
-        if memories:
-            memory_lines = [f"- {m.fact}" for m in memories[-10:]]  # last 10 only
-            memory_context = "Что ты знаешь о собеседнике из памяти:\n" + "\n".join(
-                memory_lines
-            )
-        # Также загружаем контекст владельца (общие факты)
-        general_memories = await list_memories(session, owner, contact_id=None)
-        if general_memories:
-            general_lines = [f"- {m.fact}" for m in general_memories[:3]]
-            if memory_context:
-                memory_context += "\n\n"
-            memory_context += "Контекст владельца (общие факты):\n" + "\n".join(
-                general_lines
-            )
+
+        # Векторный поиск релевантных фактов
+        relevant_facts = []
+        try:
+            if provider:
+                query_vec = await provider.embed(incoming_text[:300])
+                hits = await vector_store.search_similar_memories(
+                    user_id=owner.id,
+                    embedding=query_vec,
+                    limit=10,
+                    threshold=0.7,
+                    contact_id=peer_id,
+                )
+                for h in hits:
+                    # Скоринг: 0.5*sim + 0.3*conf + 0.2*importance
+                    sim = h.get("score", 0.5)
+                    conf = float(h.get("confidence", 0.5))
+                    imp = float(h.get("importance", 0.5))
+                    score = 0.5 * sim + 0.3 * conf + 0.2 * imp
+                    relevant_facts.append((score, h.get("fact", "")))
+                relevant_facts.sort(key=lambda x: x[0], reverse=True)
+        except Exception:
+            logger.warning("Vector memory search failed, using fallback")
+            # fallback к старому поведению
+            try:
+                memories = await list_memories(session, owner, contact_id=peer_id)
+                if memories:
+                    relevant_facts = [(0.5, m.fact) for m in memories[-5:]]
+            except Exception:
+                pass
+
+        if relevant_facts:
+            memory_lines = [f"- {f}" for _, f in relevant_facts[:5]]
+            memory_context = "Релевантные факты из памяти:\n" + "\n".join(memory_lines)
+
         heavy = owner.settings.use_heavy_model
         global_profile = owner.global_style_profile
 
