@@ -942,6 +942,30 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
     if kind == "list_keys":
         await _exec_list_keys(intent, message)
         return
+    if kind == "show_digest":
+        await _exec_show_digest(intent, message)
+        return
+    if kind == "show_today":
+        await _exec_show_today(intent, message)
+        return
+    if kind == "show_skills":
+        await _exec_show_skills(intent, message)
+        return
+    if kind == "show_threads":
+        await _exec_show_threads(intent, message)
+        return
+    if kind == "show_trajectory":
+        await _exec_show_trajectory(intent, message)
+        return
+    if kind == "show_style":
+        await _exec_show_style(intent, message)
+        return
+    if kind == "show_profile":
+        await _exec_show_profile(intent, message)
+        return
+    if kind == "index_chats":
+        await _exec_index_chats(intent, message)
+        return
     if kind == "clarify":
         question = (intent.get("question") or "").strip()
         if question:
@@ -1300,6 +1324,146 @@ async def _exec_add_api_key(intent: dict, message: Message) -> None:
         lines = [f"<b>Добавлено {len(keys)} ключей {provider}/{purpose}:</b>", ""]
         lines.extend(results)
         await message.answer("\n".join(lines))
+
+
+# ─── NL intent: show_* and index_chats ────────────────────────────────
+
+
+async def _exec_show_digest(intent: dict, message: Message) -> None:
+    """Показать утренний дайджест (build_digest)."""
+    from src.core.scheduling.digest import build_digest
+
+    text = await build_digest(message.from_user.id)
+    await message.answer(sanitize_html(text) if text else "Дайджест пуст.")
+
+
+async def _exec_show_today(intent: dict, message: Message) -> None:
+    """Показать сводку за сегодня (smart_digest)."""
+    from src.core.scheduling.smart_digest import (
+        build_smart_digest,
+        collect_recent_messages,
+    )
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        interval = owner.settings.smart_digest_interval_min
+        messages = await collect_recent_messages(session, owner, since_minutes=interval)
+        text = build_smart_digest(messages, interval)
+    await message.answer(sanitize_html(text) if text else "На сегодня ничего.")
+
+
+async def _exec_show_skills(intent: dict, message: Message) -> None:
+    """Показать список навыков."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        from src.db.repo import list_skills
+
+        skills = await list_skills(session, owner)
+    if skills:
+        text = "📊 <b>Навыки:</b>\n" + "\n".join(f"• {s.name}" for s in skills)
+    else:
+        text = "Навыков пока нет."
+    await message.answer(sanitize_html(text))
+
+
+async def _exec_show_threads(intent: dict, message: Message) -> None:
+    """Показать активные треды (conversation states)."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        from src.db.repo import list_active_conversations
+
+        convs = await list_active_conversations(session, owner)
+    if convs:
+        lines = []
+        for c in convs[:10]:
+            async with get_session() as session:
+                owner = await get_or_create_user(session, message.from_user.id)
+                from src.db.repo import get_contact
+
+                contact = await get_contact(session, owner, c.peer_id)
+            name = contact.display_name if contact else str(c.peer_id)
+            unread = c.unread_count or 0
+            lines.append(f"• {name} (непрочитано: {unread})")
+        text = "🧵 <b>Активные треды:</b>\n" + "\n".join(lines)
+    else:
+        text = "Активных тредов нет."
+    await message.answer(sanitize_html(text))
+
+
+async def _exec_show_trajectory(intent: dict, message: Message) -> None:
+    """Показать траекторию действий."""
+    only_errors = intent.get("only_errors", False)
+    limit = intent.get("limit", 10)
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        from src.db.repo import list_trajectories
+
+        items = await list_trajectories(
+            session, owner, only_errors=only_errors, limit=limit
+        )
+    if items:
+        lines = []
+        for t in items:
+            action = (t.intent_json or {}).get("intent", "?") if t.intent_json else "?"
+            success = "✅" if t.success else "❌"
+            lines.append(f"{success} {action}")
+        text = "📜 <b>Траектория:</b>\n" + "\n".join(lines)
+    else:
+        text = "Траектория пуста."
+    await message.answer(sanitize_html(text))
+
+
+async def _exec_show_style(intent: dict, message: Message) -> None:
+    """Показать стиль общения (контактный или глобальный)."""
+    from src.core.contacts.style_profile import update_style_profile_for_contact
+
+    contact_name = (intent.get("contact_name") or "").strip()
+    if contact_name:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            from src.db.repo import list_contacts
+
+            contacts = await list_contacts(
+                session, owner, kinds=("user", "group"), include_bots=False
+            )
+            matched = [
+                c
+                for c in contacts
+                if contact_name.lower() in (c.display_name or "").lower()
+            ]
+            if matched:
+                target = matched[0]
+                provider = await build_provider(session, owner)
+                if provider:
+                    profile = await update_style_profile_for_contact(
+                        provider, message.from_user.id, target.peer_id
+                    )
+                    text = sanitize_html(str(profile))
+                else:
+                    text = "Не удалось создать LLM провайдер."
+            else:
+                text = f"Контакт '{contact_name}' не найден."
+        await message.answer(text)
+    else:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            gs = owner.global_style_profile
+            text = (
+                sanitize_html(str(gs))
+                if gs
+                else "Глобальный стиль не собран. /style для сбора."
+            )
+        await message.answer(text)
+
+
+async def _exec_show_profile(intent: dict, message: Message) -> None:
+    """Показать профиль пользователя (перенаправление на show_self)."""
+    await _exec_show_self(intent, message)
+
+
+async def _exec_index_chats(intent: dict, message: Message) -> None:
+    """Переиндексация чатов — перенаправление на /index."""
+    await message.answer("Для переиндексации используй команду /index")
 
 
 async def _exec_remove_api_key(intent: dict, message: Message) -> None:

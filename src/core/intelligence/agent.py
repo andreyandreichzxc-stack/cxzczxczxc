@@ -147,6 +147,24 @@ AGENT_SYSTEM = """\
 
 "show_inbox"       — входящие. Без параметров.
 
+"show_digest"      — показать утренний дайджест. Без параметров.
+
+"show_today"       — показать сводку за сегодня. Без параметров.
+
+"show_skills"      — показать индекс навыков. Без параметров.
+
+"show_threads"     — список активных conversation-тредов. Без параметров.
+
+"show_trajectory"  — показать траекторию/историю действий.
+  only_errors: bool (default false), limit: int (default 10)
+
+"show_style"       — показать профиль стиля общения.
+  contact_name: str|null (если нет — глобальный стиль)
+
+"show_profile"     — показать профиль пользователя. Без параметров.
+
+"index_chats"      — переиндексировать чаты. Без параметров.
+
 "full_analysis"    — полный анализ переписок.
   folders: [str]|null
 
