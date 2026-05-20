@@ -567,6 +567,9 @@ class ConversationState(Base):
     last_incoming_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_outgoing_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_auto_reply_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    radar_snoozed_until: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

@@ -291,9 +291,17 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
         text = payload["text"]
         await delete_pending_action(session, action_id, user)
 
+    # Send Guard — предупреждение перед отправкой
+    from src.core.send_guard import build_send_guard, store_undo
+
+    guard = await build_send_guard(callback.from_user.id, peer_id, text)
+    if guard.warnings:
+        await callback.answer(f"⚠️ {guard.warnings[0][:100]}", show_alert=True)
+
+    sent_msg = None
     try:
         entity = await client.get_entity(peer_id)
-        await client.send_message(entity, text)
+        sent_msg = await client.send_message(entity, text)
     except Exception as e:
         logger.exception("send_message failed")
         await callback.answer("Ошибка при отправке", show_alert=True)
@@ -302,6 +310,10 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
                 f"❌ Не удалось отправить 😞: <code>{e}</code>"
             )
         return
+
+    # Сохраняем для undo
+    if sent_msg:
+        store_undo(callback.from_user.id, peer_id, sent_msg.id, text)
 
     # Получаем имя контакта для красивого отчёта
     label = str(peer_id)
@@ -315,6 +327,43 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
     if len(text or "") > 60:
         snippet += "…"
 
+    # Кнопка отмены
+    from aiogram.types import InlineKeyboardMarkup
+
+    undo_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="↩ Отменить", callback_data=f"send:undo:{peer_id}"
+                )
+            ]
+        ]
+    )
+
     if callback.message:
-        await callback.message.edit_text(f"✅ Отправлено «{label}»: {snippet}")
+        await callback.message.edit_text(
+            f"✅ Отправлено «{label}»: {snippet}", reply_markup=undo_kb
+        )
     await callback.answer("Отправлено")
+
+
+@router.callback_query(F.data.startswith("send:undo:"))
+async def cb_undo(callback: CallbackQuery, userbot_manager=None):
+    from src.core.send_guard import get_undo
+
+    peer_id = int(callback.data.split(":")[2])
+    client = (
+        userbot_manager.get_client(callback.from_user.id) if userbot_manager else None
+    )
+    if not client:
+        await callback.answer("Сначала /login", show_alert=True)
+        return
+    undo = get_undo(callback.from_user.id)
+    if undo:
+        try:
+            await client.delete_messages(entity=undo[0], message_ids=[undo[1]])
+            await callback.message.edit_text("↩ Сообщение отменено.")
+        except Exception:
+            await callback.answer("Не удалось отменить", show_alert=True)
+    else:
+        await callback.answer("Слишком поздно для отмены (60с)", show_alert=True)

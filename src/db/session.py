@@ -169,6 +169,16 @@ async def init_db() -> None:
         except Exception:
             pass  # таблица ещё не существует — ок
 
+        # Миграция: radar_snoozed_until для ConversationState
+        try:
+            await conn.execute(
+                text(
+                    "ALTER TABLE conversation_states ADD COLUMN radar_snoozed_until DATETIME"
+                )
+            )
+        except Exception:
+            pass
+
 
 @asynccontextmanager
 async def get_session() -> AsyncIterator[AsyncSession]:

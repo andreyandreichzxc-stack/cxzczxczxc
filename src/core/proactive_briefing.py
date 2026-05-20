@@ -11,9 +11,9 @@ from src.core.memory_health import (
     format_health_compact,
 )
 from src.core.notifier import notifier
+from src.core.reply_radar import collect_reply_radar
 from src.core.temporal_layers import format_layer_stats, get_layer_stats
 from src.db.repo import (
-    get_contact,
     get_memory_stats,
     get_or_create_user,
     list_active_conversations,
@@ -40,7 +40,7 @@ class BriefingData:
     tag_stats: dict = None  # статистика по тегам
     health: dict = None  # здоровье памяти
     emotional_trend: str | None = None  # эмоциональный тренд
-    conversation_starters: list = None  # предложения написать контактам
+    radar_items: list = None  # Reply Radar (list[RadarItem])
 
     def __post_init__(self) -> None:
         if self.waiting_reply is None:
@@ -53,8 +53,8 @@ class BriefingData:
             self.bridges = []
         if self.cross_insights is None:
             self.cross_insights = []
-        if self.conversation_starters is None:
-            self.conversation_starters = []
+        if self.radar_items is None:
+            self.radar_items = []
 
 
 async def collect_briefing_data(owner_id: int) -> BriefingData:
@@ -125,24 +125,8 @@ async def collect_briefing_data(owner_id: int) -> BriefingData:
     # Эмоциональный тренд
     result.emotional_trend = await compute_emotional_trend(owner_id)
 
-    # Conversation starters: контакты с waiting_reply >2 дней
-    stale_waiting = await list_active_conversations(
-        session, owner, status="waiting_reply", limit=50
-    )
-    now = datetime.now(timezone.utc)
-    for conv in stale_waiting:
-        # если последнее входящее сообщение было >2 дней назад
-        if conv.last_incoming_at and (now - conv.last_incoming_at).days >= 2:
-            contact_obj = await get_contact(session, owner, conv.peer_id)
-            name = contact_obj.display_name if contact_obj else f"id{conv.peer_id}"
-            days_since = (now - conv.last_incoming_at).days
-            result.conversation_starters.append(
-                {
-                    "peer_id": conv.peer_id,
-                    "name": name,
-                    "days_since": days_since,
-                }
-            )
+    # Reply Radar: самые срочные для ответа контакты
+    result.radar_items = await collect_reply_radar(owner_id, limit=3)
 
     return result
 
@@ -237,12 +221,15 @@ def format_briefing(data: BriefingData, title: str) -> str:
         lines.append("")
         lines.append(data.emotional_trend)
 
-    # Conversation starters
-    if data.conversation_starters:
+    # Reply Radar
+    if data.radar_items:
         lines.append("")
-        lines.append("💬 <b>Напомнить о себе:</b>")
-        for cs in data.conversation_starters[:3]:
-            lines.append(f"  • <b>{cs['name']}</b> — не общались {cs['days_since']} д.")
+        lines.append("<b>📡 Кому ответить:</b>")
+        for item in data.radar_items:
+            lines.append(
+                f"• <b>{item.contact_name}</b> — ждёт {item.waiting_hours:.0f}ч [{item.score}]"
+            )
+        lines.append("<i>/today — открыть полный пульт</i>")
 
     if data.health:
         lines.append("")
