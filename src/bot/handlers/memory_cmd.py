@@ -165,6 +165,41 @@ async def cmd_keys(message: Message) -> None:
         await message.answer("\n".join(lines))
 
 
+@router.message(Command("llm_status"))
+async def cmd_llm_status(message: Message) -> None:
+    """Показать статус LLM: семафоры, слоты, использование."""
+    from src.llm.router import _PURPOSE_SEMAPHORES
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        slots = await list_key_slots(session, owner)
+
+    lines = ["<b>📊 LLM Status</b>", ""]
+    total_used = sum(s.usage_count or 0 for s in slots)
+    total_fail = sum(s.failure_count or 0 for s in slots)
+    lines.append(f"Всего вызовов: {total_used} | фейлов: {total_fail}")
+    lines.append("")
+
+    for purpose, sem in _PURPOSE_SEMAPHORES.items():
+        active = sem._value
+        limit = sem._bound_value if hasattr(sem, "_bound_value") else "?"
+        lines.append(f"🔹 {purpose}: {active}/{limit} слотов свободно")
+    lines.append("")
+    for s in slots[:10]:
+        status = (
+            "❌"
+            if not s.enabled
+            else "⏳"
+            if s.cooldown_until and s.cooldown_until > datetime.now(timezone.utc)
+            else "✅"
+        )
+        lines.append(
+            f"{status} {s.provider}/{s.purpose} — {s.usage_count}× ({s.failure_count}× фейлов)"
+        )
+
+    await message.answer("\n".join(lines))
+
+
 @router.message(Command("memory"))
 async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
     """Показать память — всё или про конкретный контакт, или --inbox."""
@@ -917,6 +952,30 @@ async def cb_conflict_resolve(callback: CallbackQuery) -> None:
         )
     else:
         await callback.answer("Ошибка при разрешении конфликта")
+
+
+@router.message(Command("clusters"))
+async def cmd_clusters(message: Message) -> None:
+    """Показать кластеры памяти."""
+    from src.core.memory_clusterer import rebuild_clusters
+    from src.db.repo import get_cluster_members, list_clusters_for_contact
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        clusters = await list_clusters_for_contact(session, owner)
+
+    if not clusters:
+        await message.answer(
+            "Нет кластеров памяти. Они создадутся автоматически ночью."
+        )
+        return
+
+    lines = ["<b>🧩 Кластеры памяти:</b>", ""]
+    for cluster, fact_count in clusters[:8]:
+        lines.append(f"📦 <b>{cluster.topic}</b> — {fact_count} фактов")
+        if cluster.summary:
+            lines.append(f"   <i>{cluster.summary[:80]}</i>")
+    await message.answer("\n".join(lines))
 
 
 # ── Timeline format ───────────────────────────────────────────────────

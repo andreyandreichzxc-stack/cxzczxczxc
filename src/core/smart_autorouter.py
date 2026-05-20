@@ -29,6 +29,45 @@ class RiskLevel(str, enum.Enum):
     CRITICAL = "critical"  # удаление данных, конфликты
 
 
+class ResponseMode(str, enum.Enum):
+    INSTANT = "instant"
+    FAST_ROUTE = "fast_route"
+    MAESTRO = "maestro"
+
+
+INSTANT_PATTERNS = [
+    r"^(привет|здаров|хай|ку|hello|hi|доброе утро|добрый вечер|добрый день)\b",
+    r"^(как дела|чё как|как ты|как сам)\b",
+    r"^(спокойной ночи|пока|до завтра|ладн[оа])\b",
+    r"^(спасибо|благодарю|спс|thx)\b",
+    r"^(ясно|понял|ок|окей|ага|угу|ладно)\b",
+]
+
+INSTANT_REPLIES = {
+    "привет": "Привет! 👋",
+    "здаров": "Здаров! 😎",
+    "хай": "Хай! ✌️",
+    "ку": "Ку! 👋",
+    "доброе утро": "Доброе утро! ☀️",
+    "добрый вечер": "Добрый вечер! 🌆",
+    "добрый день": "Добрый день! ☀️",
+    "как дела": "Всё отлично! Работаю над твоими задачами 💪",
+    "чё как": "Да норм! А у тебя? 😄",
+    "как ты": "Я в порядке! Работаю в штатном режиме 🤖",
+    "спокойной ночи": "Спокойной ночи! Сладких снов 😴🌙",
+    "пока": "Пока! До связи 👋",
+    "до завтра": "До завтра! 🌙",
+    "спасибо": "Всегда пожалуйста! 🤗",
+    "спс": "Не за что! 💪",
+    "ясно": "👍",
+    "понял": "✅",
+    "ок": "👌",
+    "окей": "👌",
+    "ага": "😄",
+    "ладно": "👌",
+}
+
+
 @dataclass
 class RouterTask:
     user_text: str
@@ -48,6 +87,45 @@ class RouterPlan:
     final_response: str = ""
     used_providers: list[str] = field(default_factory=list)
     elapsed_ms: int = 0
+    # NEW: pre-built context
+    memory_context: str = ""  # готовый memory_recall_context для инжекта
+    recall_result: Any = None  # RecallResult (lazy import)
+    self_profile: str = ""  # SelfProfile JSON или текст
+    contact_profile: str = ""  # ContactProfile для упомянутого контакта
+    rag_context: str = ""  # RAG-контекст
+    response_mode: str = "maestro"  # instant | fast_route | maestro
+    metrics: dict = field(
+        default_factory=dict
+    )  # {recall_ms, router_ms, llm_ms, maestro_ms, total_ms}
+
+
+async def classify_mode(user_text: str) -> ResponseMode:
+    """Определяет режим ответа: instant / fast_route / maestro."""
+    import re
+
+    t = user_text.lower().strip()
+    if len(t) < 30:
+        for pattern in INSTANT_PATTERNS:
+            m = re.match(pattern, t)
+            if m:
+                return ResponseMode.INSTANT
+    if len(t) < 100 and not any(
+        w in t
+        for w in ("анализ", "сводка", "найди все", "проанализируй", "расскажи подробно")
+    ):
+        return ResponseMode.FAST_ROUTE
+    return ResponseMode.MAESTRO
+
+
+def get_instant_reply(user_text: str) -> str:
+    """Возвращает мгновенный ответ для простых фраз."""
+    t = user_text.lower().strip().rstrip(".!?")
+    if t in INSTANT_REPLIES:
+        return INSTANT_REPLIES[t]
+    for key, reply in INSTANT_REPLIES.items():
+        if t.startswith(key):
+            return reply
+    return ""
 
 
 async def classify_risk(user_text: str) -> RiskLevel:
@@ -88,32 +166,70 @@ async def make_plan(
 ) -> RouterPlan:
     """
     Строит план обработки запроса.
-    Автоматически выбирает: purpose, heavy/light, агентов, кэш.
+    Определяет режим ответа, собирает контекст (recall, self_profile),
+    выбирает purpose, heavy/light, агентов, кэш.
     """
-    risk = await classify_risk(user_text)
     plan = RouterPlan()
     start = time.monotonic()
+
+    # Шаг 0: определить режим ответа
+    mode = await classify_mode(user_text)
+    plan.response_mode = mode.value
+    plan.metrics["mode"] = mode.value
+
+    if mode == ResponseMode.INSTANT:
+        plan.final_response = get_instant_reply(user_text)
+        plan.tasks = []
+        plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+        plan.metrics["total_ms"] = plan.elapsed_ms
+        return plan
+
+    risk = await classify_risk(user_text)
     meta: dict[str, Any] = {}
 
-    # ---------- Слой 1: Recall-first ----------
+    # ---------- Слой 1: Memory recall (один раз!) ----------
+    t1 = time.monotonic()
     try:
-        from src.core.memory_recall import recall
+        from src.core.memory_recall import recall, format_recall_for_prompt
 
         recall_result = await recall(
             telegram_id,
             query=user_text[:200],
-            limit=3,
+            limit=10,
             include_self=True,
             include_pinned=True,
             include_tasks=True,
         )
+        plan.recall_result = recall_result
+        plan.memory_context = format_recall_for_prompt(recall_result)
         if recall_result and recall_result.facts:
             meta["recall_hit"] = len(recall_result.facts)
             meta["recall_facts"] = [rf.fact[:80] for rf in recall_result.facts[:3]]
     except Exception:
         pass
+    plan.metrics["recall_ms"] = int((time.monotonic() - t1) * 1000)
 
-    # ---------- Слой 4: Context chain (last_purpose) ----------
+    # ---------- Шаг 2: Self-profile (саморефлексия) ----------
+    try:
+        from src.db.repo import get_self_profile
+        from src.db.session import get_session
+
+        async with get_session() as session:
+            from src.db.repo import get_or_create_user
+
+            owner = await get_or_create_user(session, telegram_id)
+            sp = await get_self_profile(session, owner)
+            if sp:
+                parts = []
+                if sp.preferences:
+                    parts.append(f"Предпочтения: {sp.preferences}")
+                if sp.goals:
+                    parts.append(f"Цели: {sp.goals}")
+                plan.self_profile = "; ".join(parts)
+    except Exception:
+        pass
+
+    # ---------- Слой 3: Context chain (last_purpose) ----------
     if (
         last_purpose
         and len(user_text) < 30
@@ -127,7 +243,8 @@ async def make_plan(
             heavy=False,
         )
         plan.tasks.append(task)
-        plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+        plan.metrics["router_ms"] = int((time.monotonic() - start) * 1000)
+        plan.elapsed_ms = plan.metrics["router_ms"]
         return plan
 
     t = user_text.lower().strip()
@@ -145,10 +262,11 @@ async def make_plan(
             cache_ttl=60,
         )
         plan.tasks.append(task)
-        plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+        plan.metrics["router_ms"] = int((time.monotonic() - start) * 1000)
+        plan.elapsed_ms = plan.metrics["router_ms"]
         return plan
 
-    # ---------- Слой 2: Contact-aware routing ----------
+    # ---------- Слой 4: Contact-aware routing ----------
     try:
         from src.core.contact_resolver import resolve
         from src.db.session import get_session
@@ -178,7 +296,10 @@ async def make_plan(
                             need_agents=["search", "draft"],
                         )
                         plan.tasks.append(task)
-                        plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+                        plan.metrics["router_ms"] = int(
+                            (time.monotonic() - start) * 1000
+                        )
+                        plan.elapsed_ms = plan.metrics["router_ms"]
                         return plan
     except Exception:
         pass
@@ -194,7 +315,8 @@ async def make_plan(
             cache_ttl=0,
         )
         plan.tasks.append(task)
-        plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+        plan.metrics["router_ms"] = int((time.monotonic() - start) * 1000)
+        plan.elapsed_ms = plan.metrics["router_ms"]
         return plan
 
     # Поиск
@@ -208,7 +330,8 @@ async def make_plan(
             cache_ttl=300,
         )
         plan.tasks.append(task)
-        plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+        plan.metrics["router_ms"] = int((time.monotonic() - start) * 1000)
+        plan.elapsed_ms = plan.metrics["router_ms"]
         return plan
 
     # Анализ / сводка
@@ -222,7 +345,8 @@ async def make_plan(
             cache_ttl=300,
         )
         plan.tasks.append(task)
-        plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+        plan.metrics["router_ms"] = int((time.monotonic() - start) * 1000)
+        plan.elapsed_ms = plan.metrics["router_ms"]
         return plan
 
     # Черновик ответа
@@ -236,7 +360,8 @@ async def make_plan(
             cache_ttl=0,
         )
         plan.tasks.append(task)
-        plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+        plan.metrics["router_ms"] = int((time.monotonic() - start) * 1000)
+        plan.elapsed_ms = plan.metrics["router_ms"]
         return plan
 
     # Задачи / напоминания
@@ -250,10 +375,11 @@ async def make_plan(
             cache_ttl=0,
         )
         plan.tasks.append(task)
-        plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+        plan.metrics["router_ms"] = int((time.monotonic() - start) * 1000)
+        plan.elapsed_ms = plan.metrics["router_ms"]
         return plan
 
-    # ---------- Слой 3: Urgency escalation ----------
+    # ---------- Слой 5: Urgency escalation ----------
     try:
         from src.core.conflict_predictor import detect_silence_triggers
 
@@ -276,7 +402,7 @@ async def make_plan(
         user_text, purpose=RoutePurpose.MAIN, risk=risk, heavy=False, cache_ttl=0
     )
 
-    # ---------- Слой 5: Heavy/Light intelligence ----------
+    # ---------- Слой 6: Heavy/Light intelligence ----------
     should_use_heavy = heavy_available and bool(
         risk in (RiskLevel.HIGH, RiskLevel.CRITICAL)
         or len(user_text) > 200
@@ -287,5 +413,6 @@ async def make_plan(
     task.meta = meta
 
     plan.tasks.append(task)
-    plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+    plan.metrics["router_ms"] = int((time.monotonic() - start) * 1000)
+    plan.elapsed_ms = plan.metrics["router_ms"]
     return plan

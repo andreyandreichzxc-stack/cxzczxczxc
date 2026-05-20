@@ -16,6 +16,13 @@ from src.llm.openai_provider import OpenAIProvider
 
 logger = logging.getLogger(__name__)
 
+
+class ExhaustedError(Exception):
+    """Все API-ключи провайдера исчерпаны (колдаун/отключены)."""
+
+    pass
+
+
 PROVIDER_ORDER = ("openai", "gemini", "mistral")
 RETRYABLE_MARKERS = (
     "429",
@@ -35,6 +42,31 @@ RETRYABLE_MARKERS = (
 )
 KEY_COOLDOWN_SECONDS = 90.0
 _FAILED_KEYS: dict[tuple[str, str], float] = {}
+
+# Per-purpose лимиты параллельных запросов
+_PURPOSE_SEMAPHORES: dict[str, asyncio.Semaphore] = {
+    "main": asyncio.Semaphore(2),
+    "draft": asyncio.Semaphore(1),
+    "memory": asyncio.Semaphore(1),
+    "background": asyncio.Semaphore(1),
+    "analysis": asyncio.Semaphore(1),
+    "urgent": asyncio.Semaphore(2),
+    "fallback": asyncio.Semaphore(2),
+}
+
+
+async def acquire_purpose_slot(purpose: str) -> asyncio.Semaphore:
+    """Захватывает слот для purpose. Возвращает семафор."""
+    sem = _PURPOSE_SEMAPHORES.get(purpose)
+    if sem is None:
+        sem = _PURPOSE_SEMAPHORES.get("fallback", asyncio.Semaphore(1))
+    await sem.acquire()
+    return sem
+
+
+def release_purpose_slot(sem: asyncio.Semaphore) -> None:
+    """Освобождает слот."""
+    sem.release()
 
 
 def _is_retryable_llm_error(exc: Exception) -> bool:
@@ -74,6 +106,7 @@ class MultiKeyProvider:
         keys: list[str],
         slot_ids: list[int] | None = None,
         session_provider: Callable[[], tuple[AsyncSession, object]] | None = None,
+        purpose: str = "main",
         **kwargs: object,
     ) -> None:
         if not keys:
@@ -86,6 +119,7 @@ class MultiKeyProvider:
         self._kwargs = kwargs
         self._idx = 0
         self._lock = asyncio.Lock()
+        self._current_purpose = purpose
         self.name = f"{provider_name}(×{len(self._keys)})"
 
     async def _try_with_retry(self, operation, *args: object, **kwargs: object):
@@ -148,22 +182,52 @@ class MultiKeyProvider:
                                 )
                         continue
                     raise
-            if skipped and last_error is None:
-                raise RuntimeError(
-                    f"All {self.provider_name} API keys are cooling down after capacity errors"
+            if last_error:
+                raise ExhaustedError(
+                    f"Все {len(self._keys)} ключей {self.provider_name} недоступны "
+                    f"(последняя ошибка: {last_error})"
                 )
-            raise last_error or RuntimeError(
-                f"All {self.provider_name} API keys failed"
+            raise ExhaustedError(
+                f"Все {len(self._keys)} ключей {self.provider_name} в кулдауне"
             )
 
     async def chat(self, messages, *, heavy: bool = False) -> str:
+        sem = await acquire_purpose_slot(self._current_purpose)
+        try:
+            return await self._chat_with_retry(messages, heavy=heavy)
+        finally:
+            release_purpose_slot(sem)
+
+    async def _chat_with_retry(self, messages, *, heavy: bool = False) -> str:
+        # Early exit: все ли ключи в кулдауне?
+        now = asyncio.get_running_loop().time()
+        all_dead = all(
+            (self.provider_name, key) in _FAILED_KEYS
+            and now - _FAILED_KEYS[(self.provider_name, key)] < KEY_COOLDOWN_SECONDS
+            for key in self._keys
+        )
+        if all_dead:
+            self._idx = 0
+            raise ExhaustedError(
+                f"Все {len(self._keys)} ключей {self.provider_name} в кулдауне. Попробуй позже."
+            )
         return await self._try_with_retry(lambda p: p.chat(messages, heavy=heavy))
 
     async def embed(self, text: str) -> list[float]:
-        return await self._try_with_retry(lambda p: p.embed(text))
+        """Embed с защитой backpressure (background семафор)."""
+        sem = await acquire_purpose_slot("background")
+        try:
+            return await self._try_with_retry(lambda p: p.embed(text))
+        finally:
+            release_purpose_slot(sem)
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        return await self._try_with_retry(lambda p: p.embed_batch(texts))
+        """Embed_batch с защитой backpressure (background семафор)."""
+        sem = await acquire_purpose_slot("background")
+        try:
+            return await self._try_with_retry(lambda p: p.embed_batch(texts))
+        finally:
+            release_purpose_slot(sem)
 
     async def validate_key(self) -> bool:
         try:
@@ -263,6 +327,7 @@ async def build_provider(
                     keys,
                     slot_ids=slot_ids,
                     session_provider=lambda: (session, user),
+                    purpose=purpose,
                 )
             )
         if providers:
@@ -281,7 +346,9 @@ async def build_provider(
         keys = await get_api_keys(session, user, name)
         if not keys:
             continue
-        providers.append(MultiKeyProvider(name, _provider_class_for(name), keys))
+        providers.append(
+            MultiKeyProvider(name, _provider_class_for(name), keys, purpose=purpose)
+        )
     if not providers:
         # Проверяем: есть слоты но все в кулдауне?
         try:

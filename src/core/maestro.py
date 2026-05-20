@@ -137,9 +137,9 @@ async def process(
         except Exception:
             logger.debug("RAG search non-critical fail", exc_info=True)
 
-    # --- Memory recall via unified service ---
-    memory_recall_context = ""
-    if owner_id is not None:
+    # --- Memory recall via unified service (skip if already provided) ---
+    memory_recall_context = memory_context if memory_context else ""
+    if owner_id is not None and not memory_context:
         try:
             from src.core.memory_recall import recall, format_recall_for_prompt
 

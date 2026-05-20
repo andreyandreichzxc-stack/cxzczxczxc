@@ -124,12 +124,13 @@ async def run_distillation(owner_id: int, contact_id: int | None = None) -> dict
             decay_rate=0.02,  # очень медленный decay — важное знание
             memory_tier=3,
         )
-        # Деактивируем исходные факты
+        # Недеструктивно: факты остаются активными, summary добавляется как новый факт
+        # Для подсчёта сколько фактов "покрыто" дистилляцией
         memories = await list_memories(session, owner, contact_id=contact_id)
         deactivated = 0
         for m in memories:
             if m.is_active and m.source != "distillation":
-                m.is_active = False
+                # m.is_active = False  # недеструктивно — факты остаются активными
                 deactivated += 1
         await session.commit()
         return {"success": True, "fact": fact, "deactivated": deactivated}

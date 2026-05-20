@@ -20,6 +20,7 @@ from src.core.knowledge_distiller import distillation_loop
 from src.core.conflict_predictor import conflict_predictor_loop
 from src.core.conflict_resolver import conflict_check_loop
 from src.core.habit_tracker import habit_tracker_loop
+from src.core.memory_clusterer import cluster_loop
 from src.db.session import init_db
 from src.userbot.manager import UserbotManager
 
@@ -101,6 +102,9 @@ async def main() -> None:
         asyncio.create_task(
             habit_tracker_loop(settings.owner_telegram_id),
             name="habit-tracker",
+        ),
+        asyncio.create_task(
+            cluster_loop(settings.owner_telegram_id), name="memory-cluster"
         ),
     ]
 

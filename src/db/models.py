@@ -572,6 +572,27 @@ class MemoryCluster(Base):
     )
 
 
+class MemoryClusterMember(Base):
+    """Связь many-to-many: факт → кластер."""
+
+    __tablename__ = "memory_cluster_members"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    memory_id: Mapped[int] = mapped_column(
+        ForeignKey("memories.id", ondelete="CASCADE"), index=True
+    )
+    cluster_id: Mapped[int] = mapped_column(
+        ForeignKey("memory_clusters.id", ondelete="CASCADE"), index=True
+    )
+    relevance_score: Mapped[float] = mapped_column(Float, default=0.5)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+
 class AgentCache(Base):
     """Кэш результатов сабагентов."""
 

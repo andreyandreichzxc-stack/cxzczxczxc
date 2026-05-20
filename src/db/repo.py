@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, or_, select, text as sql_text
+from sqlalchemy import delete, distinct, func, or_, select, text as sql_text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +22,7 @@ from src.db.models import (
     Memory,
     MemoryCandidate,
     MemoryCluster,
+    MemoryClusterMember,
     MemoryLink,
     Message,
     NewsTopic,
@@ -1166,6 +1167,78 @@ async def list_memory_clusters(
         .order_by(MemoryCluster.fact_count.desc())
     )
     return list(result.scalars().all())
+
+
+async def add_member(
+    session: AsyncSession,
+    user_id: int,
+    memory_id: int,
+    cluster_id: int,
+    score: float = 0.5,
+) -> None:
+    """Добавляет факт в кластер."""
+    m = MemoryClusterMember(
+        user_id=user_id,
+        memory_id=memory_id,
+        cluster_id=cluster_id,
+        relevance_score=score,
+    )
+    session.add(m)
+    await session.flush()
+
+
+async def get_cluster_members(
+    session: AsyncSession,
+    user: User,
+    cluster_id: int,
+    limit: int = 20,
+) -> list[Memory]:
+    """Факты кластера, отсортированы по relevance_score."""
+    q = (
+        select(Memory)
+        .join(MemoryClusterMember, Memory.id == MemoryClusterMember.memory_id)
+        .where(
+            MemoryClusterMember.cluster_id == cluster_id,
+            MemoryClusterMember.user_id == user.id,
+            Memory.is_active == True,
+        )
+        .order_by(MemoryClusterMember.relevance_score.desc())
+        .limit(limit)
+    )
+    r = await session.execute(q)
+    return list(r.scalars().all())
+
+
+async def list_clusters_for_contact(
+    session: AsyncSession,
+    user: User,
+    contact_id: int | None = None,
+) -> list:
+    """Кластеры для контакта (или общие)."""
+    q = (
+        select(
+            MemoryCluster,
+            func.count(distinct(MemoryClusterMember.memory_id)).label("fact_count"),
+        )
+        .join(
+            MemoryClusterMember,
+            MemoryCluster.id == MemoryClusterMember.cluster_id,
+        )
+        .join(Memory, Memory.id == MemoryClusterMember.memory_id)
+        .where(
+            MemoryCluster.user_id == user.id,
+            Memory.is_active == True,
+        )
+    )
+    if contact_id is not None:
+        q = q.where(Memory.contact_id == contact_id)
+    q = (
+        q.group_by(MemoryCluster.id)
+        .order_by(func.count(distinct(MemoryClusterMember.memory_id)).desc())
+        .limit(10)
+    )
+    r = await session.execute(q)
+    return list(r.all())
 
 
 async def upsert_folders(

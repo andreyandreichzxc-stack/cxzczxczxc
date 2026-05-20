@@ -3,6 +3,7 @@
 
 import json
 import logging
+import time
 from pathlib import Path
 
 from aiogram import F, Router
@@ -20,7 +21,7 @@ from src.config import settings as app_settings
 from src.core.agent import route_intent
 from src.core.chat_service import load_chat
 from src.core.maestro import run_pipeline
-from src.core.smart_autorouter import make_plan, RoutePurpose
+from src.core.smart_autorouter import make_plan, RoutePurpose, ResponseMode
 from src.core.commitment_extractor import extract_and_save_commitments
 from src.core.contact_resolver import resolve, resolve_with_llm
 from src.core.news import build_news_digest
@@ -596,23 +597,6 @@ async def _process_text(
     now_local_str = now_in_tz(tz_name).strftime("%Y-%m-%d %H:%M")
     history_block = ctx_store.render_history_block(message.from_user.id)
 
-    # грузим память для контекста через recall
-    memory_context = ""
-    try:
-        from src.core.memory_recall import recall, format_recall_for_prompt
-
-        recall_result = await recall(
-            owner_telegram_id,
-            query=raw[:200],
-            limit=12,
-            include_self=True,
-            include_pinned=True,
-            include_tasks=True,
-        )
-        memory_context = format_recall_for_prompt(recall_result)
-    except Exception:
-        logger.exception("memory recall failed")
-
     # Adaptive instructions — проверяем не инструкция ли это
     try:
         from src.core.adaptive_instructions import detect_instruction, apply_instruction
@@ -674,6 +658,11 @@ async def _process_text(
             t0.need_agents or "—",
         )
 
+    # INSTANT — отвечаем сразу, без БД, без LLM
+    if router_plan.response_mode == "instant" and router_plan.final_response:
+        await message.answer(router_plan.final_response)
+        return
+
     # Строим провайдер с учётом purpose из auto-router'а
     purpose = router_plan.tasks[0].purpose.value if router_plan.tasks else "main"
     async with get_session() as session:
@@ -689,14 +678,52 @@ async def _process_text(
         )
         return
 
-    # Сначала пробуем Maestro + агенты — полный пайплайн
+    # FAST_ROUTE — один light LLM-вызов с готовым контекстом
+    if router_plan.response_mode == "fast_route":
+        fast_context_parts = []
+        if router_plan.memory_context:
+            fast_context_parts.append(router_plan.memory_context)
+        if router_plan.self_profile:
+            fast_context_parts.append(router_plan.self_profile)
+        fast_system = (
+            "Ты ассистент. Ответь коротко.\n\n" + "\n\n".join(fast_context_parts)
+            if fast_context_parts
+            else "Ты ассистент. Ответь коротко."
+        )
+        fast_start = time.monotonic()
+        try:
+            from src.llm.base import ChatMessage
+
+            fast_reply = await provider.chat(
+                [
+                    ChatMessage(role="system", content=fast_system),
+                    ChatMessage(role="user", content=raw),
+                ],
+                heavy=False,
+            )
+            router_plan.final_response = fast_reply
+            router_plan.metrics["llm_ms"] = int((time.monotonic() - fast_start) * 1000)
+        except Exception as e:
+            logger.warning("Fast route failed: %s", e)
+            router_plan.metrics["llm_ms"] = -1
+        else:
+            router_plan.metrics["total_ms"] = router_plan.metrics.get(
+                "recall_ms", 0
+            ) + router_plan.metrics.get("llm_ms", 0)
+            logger.info(
+                "Fast route metrics: %s", json.dumps(router_plan.metrics, default=str)
+            )
+            await message.answer(router_plan.final_response)
+            return
+
+    # MAESTRO — стандартный тяжёлый пайплайн
     try:
         pipeline_result = await run_pipeline(
             provider,
             raw,
             owner_id=owner_telegram_id,
             history_block=history_block,
-            memory_context=memory_context,
+            memory_context=router_plan.memory_context,
             global_style=getattr(owner, "global_style_profile", None),
         )
         response_text = pipeline_result.get("final_response", "")
@@ -724,7 +751,7 @@ async def _process_text(
             now_local=now_local_str,
             tz_name=tz_name,
             history_block=history_block,
-            memory_context=memory_context,
+            memory_context=router_plan.memory_context,
             user_id=owner_telegram_id,
         )
     except Exception as e:
