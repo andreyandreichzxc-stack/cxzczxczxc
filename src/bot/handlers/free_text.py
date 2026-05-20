@@ -30,7 +30,14 @@ from src.core.news import build_news_digest
 from src.core.summarizer import catchup, draft_reply, summarize_chat
 from src.core import conversation_context as ctx_store
 from src.core.text_sanitizer import sanitize_html
-from src.core.timeutil import fmt_local, is_valid_tz, now_in_tz, tz_short
+from src.core.timeutil import (
+    fmt_local,
+    get_user_tz,
+    HM_RE,
+    is_valid_tz,
+    now_in_tz,
+    tz_short,
+)
 from src.core.transcription import transcription_service
 from src.db.repo import (
     add_commitment,
@@ -88,7 +95,7 @@ async def _get_owner_context(telegram_id: int) -> dict[str, object]:
             owner = await get_or_create_user(session, telegram_id)
             _settings_cache = {
                 "owner_telegram_id": owner.telegram_id,
-                "tz_name": owner.settings.timezone if owner.settings else "UTC",
+                "tz_name": get_user_tz(owner),
                 "use_heavy": owner.settings.use_heavy_model if owner.settings else True,
                 "global_style_profile": owner.global_style_profile,
             }
@@ -154,11 +161,6 @@ SETTING_FIELDS: dict[str, str] = {
 }
 
 
-import re
-
-_HM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
-
-
 def _coerce_setting_value(spec: str, raw):
     if spec == "bool":
         if isinstance(raw, bool):
@@ -178,7 +180,7 @@ def _coerce_setting_value(spec: str, raw):
             return None, "ожидаю строку"
         return raw.strip(), None
     if spec == "hm":
-        if isinstance(raw, str) and _HM_RE.match(raw.strip()):
+        if isinstance(raw, str) and HM_RE.match(raw.strip()):
             return raw.strip(), None
         return None, "ожидаю время в формате HH:MM"
     if spec == "tz":
@@ -1106,7 +1108,7 @@ async def free_voice(
         try:
             target.unlink(missing_ok=True)
         except Exception:
-            pass
+            logger.debug("cleanup voice file failed: %s", target, exc_info=True)
 
     text = (text or "").strip()
     if not text:
@@ -1543,7 +1545,7 @@ async def _exec_change_auto_mode(intent, message) -> None:
 async def _exec_set_quiet_hours(intent, message) -> None:
     start = (intent.get("start") or "").strip()
     end = (intent.get("end") or "").strip()
-    if not _HM_RE.match(start) or not _HM_RE.match(end):
+    if not HM_RE.match(start) or not HM_RE.match(end):
         await message.answer("❌ Укажи время в формате HH:MM (например 23:00 и 07:00)")
         return
     async with get_session() as session:
@@ -1876,6 +1878,10 @@ async def _post_turn_optimize(
 
     now = time.monotonic()
     async with _get_post_turn_lock():
+        # Cleanup: удаляем записи старше 1 часа
+        stale = [uid for uid, ts in _post_turn_last_call.items() if now - ts > 3600]
+        for uid in stale:
+            del _post_turn_last_call[uid]
         if telegram_id in _post_turn_last_call:
             if now - _post_turn_last_call[telegram_id] < 300:
                 return  # rate-limited

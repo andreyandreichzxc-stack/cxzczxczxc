@@ -20,20 +20,37 @@ def parse_telethon_proxy(proxy_url: str) -> tuple | None:
     return (scheme, host, port)
 
 
+class _LazyModel:
+    """Descriptor — лениво читает имя модели из settings при обращении.
+
+    Позволяет LLMDefaults.OPENAI_CHAT_LIGHT работать как строка,
+    но фактически брать значение из Settings (которое может быть
+    переопределено через переменные окружения).
+    """
+
+    def __init__(self, attr_name: str) -> None:
+        self.attr_name = attr_name
+
+    def __get__(self, obj: object, objtype: type) -> str:
+        return getattr(settings, self.attr_name)
+
+
 class LLMDefaults:
-    # Имена моделей на май 2026 — менять при выходе новых
-    OPENAI_CHAT_LIGHT = "gpt-5-mini"
-    OPENAI_CHAT_HEAVY = "gpt-5.5"
-    OPENAI_EMBED = "text-embedding-3-small"
+    # Имена моделей на май 2026 — менять при выходе новых.
+    # Значения по-умолчанию хранятся в Settings, можно переопределить
+    # через переменные окружения (см. .env или export).
+    OPENAI_CHAT_LIGHT = _LazyModel("openai_chat_light_model")
+    OPENAI_CHAT_HEAVY = _LazyModel("openai_chat_heavy_model")
+    OPENAI_EMBED = _LazyModel("openai_embed_model")
 
-    GEMINI_CHAT_LIGHT = "gemini-3-flash"
-    GEMINI_CHAT_HEAVY = "gemini-3.1-pro"
-    GEMINI_EMBED = "text-embedding-004"
+    GEMINI_CHAT_LIGHT = _LazyModel("gemini_chat_light_model")
+    GEMINI_CHAT_HEAVY = _LazyModel("gemini_chat_heavy_model")
+    GEMINI_EMBED = _LazyModel("gemini_embed_model")
 
-    MISTRAL_CHAT_LIGHT = "mistral-small-latest"
-    MISTRAL_CHAT_HEAVY = "magistral-medium-latest"
-    MISTRAL_EMBED = "mistral-embed"
-    MISTRAL_STT = "voxtral-mini-transcribe-latest"
+    MISTRAL_CHAT_LIGHT = _LazyModel("mistral_chat_light_model")
+    MISTRAL_CHAT_HEAVY = _LazyModel("mistral_chat_heavy_model")
+    MISTRAL_EMBED = _LazyModel("mistral_embed_model")
+    MISTRAL_STT = _LazyModel("mistral_stt_model")
 
 
 class Settings(BaseSettings):
@@ -110,6 +127,40 @@ class Settings(BaseSettings):
     )
     knowledge_distiller_interval_sec: int = Field(
         600, description="Интервал дистилляции знаний"
+    )
+
+    # --- Имена моделей (переопределяются через .env) ---
+    openai_chat_light_model: str = Field(
+        "gpt-5-mini", description="OpenAI лёгкая чат-модель"
+    )
+    openai_chat_heavy_model: str = Field(
+        "gpt-5.5", description="OpenAI тяжёлая чат-модель"
+    )
+    openai_embed_model: str = Field(
+        "text-embedding-3-small", description="OpenAI модель эмбеддингов"
+    )
+
+    gemini_chat_light_model: str = Field(
+        "gemini-3-flash", description="Gemini лёгкая чат-модель"
+    )
+    gemini_chat_heavy_model: str = Field(
+        "gemini-3.1-pro", description="Gemini тяжёлая чат-модель"
+    )
+    gemini_embed_model: str = Field(
+        "text-embedding-004", description="Gemini модель эмбеддингов"
+    )
+
+    mistral_chat_light_model: str = Field(
+        "mistral-small-latest", description="Mistral лёгкая чат-модель"
+    )
+    mistral_chat_heavy_model: str = Field(
+        "magistral-medium-latest", description="Mistral тяжёлая чат-модель"
+    )
+    mistral_embed_model: str = Field(
+        "mistral-embed", description="Mistral модель эмбеддингов"
+    )
+    mistral_stt_model: str = Field(
+        "voxtral-mini-transcribe-latest", description="Mistral STT модель"
     )
 
     @property

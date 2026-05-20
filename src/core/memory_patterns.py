@@ -11,7 +11,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.core.notification_queue import notification_queue
 from src.db.models import Notification
-from src.core.timeutil import now_in_tz
+from src.core.timeutil import get_user_tz, now_in_tz
 from src.db.repo import (
     get_contact,
     get_or_create_user,
@@ -227,7 +227,7 @@ async def patterns_loop(owner_id: int) -> None:
         try:
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_id)
-                tz_name = owner.settings.timezone if owner.settings else "UTC"
+                tz_name = get_user_tz(owner)
 
             now = now_in_tz(tz_name)
             today = now.date()

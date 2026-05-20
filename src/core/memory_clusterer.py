@@ -108,14 +108,14 @@ async def cluster_first_retrieval(
 
 async def cluster_loop(telegram_id: int) -> None:
     """Фоновый цикл: пересборка кластеров ночью (03:00)."""
-    from src.core.timeutil import now_in_tz
+    from src.core.timeutil import get_user_tz, now_in_tz
 
     last_run = None
     while True:
         try:
             async with get_session() as session:
                 owner = await get_or_create_user(session, telegram_id)
-                tz = owner.settings.timezone if owner.settings else "UTC"
+                tz = get_user_tz(owner)
             now = now_in_tz(tz)
             if now.hour == 3 and last_run != now.date():
                 last_run = now.date()

@@ -25,7 +25,20 @@ class _Ctx:
 _STORE: dict[int, _Ctx] = {}
 
 
+def _cleanup_stale_contexts() -> None:
+    """Удаляет контексты, где last_peer_at старше 24 часов."""
+    now = time()
+    stale = [
+        uid
+        for uid, ctx in _STORE.items()
+        if ctx.last_peer_at > 0 and (now - ctx.last_peer_at) > 86400
+    ]
+    for uid in stale:
+        del _STORE[uid]
+
+
 def _get(user_id: int) -> _Ctx:
+    _cleanup_stale_contexts()
     ctx = _STORE.get(user_id)
     if ctx is None:
         ctx = _Ctx()

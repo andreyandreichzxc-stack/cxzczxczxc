@@ -15,7 +15,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
 from src.bot.states import NewsTopicStates
-from src.core.timeutil import tz_short
+from src.core.timeutil import get_user_tz, tz_short
 from src.db.repo import (
     add_news_topic,
     delete_news_topic,
@@ -44,7 +44,7 @@ async def _render(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         news_digest_time = (
             owner.settings.news_digest_time if owner.settings else "09:00"
         )
-        tz_name = owner.settings.timezone if owner.settings else "UTC"
+        tz_name = get_user_tz(owner)
 
     text_lines = [
         "📰 <b>Темы для авто-новостей</b>",

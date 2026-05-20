@@ -174,7 +174,7 @@ def format_conflicts(conflicts: list[dict]) -> str:
 async def conflict_check_loop(owner_id: int):
     """Фоновый цикл: раз в 12 часов проверяет конфликты."""
     import asyncio
-    from src.core.timeutil import now_in_tz
+    from src.core.timeutil import get_user_tz, now_in_tz
     from src.db.models import Notification
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -183,7 +183,7 @@ async def conflict_check_loop(owner_id: int):
         try:
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_id)
-                tz_name = owner.settings.timezone if owner.settings else "UTC"
+                tz_name = get_user_tz(owner)
             now = now_in_tz(tz_name)
             today = now.date()
             if now.hour == 12 and last_check_date != today:

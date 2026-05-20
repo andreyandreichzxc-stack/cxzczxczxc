@@ -8,7 +8,7 @@ from typing import Any
 
 from src.core.notification_queue import notification_queue
 from src.db.models import Notification
-from src.core.timeutil import now_in_tz
+from src.core.timeutil import get_user_tz, now_in_tz
 from src.db.repo import get_or_create_user, list_memories
 from src.config import settings
 from src.db.session import get_session
@@ -194,7 +194,7 @@ async def habit_tracker_loop(owner_id: int) -> None:
         try:
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_id)
-                tz_name = owner.settings.timezone if owner.settings else "UTC"
+                tz_name = get_user_tz(owner)
 
             now = now_in_tz(tz_name)
             # Воскресенье 18:00, не чаще раза в день

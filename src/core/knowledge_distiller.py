@@ -141,7 +141,7 @@ async def distillation_loop(owner_id: int) -> None:
     """Фоновый цикл: раз в день (14:00) запускает дистилляцию общих фактов."""
     import asyncio
 
-    from src.core.timeutil import now_in_tz
+    from src.core.timeutil import get_user_tz, now_in_tz
     from src.db.models import Notification
 
     last_run_date = None
@@ -149,7 +149,7 @@ async def distillation_loop(owner_id: int) -> None:
         try:
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_id)
-                tz_name = owner.settings.timezone if owner.settings else "UTC"
+                tz_name = get_user_tz(owner)
             now = now_in_tz(tz_name)
             today = now.date()
             if now.hour == 14 and last_run_date != today:

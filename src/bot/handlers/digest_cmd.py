@@ -1,4 +1,3 @@
-import re
 from datetime import datetime, timezone
 
 from aiogram import F, Router
@@ -13,7 +12,7 @@ from aiogram.types import (
 from src.bot.filters import OwnerOnly
 from src.core.digest import build_digest
 from src.core.smart_digest import build_smart_digest, collect_recent_messages
-from src.core.timeutil import tz_short
+from src.core.timeutil import HM_RE, tz_short
 from src.db.repo import add_memory, get_or_create_user, list_contacts
 from src.db.session import get_session
 
@@ -21,9 +20,6 @@ from src.db.session import get_session
 router = Router(name="digest_cmd")
 router.message.filter(OwnerOnly())
 router.callback_query.filter(OwnerOnly())
-
-
-HM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
 @router.message(Command("digest"))

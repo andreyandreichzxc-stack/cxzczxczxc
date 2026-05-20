@@ -1,10 +1,15 @@
 """Часовой пояс пользователя. В БД храним naive UTC, при показе и сравнении
 с расписаниями (digest_time, news_digest_time) переводим в TZ владельца."""
+
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+
+# валидация HH:MM
+HM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 # популярные пресеты для быстрых кнопок
 TZ_PRESETS: list[str] = [
@@ -21,6 +26,11 @@ TZ_PRESETS: list[str] = [
     "America/New_York",
     "America/Los_Angeles",
 ]
+
+
+def get_user_tz(user) -> str:
+    """Get user's timezone string with UTC fallback."""
+    return user.settings.timezone if user.settings else "UTC"
 
 
 def parse_tz(name: str | None) -> ZoneInfo:
@@ -50,7 +60,9 @@ def utc_to_local(dt: datetime, tz_name: str | None) -> datetime:
     return dt.astimezone(parse_tz(tz_name))
 
 
-def fmt_local(dt: datetime | None, tz_name: str | None, *, fmt: str = "%Y-%m-%d %H:%M") -> str:
+def fmt_local(
+    dt: datetime | None, tz_name: str | None, *, fmt: str = "%Y-%m-%d %H:%M"
+) -> str:
     if dt is None:
         return "—"
     local = utc_to_local(dt, tz_name)

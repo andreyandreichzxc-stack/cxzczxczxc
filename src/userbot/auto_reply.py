@@ -23,7 +23,7 @@ from src.core.chat_service import load_chat, message_to_text
 from src.core.notification_queue import notification_queue
 from src.core.notifier import notifier
 from src.core.style_profile import style_profile_as_prompt_hint
-from src.core.timeutil import now_in_tz
+from src.core.timeutil import get_user_tz, now_in_tz
 from src.core.vector_store import vector_store
 from src.db.models import AutoReplyLog, User
 from src.core.memory_recall import recall, format_recall_for_prompt
@@ -84,7 +84,7 @@ async def _check_and_track_offline(
             last_seen = owner.last_seen_online
             if last_seen is None or (now - last_seen) > timedelta(minutes=10):
                 # Sleep detection — определяем, не спит ли владелец
-                tz_name = owner.settings.timezone if owner.settings else "UTC"
+                tz_name = get_user_tz(owner)
                 local_now = now_in_tz(tz_name)
                 hour = local_now.hour
                 is_night = hour >= 22 or hour < 8

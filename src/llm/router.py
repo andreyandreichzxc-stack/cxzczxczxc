@@ -200,8 +200,13 @@ class MultiKeyProvider:
             release_purpose_slot(sem)
 
     async def _chat_with_retry(self, messages, *, heavy: bool = False) -> str:
-        # Early exit: все ли ключи в кулдауне?
+        # Cleanup: удаляем ключи, которые фейлились дольше KEY_COOLDOWN_SECONDS * 5
         now = asyncio.get_running_loop().time()
+        max_age = KEY_COOLDOWN_SECONDS * 5
+        stale_keys = [k for k, ts in _FAILED_KEYS.items() if now - ts > max_age]
+        for k in stale_keys:
+            del _FAILED_KEYS[k]
+        # Early exit: все ли ключи в кулдауне?
         all_dead = all(
             (self.provider_name, key) in _FAILED_KEYS
             and now - _FAILED_KEYS[(self.provider_name, key)] < KEY_COOLDOWN_SECONDS

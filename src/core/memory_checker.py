@@ -13,7 +13,7 @@ from src.core.temporal_layers import (
     utc_naive,
     utcnow_naive,
 )
-from src.core.timeutil import now_in_tz
+from src.core.timeutil import get_user_tz, now_in_tz
 from src.db.models import Memory
 from src.db.repo import get_or_create_user
 from src.config import settings
@@ -31,7 +31,7 @@ async def memory_decay_loop(owner_id: int) -> None:
         try:
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_id)
-                tz_name = owner.settings.timezone if owner.settings else "UTC"
+                tz_name = get_user_tz(owner)
             now = now_in_tz(tz_name)
             if now.hour == 3 and last_run != now.date():
                 last_run = now.date()

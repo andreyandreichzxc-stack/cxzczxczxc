@@ -23,8 +23,11 @@ _lock = asyncio.Lock()
 async def get_cached(key: str) -> Any | None:
     async with _lock:
         entry = _stats.get(key)
-        if entry and entry.is_valid():
-            return entry.data
+        if entry:
+            if entry.is_valid():
+                return entry.data
+            # Evict expired entry
+            del _stats[key]
         return None
 
 
