@@ -99,7 +99,9 @@ async def review_pending_candidates(telegram_id: int) -> int:
             return 0
 
         try:
-            from src.core.intelligence.instruction_optimizer import instruction_optimizer
+            from src.core.intelligence.instruction_optimizer import (
+                instruction_optimizer,
+            )
 
             for cand in pending:
                 # LLM проверяет кандидата через consolidate_rules
@@ -142,6 +144,12 @@ async def apply_instruction(telegram_id: int, rule: str):
 
 async def get_active_rules(telegram_id: int) -> list[str]:
     """Возвращает активные правила."""
+    from src.core.context_cache import get as cache_get
+
+    cached = cache_get(f"rules:{telegram_id}")
+    if cached is not None:
+        return cached
+
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
         from sqlalchemy import select
@@ -151,7 +159,12 @@ async def get_active_rules(telegram_id: int) -> list[str]:
             select(InstructionProfile).where(InstructionProfile.user_id == owner.id)
         )
         profile = result.scalar_one_or_none()
-        return json.loads(profile.rules_json) if profile else []
+        result_val = json.loads(profile.rules_json) if profile else []
+
+    from src.core.context_cache import put as cache_put
+
+    cache_put(f"rules:{telegram_id}", result_val, ttl=30)
+    return result_val
 
 
 async def format_rules_for_prompt(telegram_id: int) -> str:

@@ -102,10 +102,22 @@ async def build_skill_index(
     route_mode: str | None = None,
     limit: int = 5,
 ) -> tuple[str, list[dict]]:
+    from src.core.context_cache import get as cache_get
+
+    cached = cache_get(f"skills:{telegram_id}:{route_mode}")
+    if cached is not None:
+        return cached
+
     skills = await list_relevant_skills(telegram_id, user_text, route_mode, limit)
-    return format_skill_index(skills), [
-        {"id": s.id, "name": s.name, "route_mode": route_mode} for s in skills
-    ]
+    result = (
+        format_skill_index(skills),
+        [{"id": s.id, "name": s.name, "route_mode": route_mode} for s in skills],
+    )
+
+    from src.core.context_cache import put as cache_put
+
+    cache_put(f"skills:{telegram_id}:{route_mode}", result, ttl=30)
+    return result
 
 
 async def record_skill_usage(

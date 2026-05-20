@@ -229,35 +229,37 @@ async def make_plan(
         plan.recall_mode = "deep"
 
     t1 = time.monotonic()
-    try:
-        from src.core.memory.memory_recall import recall, format_recall_for_prompt
+    # ---------- Общая сессия для recall + self-profile ----------
+    async with get_session() as session:
+        owner = await get_or_create_user(session, telegram_id)
 
-        recall_result = await recall(
-            telegram_id,
-            query=user_text[:200],
-            limit=10,
-            include_self=True,
-            include_pinned=True,
-            include_tasks=True,
-            include_deep=plan.recall_mode == "deep",
-            mode=plan.recall_mode,
-        )
-        plan.recall_result = recall_result
-        plan.memory_context = format_recall_for_prompt(recall_result)
-        if recall_result and recall_result.facts:
-            meta["recall_hit"] = len(recall_result.facts)
-            meta["recall_facts"] = [rf.fact[:80] for rf in recall_result.facts[:3]]
-    except Exception:
-        logger.debug("smart_autorouter: recall skipped", exc_info=True)
-        pass
-    plan.metrics["recall_ms"] = int((time.monotonic() - t1) * 1000)
+        # Recall с общей сессией
+        try:
+            from src.core.memory.memory_recall import recall, format_recall_for_prompt
 
-    # ---------- Шаг 2: Self-profile (саморефлексия) ----------
-    try:
-        from src.db.repo import get_self_profile
+            recall_result = await recall(
+                telegram_id,
+                session=session,
+                query=user_text[:200],
+                limit=10,
+                include_self=True,
+                include_pinned=True,
+                include_tasks=True,
+                include_deep=plan.recall_mode == "deep",
+                mode=plan.recall_mode,
+            )
+            plan.recall_result = recall_result
+            plan.memory_context = format_recall_for_prompt(recall_result)
+            if recall_result and recall_result.facts:
+                meta["recall_hit"] = len(recall_result.facts)
+                meta["recall_facts"] = [rf.fact[:80] for rf in recall_result.facts[:3]]
+        except Exception:
+            logger.debug("smart_autorouter: recall skipped", exc_info=True)
 
-        async with get_session() as session:
-            owner = await get_or_create_user(session, telegram_id)
+        # Self-profile той же сессией
+        try:
+            from src.db.repo import get_self_profile
+
             sp = await get_self_profile(session, owner)
             if sp:
                 parts = []
@@ -266,9 +268,9 @@ async def make_plan(
                 if sp.goals:
                     parts.append(f"Цели: {sp.goals}")
                 plan.self_profile = "; ".join(parts)
-    except Exception:
-        logger.debug("smart_autorouter: self-profile skipped", exc_info=True)
-        pass
+        except Exception:
+            logger.debug("smart_autorouter: self-profile skipped", exc_info=True)
+    plan.metrics["recall_ms"] = int((time.monotonic() - t1) * 1000)
 
     # ---------- Слой 3: Context chain (last_purpose) ----------
     if (

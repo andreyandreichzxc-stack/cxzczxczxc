@@ -102,6 +102,12 @@ async def format_persona_for_prompt(telegram_id: int) -> str:
     Результат устанавливается как ctx.persona_block в AssemblyContext
     и инжектится через PromptAssembler._tier2_context().
     """
+    from src.core.context_cache import get as cache_get
+
+    cached = cache_get(f"persona:{telegram_id}")
+    if cached is not None:
+        return cached
+
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
         p = await get_persona(session, owner)
@@ -137,7 +143,13 @@ async def format_persona_for_prompt(telegram_id: int) -> str:
         rules.append("режим отдыха — только приятное общение")
 
     if not rules:
-        return ""
-    return "\n\n## ТВОЙ СТИЛЬ ОБЩЕНИЯ (установлен владельцем):\n" + "\n".join(
-        f"- {r}" for r in rules
-    )
+        result = ""
+    else:
+        result = "\n\n## ТВОЙ СТИЛЬ ОБЩЕНИЯ (установлен владельцем):\n" + "\n".join(
+            f"- {r}" for r in rules
+        )
+
+    from src.core.context_cache import put as cache_put
+
+    cache_put(f"persona:{telegram_id}", result, ttl=30)
+    return result

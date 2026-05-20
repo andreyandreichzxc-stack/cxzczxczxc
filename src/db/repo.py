@@ -46,7 +46,15 @@ logger = logging.getLogger(__name__)
 _user_lock = asyncio.Lock()
 
 
-async def get_or_create_user(session: AsyncSession, telegram_id: int) -> User:
+async def get_or_create_user(
+    session: AsyncSession, telegram_id: int, *, use_cache: bool = True
+) -> User:
+    if use_cache:
+        from src.core.context_cache import get as cache_get
+
+        cached = cache_get(f"user:{telegram_id}")
+        if cached is not None:
+            return cached
     async with _user_lock:
         result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
@@ -60,7 +68,11 @@ async def get_or_create_user(session: AsyncSession, telegram_id: int) -> User:
             user.settings = UserSettings(user_id=user.id)
             session.add(user.settings)
             await session.flush()
-        return user
+    if use_cache:
+        from src.core.context_cache import put as cache_put
+
+        cache_put(f"user:{telegram_id}", user, ttl=30)
+    return user
 
 
 async def save_telegram_session(
@@ -275,7 +287,9 @@ async def list_skills(
     return list(r.scalars().all())
 
 
-async def get_skill_by_name(session: AsyncSession, user: User, name: str) -> Skill | None:
+async def get_skill_by_name(
+    session: AsyncSession, user: User, name: str
+) -> Skill | None:
     r = await session.execute(
         select(Skill).where(
             Skill.user_id == user.id,

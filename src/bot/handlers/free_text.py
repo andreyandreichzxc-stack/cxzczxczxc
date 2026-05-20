@@ -647,19 +647,25 @@ async def _process_text(
                 "Fast route metrics: %s", json.dumps(router_plan.metrics, default=str)
             )
             await message.answer(sanitize_html(router_plan.final_response))
-            trajectory_id = await record_trajectory(
-                owner_telegram_id,
-                request_text=raw,
-                route_mode="fast_route",
-                intent_json={"intent": "chat"},
-                used_skills_json=used_skills,
-                response_text=router_plan.final_response,
-                success=True,
-                latency_ms=int((time.monotonic() - turn_started) * 1000),
-            )
-            await record_skill_usages(
-                owner_telegram_id, used_skills, trajectory_id, True
-            )
+
+            # Траектория + скиллы — в фон, не блокируем ответ
+            async def _save_trajectory_bg():
+                try:
+                    tid = await record_trajectory(
+                        owner_telegram_id,
+                        request_text=raw,
+                        route_mode="fast_route",
+                        intent_json={"intent": "chat"},
+                        used_skills_json=used_skills,
+                        response_text=router_plan.final_response,
+                        success=True,
+                        latency_ms=int((time.monotonic() - turn_started) * 1000),
+                    )
+                    await record_skill_usages(owner_telegram_id, used_skills, tid, True)
+                except Exception:
+                    logger.debug("fast_route bg trajectory save failed", exc_info=True)
+
+            asyncio.create_task(_save_trajectory_bg())
             await _post_turn_optimize(
                 owner_telegram_id, raw, router_plan.final_response
             )

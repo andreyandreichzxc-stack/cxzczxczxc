@@ -52,54 +52,138 @@ async def cmd_keys(message: Message) -> None:
     args = (message.text or "").split()
     if len(args) >= 4 and args[1] == "add":
         provider = args[2].lower()
-        purpose = args[3].lower()
-        api_key = " ".join(args[4:])
+        purpose_raw = args[3].lower()
+        api_keys_raw = " ".join(args[4:])
+
         if provider not in ("openai", "gemini", "mistral"):
             await message.answer("❌ Провайдер: openai, gemini или mistral")
             return
-        # Удаляем сообщение с ключом из чата
+
+        # Auto-increment priority when purpose ends with "+"
+        auto_inc = purpose_raw.endswith("+")
+        purpose = purpose_raw.rstrip("+") if auto_inc else purpose_raw
+
+        # Split by comma for bulk add
+        keys = [k.strip() for k in api_keys_raw.split(",") if k.strip()]
+        if not keys:
+            await message.answer("❌ Не указан ключ(и).")
+            return
+
+        # Удаляем сообщение с ключами из чата
         try:
             await message.delete()
         except Exception:
             logger.exception("failed to delete message with key")
-        async with get_session() as session:
-            owner = await get_or_create_user(session, message.from_user.id)
-            slot = await add_key_slot(
-                session,
-                owner,
-                provider,
-                api_key,
-                purpose=purpose,
-                label=f"{provider}/{purpose}",
-            )
-        # Валидируем ключ
-        try:
-            from src.llm.router import _provider_class_for
-            from src.crypto import decrypt
 
-            key = decrypt(slot.key_enc)
-            prov_class = _provider_class_for(provider)
-            prov = prov_class(key)
-            valid = await prov.validate_key()
-            if not valid:
-                # Удаляем невалидный слот
-                async with get_session() as session:
-                    owner = await get_or_create_user(session, message.from_user.id)
-                    bad_slot = await session.get(LlmKeySlot, slot.id)
-                    if bad_slot:
-                        await session.delete(bad_slot)
-                        await session.flush()
-                await message.answer(
-                    f"❌ Ключ {provider}/{purpose} не прошёл валидацию. Проверь ключ."
+        from src.llm.router import _provider_class_for
+        from src.crypto import decrypt
+
+        success = 0
+        failed = 0
+        results = []
+
+        for i, api_key in enumerate(keys):
+            priority = i if auto_inc else 0
+            async with get_session() as session:
+                owner = await get_or_create_user(session, message.from_user.id)
+                slot = await add_key_slot(
+                    session,
+                    owner,
+                    provider,
+                    api_key,
+                    purpose=purpose,
+                    label=f"{provider}/{purpose}",
+                    priority=priority,
                 )
-                return
+            # Валидируем ключ
+            try:
+                key = decrypt(slot.key_enc)
+                prov_class = _provider_class_for(provider)
+                prov = prov_class(key)
+                valid = await prov.validate_key()
+                if not valid:
+                    async with get_session() as session:
+                        owner = await get_or_create_user(session, message.from_user.id)
+                        bad_slot = await session.get(LlmKeySlot, slot.id)
+                        if bad_slot:
+                            await session.delete(bad_slot)
+                            await session.flush()
+                    results.append(f"  #{slot.id} {api_key[:12]}… ❌")
+                    failed += 1
+                else:
+                    results.append(f"  #{slot.id} {api_key[:12]}… ✅")
+                    success += 1
+            except Exception:
+                results.append(f"  #{slot.id} {api_key[:12]}… ✅ (ошибка проверки)")
+                success += 1
+
+        if len(keys) == 1 and success == 1:
             await message.answer(
                 f"✅ Ключ {provider}/{purpose} добавлен и проверен! (слот #{slot.id})"
             )
-            return
-        except Exception as e:
-            await message.answer(f"✅ Ключ сохранён, но проверить не удалось: {e}")
-            return
+        elif len(keys) == 1 and failed == 1:
+            await message.answer(
+                f"❌ Ключ {provider}/{purpose} не прошёл валидацию. Проверь ключ."
+            )
+        else:
+            lines = [f"<b>Добавлено {len(keys)} ключей {provider}/{purpose}:</b>", ""]
+            lines.extend(results)
+            await message.answer("\n".join(lines))
+        return
+
+    if len(args) >= 3 and args[1] == "remove":
+        slot_id = int(args[2])
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            slot = await session.get(LlmKeySlot, slot_id)
+            if slot and slot.user_id == owner.id:
+                provider = slot.provider
+                purpose = slot.purpose
+                await session.delete(slot)
+                await session.commit()
+                await message.answer(
+                    f"✅ Слот #{slot_id} ({provider}/{purpose}) удалён."
+                )
+            else:
+                await message.answer("❌ Слот не найден или не твой.")
+        return
+
+    if len(args) >= 2 and args[1] == "remove":
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            slots = await list_key_slots(session, owner)
+            if not slots:
+                await message.answer("❌ Нет ключевых слотов для удаления.")
+                return
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=f"{'✅' if s.enabled else '🚫'} #{s.id} {s.provider}/{s.purpose}",
+                            callback_data=f"keys:remove:{s.id}",
+                        )
+                    ]
+                    for s in slots
+                ]
+            )
+            await message.answer("🗑 Выбери слот для удаления:", reply_markup=kb)
+        return
+
+    if len(args) >= 3 and args[1] == "toggle":
+        slot_id = int(args[2])
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            slot = await session.get(LlmKeySlot, slot_id)
+            if slot and slot.user_id == owner.id:
+                slot.enabled = not slot.enabled
+                await session.commit()
+                status = "включён" if slot.enabled else "выключен"
+                await message.answer(
+                    f"✅ Слот #{slot_id} ({slot.provider}/{slot.purpose}) {status}."
+                )
+            else:
+                await message.answer("❌ Слот не найден или не твой.")
+        return
 
     if len(args) >= 2 and args[1] == "--stats":
         async with get_session() as session:
@@ -162,9 +246,31 @@ async def cmd_keys(message: Message) -> None:
                 lines.append(f"   🏷 {s.label}")
         lines.append("")
         lines.append(
-            "<i>/keys add &lt;provider&gt; &lt;purpose&gt; &lt;key&gt; — добавить</i>"
+            "<i>/keys add &lt;provider&gt; &lt;purpose&gt; &lt;key1,key2,...&gt; — добавить ключи</i>"
         )
+        lines.append("<i>/keys remove &lt;slot_id&gt; — удалить слот</i>")
+        lines.append("<i>/keys toggle &lt;slot_id&gt; — вкл/выкл слот</i>")
         await message.answer("\n".join(lines))
+
+
+@router.callback_query(F.data.startswith("keys:remove:"))
+async def cb_keys_remove(callback: CallbackQuery) -> None:
+    """Удалить слот ключа по inline-кнопке."""
+    slot_id = int(callback.data.split(":")[2])
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        slot = await session.get(LlmKeySlot, slot_id)
+        if slot and slot.user_id == owner.id:
+            provider = slot.provider
+            purpose = slot.purpose
+            await session.delete(slot)
+            await session.commit()
+            text = f"✅ Слот #{slot_id} ({provider}/{purpose}) удалён."
+        else:
+            text = "❌ Слот не найден или не твой."
+    if callback.message:
+        await callback.message.edit_text(text)
+    await callback.answer()
 
 
 @router.message(Command("llm_status"))
@@ -353,7 +459,10 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
     stat_line = f"🧠 <b>Память{label}</b>: {stats['total']} фактов ({pos} позитивных, {neg} негативных, {neu} нейтральных)\n"
 
     # Индикатор здоровья памяти
-    from src.core.memory.memory_health import calculate_health_score, format_health_compact
+    from src.core.memory.memory_health import (
+        calculate_health_score,
+        format_health_compact,
+    )
 
     health = await calculate_health_score(message.from_user.id)
     health_line = format_health_compact(health)

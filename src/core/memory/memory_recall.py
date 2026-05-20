@@ -40,6 +40,7 @@ class RecallResult:
 async def recall(
     telegram_id: int,
     *,
+    session=None,  # NEW: опциональная сессия извне
     contact_id: int | None = None,
     query: str | None = None,
     limit: int = 8,
@@ -78,7 +79,12 @@ async def recall(
     seen_ids: set[int] = set()
     ranked: list[RecalledFact] = []
 
-    async with get_session() as session:
+    _close_session = session is None
+    _session_cm = None
+    if session is None:
+        _session_cm = get_session()
+        session = await _session_cm.__aenter__()
+    try:
         owner = await get_or_create_user(session, telegram_id)
         from src.db.models import Memory
         from sqlalchemy import select, or_
@@ -276,7 +282,10 @@ async def recall(
         # --- 8. Deep memory: tier 2-3 prefetch + BFS graph expansion ---
         if include_deep:
             try:
-                from src.core.memory.deep_memory import deep_memory as dm, _extract_keywords
+                from src.core.memory.deep_memory import (
+                    deep_memory as dm,
+                    _extract_keywords,
+                )
 
                 keywords = _extract_keywords(query) if query else None
                 deep_result = await dm.retrieve(
@@ -321,6 +330,9 @@ async def recall(
                     m.use_count = (m.use_count or 0) + 1
                     m.last_used_at = now
         await session.flush()
+    finally:
+        if _close_session and _session_cm is not None:
+            await _session_cm.__aexit__(None, None, None)
 
     return result
 

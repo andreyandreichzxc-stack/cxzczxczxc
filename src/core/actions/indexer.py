@@ -1,4 +1,5 @@
 """Индексация сообщений в Qdrant — запускается командой /index."""
+
 import logging
 from datetime import datetime
 
@@ -43,29 +44,48 @@ async def index_chat(
         if not batch:
             break
 
+        # Собираем тексты для batch embed
+        texts_to_embed: list[str] = []
+        valid_msg_map: list[tuple[int, Message]] = []  # (index, message)
         ids_done: list[int] = []
-        for m in batch:
+
+        for i, m in enumerate(batch):
             text = _msg_text_for_embed(m)
             if not text:
                 ids_done.append(m.id)
                 continue
-            try:
-                vec = await provider.embed(text)
-            except Exception:
-                logger.exception("embed failed for message %s", m.id)
-                continue
+            texts_to_embed.append(text)
+            valid_msg_map.append((i, m))
 
-            await vector_store.upsert(
-                user_id=user.id,
-                peer_id=contact.peer_id,
-                peer_name=contact.display_name,
-                message_id=m.message_id,
-                text=text[:2000],
-                date_iso=m.date.isoformat() if m.date else None,
-                embedding=vec,
-            )
-            ids_done.append(m.id)
-            indexed += 1
+        # Batch embed — один API-вызов вместо N
+        if texts_to_embed:
+            try:
+                vecs = await provider.embed_batch(texts_to_embed)
+            except Exception:
+                logger.exception("batch embed failed, falling back to single embed")
+                # Fallback: по одному
+                vecs = []
+                for t in texts_to_embed:
+                    try:
+                        vecs.append(await provider.embed(t))
+                    except Exception:
+                        vecs.append(None)
+
+            for (idx, m), vec in zip(valid_msg_map, vecs):
+                if vec is None:
+                    continue
+                text = _msg_text_for_embed(m)
+                await vector_store.upsert(
+                    user_id=user.id,
+                    peer_id=contact.peer_id,
+                    peer_name=contact.display_name,
+                    message_id=m.message_id,
+                    text=text[:2000],
+                    date_iso=m.date.isoformat() if m.date else None,
+                    embedding=vec,
+                )
+                ids_done.append(m.id)
+                indexed += 1
 
         if ids_done:
             async with get_session() as session:

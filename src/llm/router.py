@@ -49,7 +49,7 @@ _PURPOSE_SEMAPHORES: dict[str, asyncio.Semaphore] = {
     "main": asyncio.Semaphore(2),
     "draft": asyncio.Semaphore(1),
     "memory": asyncio.Semaphore(1),
-    "background": asyncio.Semaphore(1),
+    "background": asyncio.Semaphore(3),
     "analysis": asyncio.Semaphore(1),
     "urgent": asyncio.Semaphore(2),
     "fallback": asyncio.Semaphore(2),
@@ -315,6 +315,14 @@ async def build_provider(
     Для chat() строит цепочку fallback-провайдеров.
     Для embed() остаётся на первичном провайдере.
     """
+    # Проверка кэша
+    from src.core.context_cache import get as cache_get
+
+    cache_key = f"provider:{user.telegram_id}:{purpose}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     provider_name = user.settings.llm_provider if user.settings else "openai"
 
     # Попытка через новую систему LlmKeySlot
@@ -344,6 +352,9 @@ async def build_provider(
                     "LLM fallback chain (slots): %s",
                     " -> ".join(p.name for p in providers),
                 )
+            from src.core.context_cache import put as cache_put
+
+            cache_put(cache_key, ProviderFallback(providers), ttl=300)
             return ProviderFallback(providers)
     except Exception:
         logger.exception("LlmKeySlot lookup failed, falling back to old ApiKey table")
@@ -401,6 +412,9 @@ async def build_provider(
             "LLM fallback chain (legacy): %s",
             " -> ".join(p.name for p in providers),
         )
+    from src.core.context_cache import put as cache_put
+
+    cache_put(cache_key, ProviderFallback(providers), ttl=300)
     return ProviderFallback(providers)
 
 
