@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.crypto import decrypt
 from src.db.models import User
 from src.db.repo import get_active_keys, get_api_keys, mark_key_failure, mark_key_used
+from src.db.session import get_session
 from src.llm.base import ChatMessage, LLMProvider
 from src.llm.gemini_provider import GeminiProvider
 from src.llm.mistral_provider import MistralProvider
@@ -145,11 +146,11 @@ class MultiKeyProvider:
                     result = await operation(provider, *args, **kwargs)
                     self._idx = idx
                     _FAILED_KEYS.pop((self.provider_name, key), None)
-                    # DB: отметить успешное использование
-                    if self._slot_ids and self._session_provider:
+                    # DB: отметить успешное использование (fresh session)
+                    if self._slot_ids:
                         try:
-                            s, _ = self._session_provider()
-                            await mark_key_used(s, self._slot_ids[idx])
+                            async with get_session() as fresh_s:
+                                await mark_key_used(fresh_s, self._slot_ids[idx])
                         except Exception:
                             logger.exception(
                                 "Failed to mark key slot %d as used",
@@ -168,13 +169,13 @@ class MultiKeyProvider:
                             _mask_key(key),
                             exc,
                         )
-                        # DB: отметить падение слота
-                        if self._slot_ids and self._session_provider:
+                        # DB: отметить падение слота (fresh session)
+                        if self._slot_ids:
                             try:
-                                s, _ = self._session_provider()
-                                await mark_key_failure(
-                                    s, self._slot_ids[idx], str(exc)[:256]
-                                )
+                                async with get_session() as fresh_s:
+                                    await mark_key_failure(
+                                        fresh_s, self._slot_ids[idx], str(exc)[:256]
+                                    )
                             except Exception:
                                 logger.exception(
                                     "Failed to mark key slot %d as failed",
@@ -326,7 +327,9 @@ async def build_provider(
                     _provider_class_for(name),
                     keys,
                     slot_ids=slot_ids,
-                    session_provider=lambda: (session, user),
+                    # сессия для DB-трекинга открывается внутри _try_with_retry
+                    # (lambda захватывает user для совместимости, session не используется)
+                    session_provider=lambda: (None, user),
                     purpose=purpose,
                 )
             )
@@ -413,7 +416,7 @@ class ExhaustedProvider:
         return f"❌ {self._reason}"
 
     async def embed(self, text: str) -> list[float]:
-        return [0.0] * 1536
+        raise ExhaustedError("Cannot embed: all keys exhausted")
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        return [[0.0] * 1536] * len(texts)
+        raise ExhaustedError("Cannot embed batch: all keys exhausted")

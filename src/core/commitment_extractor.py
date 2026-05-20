@@ -59,7 +59,8 @@ async def extract_and_save_commitments(
     provider: LLMProvider,
     *,
     telegram_id: int,
-    contact: Contact,
+    contact_name: str,
+    contact_peer_id: int,
     messages: list[Message],
 ) -> list[dict]:
     """Извлекает обязательства из переписки и сохраняет в БД.
@@ -67,7 +68,8 @@ async def extract_and_save_commitments(
     Args:
         provider: LLM-провайдер для генерации.
         telegram_id: Telegram user ID (не DB primary key).
-        contact: Объект контакта-собеседника.
+        contact_name: Имя контакта-собеседника.
+        contact_peer_id: Peer ID контакта-собеседника.
         messages: Список сообщений переписки.
 
     Returns:
@@ -78,7 +80,7 @@ async def extract_and_save_commitments(
 
     transcript = "\n".join(message_to_text(m) for m in messages)
     user_prompt = (
-        f"Собеседник: {contact.display_name}.\n"
+        f"Собеседник: {contact_name}.\n"
         "Переписка:\n\n"
         f"{transcript}\n\n"
         "Выдели обязательства."
@@ -111,8 +113,8 @@ async def extract_and_save_commitments(
             c = await add_commitment(
                 session,
                 user_id=owner.id,
-                peer_id=contact.peer_id,
-                peer_name=contact.display_name,
+                peer_id=contact_peer_id,
+                peer_name=contact_name,
                 message_id=item.get("message_id"),
                 direction=direction,
                 text=text,
@@ -127,7 +129,7 @@ async def extract_and_save_commitments(
                 fact=f"Обещание: {text}",
                 source="commitment",
                 memory_type="task",
-                contact_id=contact.peer_id,
+                contact_id=contact_peer_id,
             )
 
             saved.append(item)

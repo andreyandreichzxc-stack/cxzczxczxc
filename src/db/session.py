@@ -108,8 +108,14 @@ async def init_db() -> None:
                 await conn.execute(
                     text(f"ALTER TABLE users ADD COLUMN {col} {col_def}")
                 )
-            except Exception:
-                logger.warning("Migration for %s skipped", col, exc_info=True)
+            except Exception as e:
+                if (
+                    "duplicate column name" in str(e).lower()
+                    or "already exists" in str(e).lower()
+                ):
+                    logger.debug("Migration for %s: column already exists", col)
+                else:
+                    raise
 
         # Миграция: добавляем колонки adaptive scoring если их нет
         for col, col_def in [
@@ -123,16 +129,28 @@ async def init_db() -> None:
                 await conn.execute(
                     text(f"ALTER TABLE memories ADD COLUMN {col} {col_def}")
                 )
-            except Exception:
-                logger.warning("Migration for %s skipped", col, exc_info=True)
+            except Exception as e:
+                if (
+                    "duplicate column name" in str(e).lower()
+                    or "already exists" in str(e).lower()
+                ):
+                    logger.debug("Migration for %s: column already exists", col)
+                else:
+                    raise
 
         # Миграция: source_memory_id в commitments
         try:
             await conn.execute(
                 text("ALTER TABLE commitments ADD COLUMN source_memory_id BIGINT")
             )
-        except Exception:
-            logger.warning("Migration for source_memory_id skipped", exc_info=True)
+        except Exception as e:
+            if (
+                "duplicate column name" in str(e).lower()
+                or "already exists" in str(e).lower()
+            ):
+                logger.debug("Migration for source_memory_id: column already exists")
+            else:
+                raise
         try:
             await conn.execute(
                 text(
@@ -140,10 +158,13 @@ async def init_db() -> None:
                     "ON commitments(source_memory_id)"
                 )
             )
-        except Exception:
-            logger.warning(
-                "Migration for ix_commitments_source_memory_id skipped", exc_info=True
-            )
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.debug(
+                    "Migration for ix_commitments_source_memory_id: index already exists"
+                )
+            else:
+                raise
 
         # Миграция старых связей памяти (related_memory_id → memory_links)
         try:
@@ -170,10 +191,16 @@ async def init_db() -> None:
                         {"sid": mid, "tid": related_id, "rel": rel_type},
                     )
             await conn.commit()
-        except Exception:
-            logger.warning(
-                "Migration for related_memory_id → memory_links skipped", exc_info=True
-            )
+        except Exception as e:
+            if (
+                "duplicate column name" in str(e).lower()
+                or "already exists" in str(e).lower()
+            ):
+                logger.debug(
+                    "Migration for related_memory_id → memory_links: already applied"
+                )
+            else:
+                raise
 
         # Миграция: radar_snoozed_until для ConversationState
         try:

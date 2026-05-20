@@ -433,7 +433,8 @@ async def _execute_intent(
         items = await extract_and_save_commitments(
             provider,
             telegram_id=owner.telegram_id,
-            contact=contact,
+            contact_name=contact.display_name,
+            contact_peer_id=contact.peer_id,
             messages=messages_loaded,
         )
         if not items:
@@ -1293,8 +1294,14 @@ async def _exec_add_reminders_from_chat(intent, message, userbot_manager) -> Non
         owner = await get_or_create_user(session, message.from_user.id)
         contact = await get_contact(session, owner, target.peer_id)
         owner_telegram_id = owner.telegram_id
+        contact_id = contact.id
+        contact_display = contact.display_name
     items = await extract_and_save_commitments(
-        provider, telegram_id=owner_telegram_id, contact=contact, messages=msgs
+        provider,
+        telegram_id=owner_telegram_id,
+        contact_name=contact_display,
+        contact_peer_id=contact_id,
+        messages=msgs,
     )
     if not items:
         await message.answer("🤷 Явных обещаний в этом чате не нашёл.")
@@ -1399,7 +1406,9 @@ async def _exec_forget_memory(intent, message) -> None:
 
     async with get_session() as session:
         for m in found:
-            await delete_memory(session, owner, m.id)
+            # переоткрываем owner в текущей сессии (detach-safe)
+            owner2 = await get_or_create_user(session, message.from_user.id)
+            await delete_memory(session, owner2, m.id)
 
     names = ", ".join(
         f"«{m.fact[:50]}…»" if len(m.fact) > 50 else f"«{m.fact}»" for m in found
