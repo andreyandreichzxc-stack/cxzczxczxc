@@ -60,6 +60,50 @@ from src.core.skills import build_skill_index, record_skill_usages
 from src.userbot.manager import UserbotManager, _MANAGER_SINGLETON
 
 
+# ---------------------------------------------------------------------------
+# Settings cache — однотенантный, TTL 30 сек, инвалидируется при /settings
+# ---------------------------------------------------------------------------
+_settings_cache: dict[str, object] | None = None  # type: ignore[assignment]
+_settings_cache_ts: float = 0.0
+_SETTINGS_CACHE_TTL: float = 30.0
+
+
+async def _get_owner_context(telegram_id: int) -> dict[str, object]:
+    """Возвращает {owner_telegram_id, tz_name, use_heavy, global_style_profile} с TTL-кэшем."""
+    global _settings_cache, _settings_cache_ts
+    now = time.monotonic()
+    if _settings_cache is not None and (now - _settings_cache_ts) < _SETTINGS_CACHE_TTL:
+        return _settings_cache  # type: ignore[return-value]
+    async with get_session() as session:
+        owner = await get_or_create_user(session, telegram_id)
+        _settings_cache = {
+            "owner_telegram_id": owner.telegram_id,
+            "tz_name": owner.settings.timezone if owner.settings else "UTC",
+            "use_heavy": owner.settings.use_heavy_model if owner.settings else True,
+            "global_style_profile": owner.global_style_profile,
+        }
+        _settings_cache_ts = now
+    return _settings_cache  # type: ignore[return-value]
+
+
+def invalidate_settings_cache() -> None:
+    """Сбросить кэш настроек (вызывается при изменении /settings)."""
+    global _settings_cache
+    _settings_cache = None
+
+
+def _fire_record_trajectory(*args: object, **kwargs: object) -> None:
+    """Fire-and-forget запись траектории (не блокирует ответ пользователю)."""
+
+    async def _safe() -> None:
+        try:
+            await record_trajectory(*args, **kwargs)  # type: ignore[arg-type]
+        except Exception:
+            logger.exception("fire-and-forget trajectory failed")
+
+    asyncio.create_task(_safe())
+
+
 logger = logging.getLogger(__name__)
 router = Router(name="free_text")
 router.message.filter(OwnerOnly())
@@ -526,6 +570,7 @@ async def _exec_set_setting(intent, message) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         setattr(owner.settings, key, validated)
         await session.flush()
+        invalidate_settings_cache()
         new_tz = owner.settings.timezone
     if key == "timezone":
         await message.answer(f"✅ Часовой пояс: <b>{tz_short(new_tz)}</b>")
@@ -595,11 +640,10 @@ async def _process_text(
 ) -> None:
     turn_started = time.monotonic()
     used_skills: list[dict] = []
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        tz_name = owner.settings.timezone if owner.settings else "UTC"
-        owner_telegram_id = owner.telegram_id
-        use_heavy = owner.settings.use_heavy_model if owner.settings else True
+    ctx = await _get_owner_context(message.from_user.id)
+    tz_name = str(ctx["tz_name"])
+    owner_telegram_id = int(ctx["owner_telegram_id"])  # type: ignore[arg-type]
+    use_heavy = bool(ctx["use_heavy"])
 
     now_local_str = now_in_tz(tz_name).strftime("%Y-%m-%d %H:%M")
     history_block = ctx_store.render_history_block(message.from_user.id)
@@ -684,7 +728,7 @@ async def _process_text(
     # INSTANT — отвечаем сразу, без БД, без LLM
     if router_plan.response_mode == "instant" and router_plan.final_response:
         await message.answer(router_plan.final_response)
-        await record_trajectory(
+        _fire_record_trajectory(
             owner_telegram_id,
             request_text=raw,
             route_mode="instant",
@@ -801,7 +845,7 @@ async def _process_text(
 
     # MAESTRO — стандартный тяжёлый пайплайн
     # Persona инжектится через prompt_assembler в maestro.py (system prompt, не дублируем)
-    injected_style = owner.global_style_profile or None
+    injected_style = ctx.get("global_style_profile") or None
     rag_needed = router_plan.recall_mode == "deep"
     try:
         pipeline_result = await run_pipeline(
@@ -826,7 +870,7 @@ async def _process_text(
                 response_text,
                 reply_markup=memory_quick_keyboard(),
             )
-            await record_trajectory(
+            _fire_record_trajectory(
                 owner_telegram_id,
                 request_text=raw,
                 route_mode="maestro",
@@ -856,7 +900,7 @@ async def _process_text(
     except Exception as e:
         logger.exception("agent route_intent failed")
         err_msg = str(e)
-        await record_trajectory(
+        _fire_record_trajectory(
             owner_telegram_id,
             request_text=raw,
             route_mode="intent",
@@ -884,7 +928,7 @@ async def _process_text(
     else:
         await _dispatch(intent, message, state, userbot_manager, tz_name=tz_name)
 
-    await record_trajectory(
+    _fire_record_trajectory(
         owner_telegram_id,
         request_text=raw,
         route_mode="intent",
@@ -1019,6 +1063,11 @@ async def free_voice(
         except Exception:
             logger.exception("failed to edit error notice after transcription")
         return
+    finally:
+        try:
+            target.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     text = (text or "").strip()
     if not text:
@@ -1039,7 +1088,7 @@ async def free_voice(
 async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) -> None:
     guard = guard_intent(intent)
     if not guard.allowed:
-        await record_trajectory(
+        _fire_record_trajectory(
             message.from_user.id,
             request_text=message.text or "",
             route_mode="dispatch_guard",
@@ -1449,6 +1498,7 @@ async def _exec_change_auto_mode(intent, message) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         owner.settings.auto_mode = mode
         await session.flush()
+    invalidate_settings_cache()
     labels = {"offline_only": "только оффлайн", "always": "всегда", "smart": "умный"}
     await message.answer(f"✅ Режим авто-ответа: <b>{labels[mode]}</b>")
 

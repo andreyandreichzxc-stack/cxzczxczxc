@@ -10,6 +10,20 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Предкомпилированные константы для быстрого роутинга (не создаются заново на каждый запрос)
+import re as _re
+
+_RE_CONTACT_ACTION = _re.compile(
+    r"(?:скажи|напиши|отправь|передай|ответь)\s+(\S+)", _re.IGNORECASE
+)
+_CHAIN_WORDS = ("а ещё", "и", "тоже", "также")
+_GREETINGS = ("привет", "здаров", "хай", "ку", "доброе", "как дела", "чё как")
+_SEND_WORDS = ("отправь", "напиши", "скажи", "передай", "ответь")
+_SEARCH_WORDS = ("найди", "поищи")
+_ANALYSIS_WORDS = ("анализ", "сводка", "проанализируй")
+_DRAFT_WORDS = ("напиши ответ", "черновик", "draft", "набросай ответ")
+_REMINDER_WORDS = ("напомни", "задача", "дедлайн", "обещание", "план")
+
 
 def _get_active_telethon_client(telegram_id: int):
     """Получить активный Telethon-клиент из синглтона UserbotManager."""
@@ -43,12 +57,21 @@ class ResponseMode(str, enum.Enum):
 
 
 INSTANT_PATTERNS = [
-    r"^(привет|здаров|хай|ку|hello|hi|доброе утро|добрый вечер|добрый день)\b",
-    r"^(как дела|чё как|как ты|как сам)\b",
-    r"^(спокойной ночи|пока|до завтра|ладн[оа])\b",
-    r"^(спасибо|благодарю|спс|thx)\b",
-    r"^(ясно|понял|ок|окей|ага|угу|ладно)\b",
+    _re.compile(
+        r"^(привет|здаров|хай|ку|hello|hi|доброе утро|добрый вечер|добрый день)\b"
+    ),
+    _re.compile(r"^(как дела|чё как|как ты|как сам)\b"),
+    _re.compile(r"^(спокойной ночи|пока|до завтра|ладн[оа])\b"),
+    _re.compile(r"^(спасибо|благодарю|спс|thx)\b"),
+    _re.compile(r"^(ясно|понял|ок|окей|ага|угу|ладно)\b"),
 ]
+_HEAVY_WORDS = (
+    "анализ",
+    "сводка",
+    "найди все",
+    "проанализируй",
+    "расскажи подробно",
+)
 
 INSTANT_REPLIES = {
     "привет": "Привет! 👋",
@@ -109,18 +132,13 @@ class RouterPlan:
 
 async def classify_mode(user_text: str) -> ResponseMode:
     """Определяет режим ответа: instant / fast_route / maestro."""
-    import re
-
     t = user_text.lower().strip()
     if len(t) < 30:
         for pattern in INSTANT_PATTERNS:
-            m = re.match(pattern, t)
+            m = _re.match(pattern, t)
             if m:
                 return ResponseMode.INSTANT
-    if len(t) < 100 and not any(
-        w in t
-        for w in ("анализ", "сводка", "найди все", "проанализируй", "расскажи подробно")
-    ):
+    if len(t) < 100 and not any(w in t for w in _HEAVY_WORDS):
         return ResponseMode.FAST_ROUTE
     return ResponseMode.MAESTRO
 
@@ -254,7 +272,7 @@ async def make_plan(
     if (
         last_purpose
         and len(user_text) < 30
-        and any(w in user_text.lower() for w in ("а ещё", "и", "тоже", "также"))
+        and any(w in user_text.lower() for w in _CHAIN_WORDS)
     ):
         meta["context_chain"] = last_purpose
         task = RouterTask(
@@ -271,10 +289,7 @@ async def make_plan(
     t = user_text.lower().strip()
 
     # Приветствие / болтовня
-    if any(
-        w == t or t.startswith(w)
-        for w in ("привет", "здаров", "хай", "ку", "доброе", "как дела", "чё как")
-    ):
+    if any(w == t or t.startswith(w) for w in _GREETINGS):
         task = RouterTask(
             user_text,
             purpose=RoutePurpose.MAIN,
@@ -292,13 +307,8 @@ async def make_plan(
         from src.core.contact_resolver import resolve
         from src.db.session import get_session
         from src.db.repo import get_or_create_user, get_conversation_state
-        import re
 
-        names = re.findall(
-            r"(?:скажи|напиши|отправь|передай|ответь)\s+(\S+)",
-            user_text,
-            re.IGNORECASE,
-        )
+        names = _RE_CONTACT_ACTION.findall(user_text)
         if names:
             async with get_session() as session:
                 owner = await get_or_create_user(session, telegram_id)
@@ -328,7 +338,7 @@ async def make_plan(
         pass
 
     # Отправка сообщения
-    if any(w in t for w in ("отправь", "напиши", "скажи", "передай", "ответь")):
+    if any(w in t for w in _SEND_WORDS):
         task = RouterTask(
             user_text,
             purpose=RoutePurpose.MAIN,
@@ -343,7 +353,7 @@ async def make_plan(
         return plan
 
     # Поиск
-    if any(w in t for w in ("найди", "поищи")):
+    if any(w in t for w in _SEARCH_WORDS):
         task = RouterTask(
             user_text,
             purpose=RoutePurpose.SEARCH,
@@ -358,7 +368,7 @@ async def make_plan(
         return plan
 
     # Анализ / сводка
-    if any(w in t for w in ("анализ", "сводка", "проанализируй")):
+    if any(w in t for w in _ANALYSIS_WORDS):
         task = RouterTask(
             user_text,
             purpose=RoutePurpose.ANALYSIS,
@@ -373,7 +383,7 @@ async def make_plan(
         return plan
 
     # Черновик ответа
-    if any(w in t for w in ("напиши ответ", "черновик", "draft", "набросай ответ")):
+    if any(w in t for w in _DRAFT_WORDS):
         task = RouterTask(
             user_text,
             purpose=RoutePurpose.DRAFT,
@@ -388,7 +398,7 @@ async def make_plan(
         return plan
 
     # Задачи / напоминания
-    if any(w in t for w in ("напомни", "задача", "дедлайн", "обещание", "план")):
+    if any(w in t for w in _REMINDER_WORDS):
         task = RouterTask(
             user_text,
             purpose=RoutePurpose.MAIN,
