@@ -17,7 +17,7 @@ from aiogram.types import (
 
 from src.bot.filters import OwnerOnly
 from src.bot.states import DraftStates
-from src.userbot.manager import _MANAGER_SINGLETON
+from src.userbot import get_active_telethon_client, get_userbot_manager
 
 
 logger = logging.getLogger(__name__)
@@ -90,11 +90,7 @@ async def cb_draft_send(callback: CallbackQuery) -> None:
         await callback.answer("Черновик устарел", show_alert=True)
         return
 
-    client = (
-        _MANAGER_SINGLETON.get_client(callback.from_user.id)
-        if _MANAGER_SINGLETON
-        else None
-    )
+    client = get_active_telethon_client(callback.from_user.id)
     if client is None:
         await callback.answer("Нет активной сессии. Сначала /login.", show_alert=True)
         return
@@ -160,11 +156,7 @@ async def step_draft_edit(message: Message, state: FSMContext) -> None:
         await message.answer("Пустой текст. Повтори или /cancel.")
         return
 
-    client = (
-        _MANAGER_SINGLETON.get_client(message.from_user.id)
-        if _MANAGER_SINGLETON
-        else None
-    )
+    client = get_active_telethon_client(message.from_user.id)
     if client is None:
         await message.answer("Нет активной сессии. Сначала /login.")
         await state.clear()

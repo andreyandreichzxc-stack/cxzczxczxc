@@ -208,13 +208,11 @@ async def news_scheduler_loop() -> None:
                         last_sent[owner_id] = current_day  # помечаем даже если тем нет
 
             if topics_to_run:
-                from src.userbot.manager import _MANAGER_SINGLETON
-
-                client = (
-                    _MANAGER_SINGLETON.get_client(owner_id)
-                    if _MANAGER_SINGLETON
-                    else None
+                from src.userbot import (
+                    get_active_telethon_client as _get_telethon_client,
                 )
+
+                client = _get_telethon_client(owner_id)
                 if client is None:
                     logger.warning(
                         "news scheduler: no userbot client for owner %s", owner_id

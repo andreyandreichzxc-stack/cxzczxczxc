@@ -8,6 +8,7 @@ import logging
 import re
 from typing import Any
 
+from src.core.text_sanitizer import sanitize_html
 from src.core.vector_store import vector_store
 from src.db.repo import get_or_create_user, list_contacts, search_memories
 from src.db.session import get_session
@@ -441,7 +442,7 @@ async def run_pipeline(
     clarification = plan.get("needs_clarification")
     if clarification:
         return {
-            "final_response": f"🤔 {clarification}",
+            "final_response": sanitize_html(f"🤔 {clarification}"),
             "plan": plan.get("plan", []),
             "used_agents": [],
             "agent_errors": [],
@@ -451,7 +452,7 @@ async def run_pipeline(
     # Если Maestro ответил сам — всё
     if plan.get("final_response"):
         return {
-            "final_response": plan["final_response"],
+            "final_response": sanitize_html(plan["final_response"]),
             "plan": plan.get("plan", []),
             "used_agents": [],
             "agent_errors": [],
@@ -469,7 +470,9 @@ async def run_pipeline(
         if plan.get("needs_clarification"):
             msg = f"🤔 {msg}"
         return {
-            "final_response": plan.get("understood", "Не понял. Повтори."),
+            "final_response": sanitize_html(
+                plan.get("understood", "Не понял. Повтори.")
+            ),
             "plan": plan.get("plan", []),
             "used_agents": [],
             "agent_errors": [],
@@ -510,7 +513,7 @@ async def run_pipeline(
                 heavy=True,
             )
             return {
-                "final_response": raw.strip(),
+                "final_response": sanitize_html(raw.strip()),
                 "plan": plan.get("plan", []),
                 "used_agents": [],
                 "agent_errors": agent_errors,
@@ -518,7 +521,9 @@ async def run_pipeline(
         except Exception:
             logger.exception("maestro fallback_request failed")
             return {
-                "final_response": "Извини, что-то пошло не так. Попробуй ещё раз.",
+                "final_response": sanitize_html(
+                    "Извини, что-то пошло не так. Попробуй ещё раз."
+                ),
                 "plan": [],
                 "used_agents": [],
                 "agent_errors": agent_errors,
@@ -546,13 +551,13 @@ async def run_pipeline(
             if m:
                 parsed = json.loads(m.group(0))
                 return {
-                    "final_response": parsed.get("final_response", raw),
+                    "final_response": sanitize_html(parsed.get("final_response", raw)),
                     "plan": plan.get("plan", []),
                     "used_agents": used_agents,
                     "agent_errors": agent_errors,
                 }
             return {
-                "final_response": raw,
+                "final_response": sanitize_html(raw),
                 "plan": plan.get("plan", []),
                 "used_agents": used_agents,
                 "agent_errors": agent_errors,
@@ -562,7 +567,9 @@ async def run_pipeline(
             # Если LLM не может сформулировать — возвращаем сырые данные агентов
             summary = "\n\n".join(agent_texts)
             return {
-                "final_response": f"Вот что я выяснил:\n\n{summary[:1500]}",
+                "final_response": sanitize_html(
+                    f"Вот что я выяснил:\n\n{summary[:1500]}"
+                ),
                 "plan": plan.get("plan", []),
                 "used_agents": used_agents,
                 "agent_errors": agent_errors,
@@ -570,8 +577,10 @@ async def run_pipeline(
 
     # --- Ни один агент не дал результатов ---
     return {
-        "final_response": plan.get("final_response")
-        or plan.get("understood", "Не получилось выполнить. Попробуй иначе."),
+        "final_response": sanitize_html(
+            plan.get("final_response")
+            or plan.get("understood", "Не получилось выполнить. Попробуй иначе.")
+        ),
         "plan": plan.get("plan", []),
         "used_agents": used_agents,
         "agent_errors": agent_errors,

@@ -223,11 +223,9 @@ async def _build_reply_text(
         return None
 
     # подгружаем контекст последних сообщений
-    from src.userbot.manager import _MANAGER_SINGLETON  # локальный импорт
+    from src.userbot import get_active_telethon_client  # локальный импорт
 
-    client = (
-        _MANAGER_SINGLETON.get_client(owner_telegram_id) if _MANAGER_SINGLETON else None
-    )
+    client = get_active_telethon_client(owner_telegram_id)
     history_text = ""
     if client is not None:
         try:

@@ -16,7 +16,7 @@ DEFAULT_SYNC_INTERVAL_SEC = 7200
 
 
 async def auto_sync_loop() -> None:
-    from src.userbot.manager import _MANAGER_SINGLETON
+    from src.userbot import get_active_telethon_client
 
     while True:
         try:
@@ -33,16 +33,14 @@ async def auto_sync_loop() -> None:
                 await asyncio.sleep(app_settings.auto_sync_fallback_sec)
                 continue
 
-            manager = _MANAGER_SINGLETON
-            if manager is not None:
-                client = manager.get_client(app_settings.owner_telegram_id)
-                if client is not None:
-                    async with get_session() as session:
-                        owner = await get_or_create_user(
-                            session, app_settings.owner_telegram_id
-                        )
-                    stats = await sync_dialogs(client, owner, limit=200)
-                    logger.info("auto-sync done: %s", stats)
+            client = get_active_telethon_client(app_settings.owner_telegram_id)
+            if client is not None:
+                async with get_session() as session:
+                    owner = await get_or_create_user(
+                        session, app_settings.owner_telegram_id
+                    )
+                stats = await sync_dialogs(client, owner, limit=200)
+                logger.info("auto-sync done: %s", stats)
 
             await asyncio.sleep(interval_sec)
         except Exception:

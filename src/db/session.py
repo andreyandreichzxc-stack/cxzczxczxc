@@ -89,7 +89,7 @@ async def init_db() -> None:
         await conn.execute(text("PRAGMA journal_mode=WAL"))
         await conn.execute(text("PRAGMA synchronous=NORMAL"))
         await conn.execute(text("PRAGMA cache_size=-8000"))  # ~8MB cache
-        await conn.execute(text("PRAGMA busy_timeout=5000"))
+        await conn.execute(text("PRAGMA busy_timeout=30000"))
         await conn.run_sync(Base.metadata.create_all)
         for stmt in _FTS_SETUP:
             await conn.execute(text(stmt))

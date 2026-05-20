@@ -121,6 +121,6 @@ async def cluster_loop(telegram_id: int) -> None:
                 last_run = now.date()
                 n = await rebuild_clusters(telegram_id)
                 logger.info("Clusters rebuilt: %d created", n)
-        except Exception as e:
-            logger.error("Cluster loop error: %s", e)
+        except Exception:
+            logger.exception("Cluster loop error")
         await asyncio.sleep(settings.memory_clusterer_interval_sec)

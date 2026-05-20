@@ -220,6 +220,6 @@ async def conflict_check_loop(owner_id: int):
                         reply_markup=kb,
                     )
             await asyncio.sleep(settings.conflict_resolver_interval_sec)
-        except Exception as e:
-            logger.error(f"Conflict check error: {e}")
+        except Exception:
+            logger.exception("Conflict check error")
             await asyncio.sleep(settings.conflict_resolver_interval_sec)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -15,6 +16,15 @@ logger = logging.getLogger(__name__)
 # In-memory LRU (макс 200 записей)
 _memory_cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 _MAX_MEMORY = 200
+
+# Per-key locks to prevent cache stampede on cold misses
+_key_locks: dict[str, asyncio.Lock] = {}
+
+
+async def _get_lock(key: str) -> asyncio.Lock:
+    if key not in _key_locks:
+        _key_locks[key] = asyncio.Lock()
+    return _key_locks[key]
 
 
 def _cache_key(agent_type: str, params_hash: str) -> str:
@@ -82,30 +92,38 @@ async def cache_get_or_set(
     if ttl_seconds <= 0:
         return await factory()
 
-    # 1. In-memory
+    key = _cache_key(agent_type, params_hash)
+
+    # 1. In-memory (fast path — no lock needed for reads)
     val = cache_get(agent_type, params_hash)
     if val is not None:
         return val
 
-    # 2. SQLite
-    val = await cache_get_db(agent_type, params_hash)
-    if val is not None:
-        cache_set(agent_type, params_hash, val, ttl_seconds)
-        return val
+    async with await _get_lock(key):
+        # Double-check after acquiring per-key lock (stampede guard)
+        val = cache_get(agent_type, params_hash)
+        if val is not None:
+            return val
 
-    # 3. Вычислить
-    val = await factory()
-    if val is not None:
-        cache_set(agent_type, params_hash, val, ttl_seconds)
-        try:
-            await cache_set_db(agent_type, params_hash, val, ttl_seconds)
-        except Exception:
-            logger.debug(
-                "agent_cache persist failed: %s:%s",
-                agent_type,
-                params_hash,
-                exc_info=True,
-            )
-            # In-memory кэша достаточно для не-JSON-сериализуемых типов
-            pass
-    return val
+        # 2. SQLite
+        val = await cache_get_db(agent_type, params_hash)
+        if val is not None:
+            cache_set(agent_type, params_hash, val, ttl_seconds)
+            return val
+
+        # 3. Вычислить
+        val = await factory()
+        if val is not None:
+            cache_set(agent_type, params_hash, val, ttl_seconds)
+            try:
+                await cache_set_db(agent_type, params_hash, val, ttl_seconds)
+            except Exception:
+                logger.debug(
+                    "agent_cache persist failed: %s:%s",
+                    agent_type,
+                    params_hash,
+                    exc_info=True,
+                )
+                # In-memory кэша достаточно для не-JSON-сериализуемых типов
+                pass
+        return val

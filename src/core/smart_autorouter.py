@@ -30,9 +30,9 @@ _REMINDER_WORDS = ("напомни", "задача", "дедлайн", "обещ
 
 def _get_active_telethon_client(telegram_id: int):
     """Получить активный Telethon-клиент из синглтона UserbotManager."""
-    from src.userbot.manager import _MANAGER_SINGLETON
+    from src.userbot import get_active_telethon_client
 
-    return _MANAGER_SINGLETON.get_client(telegram_id) if _MANAGER_SINGLETON else None
+    return get_active_telethon_client(telegram_id)
 
 
 class RoutePurpose(str, enum.Enum):

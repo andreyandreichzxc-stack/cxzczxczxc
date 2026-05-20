@@ -44,6 +44,6 @@ async def follow_up_loop(owner_id: int) -> None:
                         priority=Notification.PRIORITY_HIGH,
                     )
             await asyncio.sleep(settings.follow_up_interval_sec)  # раз в 4 часа
-        except Exception as e:
-            logger.error("FollowUp loop error: %s", e)
+        except Exception:
+            logger.exception("FollowUp loop error")
             await asyncio.sleep(settings.follow_up_interval_sec)

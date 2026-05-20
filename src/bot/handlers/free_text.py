@@ -57,7 +57,8 @@ from src.db.session import get_session
 from src.llm.router import build_provider
 from src.core.trajectory import actions_from_intent, record_trajectory
 from src.core.skills import build_skill_index, record_skill_usages
-from src.userbot.manager import UserbotManager, _MANAGER_SINGLETON
+from src.userbot import get_active_telethon_client, get_userbot_manager
+from src.userbot.manager import UserbotManager
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +67,7 @@ from src.userbot.manager import UserbotManager, _MANAGER_SINGLETON
 _settings_cache: dict[str, object] | None = None  # type: ignore[assignment]
 _settings_cache_ts: float = 0.0
 _SETTINGS_CACHE_TTL: float = 30.0
+_settings_lock = asyncio.Lock()
 
 
 async def _get_owner_context(telegram_id: int) -> dict[str, object]:
@@ -74,16 +76,24 @@ async def _get_owner_context(telegram_id: int) -> dict[str, object]:
     now = time.monotonic()
     if _settings_cache is not None and (now - _settings_cache_ts) < _SETTINGS_CACHE_TTL:
         return _settings_cache  # type: ignore[return-value]
-    async with get_session() as session:
-        owner = await get_or_create_user(session, telegram_id)
-        _settings_cache = {
-            "owner_telegram_id": owner.telegram_id,
-            "tz_name": owner.settings.timezone if owner.settings else "UTC",
-            "use_heavy": owner.settings.use_heavy_model if owner.settings else True,
-            "global_style_profile": owner.global_style_profile,
-        }
-        _settings_cache_ts = now
-    return _settings_cache  # type: ignore[return-value]
+    async with _settings_lock:
+        # Double-check after acquiring lock (TOCTOU guard)
+        now = time.monotonic()
+        if (
+            _settings_cache is not None
+            and (now - _settings_cache_ts) < _SETTINGS_CACHE_TTL
+        ):
+            return _settings_cache  # type: ignore[return-value]
+        async with get_session() as session:
+            owner = await get_or_create_user(session, telegram_id)
+            _settings_cache = {
+                "owner_telegram_id": owner.telegram_id,
+                "tz_name": owner.settings.timezone if owner.settings else "UTC",
+                "use_heavy": owner.settings.use_heavy_model if owner.settings else True,
+                "global_style_profile": owner.global_style_profile,
+            }
+            _settings_cache_ts = now
+        return _settings_cache  # type: ignore[return-value]
 
 
 def invalidate_settings_cache() -> None:
@@ -282,7 +292,9 @@ async def _execute_intent(
             return
         candidates = await resolve_with_llm(client, owner, recipient, provider)
         if not candidates:
-            await message.answer(f"Не нашёл контакт «{recipient}». Попробуй /sync.")
+            await message.answer(
+                sanitize_html(f"Не нашёл контакт «{recipient}». Попробуй /sync.")
+            )
             return
         if len(candidates) == 1 or candidates[0].score >= 90:
             target = candidates[0]
@@ -311,15 +323,17 @@ async def _execute_intent(
                         logger.warning("send guard failed", exc_info=True)
 
             await message.answer(
-                f"🤔 <b>Готов отправить</b>\n\n"
-                f"→ <b>Кому:</b> {target.label()}\n"
-                f"→ <b>Текст:</b>\n{text}{guard_hint}",
+                sanitize_html(
+                    f"🤔 <b>Готов отправить</b>\n\n"
+                    f"→ <b>Кому:</b> {target.label()}\n"
+                    f"→ <b>Текст:</b>\n{text}{guard_hint}"
+                ),
                 reply_markup=_confirm_keyboard(action.id),
             )
         else:
             await state.set_data({"send_text": text})
             await message.answer(
-                f"Кому именно отправить «<i>{text[:80]}</i>»?",
+                sanitize_html(f"Кому именно отправить «<i>{text[:80]}</i>»?"),
                 reply_markup=_candidates_keyboard_send(candidates),
             )
         return
@@ -330,7 +344,7 @@ async def _execute_intent(
         if not query:
             await message.answer("Не понял, что искать.")
             return
-        await message.answer(f"🔎 Ищу: <i>{query}</i>…")
+        await message.answer(sanitize_html(f"🔎 Ищу: <i>{query}</i>…"))
         # Если нет явного контакта — cmd_search сам сделает cross_chat_search (FTS)
         from src.bot.handlers.search import cmd_search
         from aiogram.filters import CommandObject
@@ -350,7 +364,7 @@ async def _execute_intent(
         if not query:
             await message.answer("🤷 Не понял, по какой теме искать.")
             return
-        await message.answer(f"🔎 Ищу по моим чатам: «<i>{query}</i>»…")
+        await message.answer(sanitize_html(f"🔎 Ищу по моим чатам: «<i>{query}</i>»…"))
         await _find_chats_and_offer(message, client, query, action)
         return
 
@@ -364,9 +378,11 @@ async def _execute_intent(
         except (TypeError, ValueError):
             hours = 24
         hours = max(1, min(168, hours))
-        await message.answer(f"📰 Готовлю дайджест: <i>{topic}</i> · окно {hours}ч…")
+        await message.answer(
+            sanitize_html(f"📰 Готовлю дайджест: <i>{topic}</i> · окно {hours}ч…")
+        )
         text = await build_news_digest(client, message.from_user.id, topic, hours=hours)
-        await message.answer(text, disable_web_page_preview=True)
+        await message.answer(sanitize_html(text), disable_web_page_preview=True)
         return
 
     # ниже — интенты, требующие конкретного контакта
@@ -377,7 +393,9 @@ async def _execute_intent(
 
     candidates = await resolve(client, owner, contact_query)
     if not candidates:
-        await message.answer(f"🙅 Не нашёл контакт «{contact_query}». Попробуй /sync.")
+        await message.answer(
+            sanitize_html(f"🙅 Не нашёл контакт «{contact_query}». Попробуй /sync.")
+        )
         return
 
     action_map = {
@@ -427,7 +445,9 @@ async def _execute_intent(
             global_style=owner.global_style_profile,
             owner_id=owner.id,
         )
-        await message.answer(f"📝 <b>Саммари — {contact.display_name}</b>\n\n{text}")
+        await message.answer(
+            sanitize_html(f"📝 <b>Саммари — {contact.display_name}</b>\n\n{text}")
+        )
 
     elif kind == "tasks_for_chat":
         items = await extract_and_save_commitments(
@@ -448,7 +468,7 @@ async def _execute_intent(
                 lines.append(f"• <b>{who}</b>: {it.get('text', '')}{tail}")
             body = "\n".join(lines)
         await message.answer(
-            f"✅ <b>Обязательства — {contact.display_name}</b>\n\n{body}"
+            sanitize_html(f"✅ <b>Обязательства — {contact.display_name}</b>\n\n{body}")
         )
 
     elif kind == "draft_reply":
@@ -471,7 +491,9 @@ async def _execute_intent(
                 session, user_id=owner.id, kind="send_message", payload=payload
             )
         await message.answer(
-            f"💬 <b>Черновик — {contact.display_name}</b>\n\n{draft}\n\nОтправить?",
+            sanitize_html(
+                f"💬 <b>Черновик — {contact.display_name}</b>\n\n{draft}\n\nОтправить?"
+            ),
             reply_markup=_confirm_keyboard(action.id),
         )
 
@@ -485,7 +507,9 @@ async def _execute_intent(
             owner_id=owner.id,
         )
         await message.answer(
-            f"⏪ <b>Где мы остановились — {contact.display_name}</b>\n\n{text}"
+            sanitize_html(
+                f"⏪ <b>Где мы остановились — {contact.display_name}</b>\n\n{text}"
+            )
         )
 
 
@@ -508,8 +532,10 @@ async def _find_chats_and_offer(message, client, query: str, action: str) -> Non
 
     if not results:
         await message.answer(
-            f"Ничего не нашёл по «{query}» — ни по тексту, ни по именам контактов. "
-            "Попробуй описать чуть конкретнее или назови сам контакт."
+            sanitize_html(
+                f"Ничего не нашёл по «{query}» — ни по тексту, ни по именам контактов. "
+                "Попробуй описать чуть конкретнее или назови сам контакт."
+            )
         )
         return
 
@@ -561,11 +587,13 @@ async def _exec_set_setting(intent, message) -> None:
     value = intent.get("value")
     spec = SETTING_FIELDS.get(key)
     if spec is None:
-        await message.answer(f"Не умею менять «{key}».")
+        await message.answer(sanitize_html(f"Не умею менять «{key}»."))
         return
     validated, err = _coerce_setting_value(spec, value)
     if err:
-        await message.answer(f"Не понял значение для <b>{key}</b>: {err}.")
+        await message.answer(
+            sanitize_html(f"Не понял значение для <b>{key}</b>: {err}.")
+        )
         return
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -581,7 +609,7 @@ async def _exec_set_setting(intent, message) -> None:
         shown = str(validated)
         if len(shown) > 100:
             shown = shown[:97] + "…"
-        await message.answer(f"✅ <b>{key}</b> = <code>{shown}</code>")
+        await message.answer(sanitize_html(f"✅ <b>{key}</b> = <code>{shown}</code>"))
 
 
 async def _exec_add_news_topic(intent, message) -> None:
@@ -597,7 +625,9 @@ async def _exec_add_news_topic(intent, message) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         await add_news_topic(session, owner, topic, hours=hours)
-    await message.answer(f"✅ Добавил тему: <b>{topic}</b> (окно {hours}ч)")
+    await message.answer(
+        sanitize_html(f"✅ Добавил тему: <b>{topic}</b> (окно {hours}ч)")
+    )
 
 
 async def _exec_remove_news_topic(intent, message) -> None:
@@ -610,7 +640,7 @@ async def _exec_remove_news_topic(intent, message) -> None:
         topics = await list_news_topics(session, owner)
         matched = [t for t in topics if needle in t.topic.lower()]
         if not matched:
-            await message.answer(f"Тем по «{needle}» не нашёл.")
+            await message.answer(sanitize_html(f"Тем по «{needle}» не нашёл."))
             return
         for t in matched:
             await delete_news_topic(session, owner, t.id)
@@ -668,7 +698,9 @@ async def _process_text(
                 session.add(event)
                 if instr["is_safe"]:
                     await apply_instruction(owner_telegram_id, instr["rule"])
-                    await message.answer(f"✅ Понял! Больше не буду {instr['rule']}.")
+                    await message.answer(
+                        sanitize_html(f"✅ Понял! Больше не буду {instr['rule']}.")
+                    )
                     await session.flush()
                     return
                 else:
@@ -682,7 +714,9 @@ async def _process_text(
                     session.add(candidate)
                     await session.flush()
                     await message.answer(
-                        f"🤔 Понял: «{instr['rule']}». Применить это правило? (да/нет)"
+                        sanitize_html(
+                            f"🤔 Понял: «{instr['rule']}». Применить это правило? (да/нет)"
+                        )
                     )
                     return
     except Exception:
@@ -698,7 +732,7 @@ async def _process_text(
         change = await detect_persona_change(raw)
         if change:
             await apply_persona_changes(owner_telegram_id, change["changes"])
-            await message.answer(f"✅ Понял! Буду {change['reason']}.")
+            await message.answer(sanitize_html(f"✅ Понял! Буду {change['reason']}."))
             return
     except Exception:
         logger.exception("adaptive persona check failed")
@@ -728,7 +762,7 @@ async def _process_text(
 
     # INSTANT — отвечаем сразу, без БД, без LLM
     if router_plan.response_mode == "instant" and router_plan.final_response:
-        await message.answer(router_plan.final_response)
+        await message.answer(sanitize_html(router_plan.final_response))
         _fire_record_trajectory(
             owner_telegram_id,
             request_text=raw,
@@ -827,7 +861,7 @@ async def _process_text(
             logger.info(
                 "Fast route metrics: %s", json.dumps(router_plan.metrics, default=str)
             )
-            await message.answer(router_plan.final_response)
+            await message.answer(sanitize_html(router_plan.final_response))
             trajectory_id = await record_trajectory(
                 owner_telegram_id,
                 request_text=raw,
@@ -870,7 +904,7 @@ async def _process_text(
             if errors:
                 logger.debug("Maestro agent errors: %s", errors)
             await message.answer(
-                response_text,
+                sanitize_html(response_text),
                 reply_markup=memory_quick_keyboard(),
             )
             _fire_record_trajectory(
@@ -1019,6 +1053,8 @@ async def free_text(
     raw = (message.text or "").strip()
     if not raw:
         return
+    if len(raw) > 2000:
+        raw = raw[:1997] + "...(truncated)"
     await _process_text(raw, message, state, userbot_manager)
 
 
@@ -1157,7 +1193,7 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
     if kind == "clarify":
         question = (intent.get("question") or "").strip()
         if question:
-            await message.answer(f"🤔 {question}")
+            await message.answer(sanitize_html(f"🤔 {question}"))
         else:
             await message.answer("Не совсем понял. Уточни, что имеешь в виду?")
         return
@@ -1195,13 +1231,7 @@ async def _exec_add_reminder(intent, message, *, tz_name: str) -> None:
     peer_id = 0
     peer_name = None
     if peer_query:
-        from src.userbot.manager import _MANAGER_SINGLETON
-
-        client = (
-            _MANAGER_SINGLETON.get_client(message.from_user.id)
-            if _MANAGER_SINGLETON
-            else None
-        )
+        client = get_active_telethon_client(message.from_user.id)
         if client is not None:
             async with get_session() as session:
                 owner = await get_or_create_user(session, message.from_user.id)
@@ -1232,7 +1262,9 @@ async def _exec_add_reminder(intent, message, *, tz_name: str) -> None:
         else "\n\n⚠ Напоминания выключены — включи в /settings → ⏰."
     )
     await message.answer(
-        f"⏰ Напоминание добавлено: <b>{text}</b>\nКогда: {when_str}{extra}{note}"
+        sanitize_html(
+            f"⏰ Напоминание добавлено: <b>{text}</b>\nКогда: {when_str}{extra}{note}"
+        )
     )
 
 
@@ -1251,7 +1283,9 @@ async def _exec_remove_reminder(intent, message) -> None:
             or (c.peer_name and needle in c.peer_name.lower())
         ]
         if not matched:
-            await message.answer(f"🙅 Не нашёл напоминаний по «{needle}».")
+            await message.answer(
+                sanitize_html(f"🙅 Не нашёл напоминаний по «{needle}».")
+            )
             return
         for c in matched:
             await update_commitment_status(session, c.id, "cancelled")
@@ -1280,7 +1314,7 @@ async def _exec_add_reminders_from_chat(intent, message, userbot_manager) -> Non
 
     cands = await resolve(client, owner, contact_query)
     if not cands:
-        await message.answer(f"Контакт «{contact_query}» не найден.")
+        await message.answer(sanitize_html(f"Контакт «{contact_query}» не найден."))
         return
     target = cands[0]
 
@@ -1313,8 +1347,10 @@ async def _exec_add_reminders_from_chat(intent, message, userbot_manager) -> Non
         tail = f" · до {deadline}" if deadline else ""
         lines.append(f"• <b>{who}</b>: {it.get('text', '')}{tail}")
     await message.answer(
-        f"⏰ Поставил {len(items)} напоминаний из чата с {target.display_name}:\n\n"
-        + "\n".join(lines)
+        sanitize_html(
+            f"⏰ Поставил {len(items)} напоминаний из чата с {target.display_name}:\n\n"
+            + "\n".join(lines)
+        )
     )
 
 
@@ -1335,11 +1371,7 @@ async def _exec_store_memory(intent, message) -> None:
     if contact_name:
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-        client = (
-            _MANAGER_SINGLETON.get_client(message.from_user.id)
-            if _MANAGER_SINGLETON
-            else None
-        )
+        client = get_active_telethon_client(message.from_user.id)
         if client is not None:
             candidates = await resolve(client, owner, contact_name)
             if candidates:
@@ -1358,7 +1390,7 @@ async def _exec_store_memory(intent, message) -> None:
                 sentiment=sentiment,
                 source="user",
             )
-            await message.answer(f"🧠 Запомнил: <i>{fact}</i>")
+            await message.answer(sanitize_html(f"🧠 Запомнил: <i>{fact}</i>"))
         else:
             # Низкая уверенность — в черновик (MemoryCandidate)
             await add_memory_candidate(
@@ -1370,8 +1402,10 @@ async def _exec_store_memory(intent, message) -> None:
                 source="user",
             )
             await message.answer(
-                f"📬 Сохранил как черновик: <i>{fact}</i>\n"
-                f"Подтверди через <code>/memory --inbox</code>"
+                sanitize_html(
+                    f"📬 Сохранил как черновик: <i>{fact}</i>\n"
+                    f"Подтверди через <code>/memory --inbox</code>"
+                )
             )
 
 
@@ -1386,11 +1420,7 @@ async def _exec_forget_memory(intent, message) -> None:
     if contact_name:
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-        client = (
-            _MANAGER_SINGLETON.get_client(message.from_user.id)
-            if _MANAGER_SINGLETON
-            else None
-        )
+        client = get_active_telethon_client(message.from_user.id)
         if client is not None:
             candidates = await resolve(client, owner, contact_name)
             if candidates:
@@ -1424,11 +1454,7 @@ async def _exec_list_memories(intent, message) -> None:
     if contact_name:
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-        client = (
-            _MANAGER_SINGLETON.get_client(message.from_user.id)
-            if _MANAGER_SINGLETON
-            else None
-        )
+        client = get_active_telethon_client(message.from_user.id)
         if client is not None:
             candidates = await resolve(client, owner, contact_name)
             if candidates:
@@ -1624,7 +1650,9 @@ async def _exec_show_self(intent: dict, message: Message) -> None:
 async def _exec_full_analysis(intent, message) -> None:
     folders = intent.get("folders") or []
     await message.answer(
-        f"🧠 Запускаю полный анализ{' папок: ' + ', '.join(folders) if folders else ' всех контактов'}..."
+        sanitize_html(
+            f"🧠 Запускаю полный анализ{' папок: ' + ', '.join(folders) if folders else ' всех контактов'}..."
+        )
     )
     status_msg = await message.answer("⏳ Подготовка...")
 
@@ -1644,7 +1672,7 @@ async def _exec_full_analysis(intent, message) -> None:
             folder_names=folders if folders else None,
         )
         report = format_analysis_report(result)
-        await status_msg.edit_text(report)
+        await status_msg.edit_text(sanitize_html(report))
 
     import asyncio
 
@@ -1669,7 +1697,9 @@ async def _exec_check_memories(intent, message) -> None:
                 text="❌ Уже неактуально", callback_data=f"mem:del:{mid}"
             ),
         )
-        await message.answer(f"🤔 {question}", reply_markup=kb.as_markup())
+        await message.answer(
+            sanitize_html(f"🤔 {question}"), reply_markup=kb.as_markup()
+        )
 
 
 @router.callback_query(F.data.startswith("mem:ok:"))
@@ -1791,13 +1821,7 @@ async def cb_memq_explain(callback: CallbackQuery) -> None:
     contact_label = ""
     if contact_name:
         # Пытаемся найти контакт
-        from src.userbot.manager import _MANAGER_SINGLETON
-
-        client = (
-            _MANAGER_SINGLETON.get_client(callback.from_user.id)
-            if _MANAGER_SINGLETON
-            else None
-        )
+        client = get_active_telethon_client(callback.from_user.id)
         if client is not None:
             async with get_session() as session:
                 owner = await get_or_create_user(session, callback.from_user.id)
@@ -1828,6 +1852,7 @@ async def cb_memq_explain(callback: CallbackQuery) -> None:
 # Rate-limit для post_turn_optimize: не чаще 1 раза в 5 минут на пользователя
 _post_turn_last_call: dict[int, float] = {}
 _post_turn_lock: "asyncio.Lock | None" = None
+_post_turn_task: "asyncio.Task | None" = None
 
 
 def _get_post_turn_lock() -> asyncio.Lock:
@@ -1874,4 +1899,7 @@ async def _post_turn_optimize(
         except Exception:
             logger.debug("post_turn_optimize skipped", exc_info=True)
 
-    asyncio.create_task(_do_optimize())
+    global _post_turn_task
+    if _post_turn_task and not _post_turn_task.done():
+        _post_turn_task.cancel()
+    _post_turn_task = asyncio.create_task(_do_optimize())

@@ -247,7 +247,9 @@ async def patterns_loop(owner_id: int) -> None:
                     )
                     await asyncio.sleep(0.5)
                 await asyncio.sleep(600)  # РЅРµ РїРѕРІС‚РѕСЂСЏС‚СЊ РІ СЌС‚РѕС‚ С‡Р°СЃ
-            await asyncio.sleep(settings.memory_patterns_interval_sec)  # проверка каждые 10 минут
-        except Exception as e:
-            logger.error(f"Patterns loop error: {e}")
+            await asyncio.sleep(
+                settings.memory_patterns_interval_sec
+            )  # пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ 10 пїЅпїЅпїЅпїЅпїЅ
+        except Exception:
+            logger.exception("Patterns loop error")
             await asyncio.sleep(settings.memory_patterns_interval_sec)

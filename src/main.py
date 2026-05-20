@@ -25,11 +25,14 @@ from src.core.habit_tracker import habit_tracker_loop
 from src.core.memory_clusterer import cluster_loop
 from src.core.skills import skill_optimizer_loop
 from src.core.instruction_optimizer import instruction_optimizer
+from src.core.task_manager import BackgroundTaskManager
 from src.db.session import init_db
 from src.userbot.manager import UserbotManager
 
 
 logger = logging.getLogger(__name__)
+
+task_manager = BackgroundTaskManager()
 
 
 async def global_style_scheduler_loop(owner_telegram_id: int) -> None:
@@ -39,8 +42,8 @@ async def global_style_scheduler_loop(owner_telegram_id: int) -> None:
     while True:
         try:
             await update_global_style_profile(owner_telegram_id)
-        except Exception as e:
-            logger.error("Global style update failed: %s", e)
+        except Exception:
+            logger.exception("Global style update failed")
         await asyncio.sleep(settings.global_style_interval_sec)  # 12 hours
 
 
@@ -49,9 +52,38 @@ async def instruction_optimizer_scheduler_loop(owner_telegram_id: int) -> None:
     while True:
         try:
             await instruction_optimizer.instruction_optimizer_loop(owner_telegram_id)
-        except Exception as e:
-            logger.error("Instruction optimizer failed: %s", e)
+        except Exception:
+            logger.exception("Instruction optimizer failed")
         await asyncio.sleep(settings.instruction_optimizer_interval_sec)
+
+
+def _register_background_tasks() -> None:
+    """Register all background tasks into the global task_manager."""
+    oid = settings.owner_telegram_id
+
+    task_manager.register("digest-scheduler", digest_scheduler_loop)
+    task_manager.register("reminders-loop", reminders_loop)
+    task_manager.register("news-scheduler", news_scheduler_loop)
+    task_manager.register("auto-sync", auto_sync_loop)
+    task_manager.register("memory-decay", lambda: memory_decay_loop(oid))
+    task_manager.register("global-style", lambda: global_style_scheduler_loop(oid))
+    task_manager.register("smart-digest", lambda: smart_digest_loop(oid))
+    task_manager.register("proactive-briefing", lambda: proactive_briefing_loop(oid))
+    task_manager.register("follow-up", lambda: follow_up_loop(oid))
+    task_manager.register("sleep-tracker", lambda: sleep_tracker_loop(oid))
+    task_manager.register("weekly-summary", lambda: weekly_summary_loop(oid))
+    task_manager.register("weekly-digest", lambda: weekly_digest_loop(oid))
+    task_manager.register("memory-patterns", lambda: patterns_loop(oid))
+    task_manager.register("distillation", lambda: distillation_loop(oid))
+    task_manager.register("temporal-migration", lambda: temporal_migration_loop(oid))
+    task_manager.register("conflict-check", lambda: conflict_check_loop(oid))
+    task_manager.register("conflict-predictor", lambda: conflict_predictor_loop(oid))
+    task_manager.register("habit-tracker", lambda: habit_tracker_loop(oid))
+    task_manager.register("memory-cluster", lambda: cluster_loop(oid))
+    task_manager.register(
+        "instruction-optimizer", lambda: instruction_optimizer_scheduler_loop(oid)
+    )
+    task_manager.register("skill-optimizer", lambda: skill_optimizer_loop(oid))
 
 
 async def main() -> None:
@@ -68,83 +100,15 @@ async def main() -> None:
     userbot_manager = UserbotManager()
     await userbot_manager.restore_all()
 
-    bg_tasks = [
-        asyncio.create_task(digest_scheduler_loop(), name="digest-scheduler"),
-        asyncio.create_task(reminders_loop(), name="reminders-loop"),
-        asyncio.create_task(news_scheduler_loop(), name="news-scheduler"),
-        asyncio.create_task(auto_sync_loop(), name="auto-sync"),
-        asyncio.create_task(
-            memory_decay_loop(settings.owner_telegram_id), name="memory-decay"
-        ),
-        asyncio.create_task(
-            global_style_scheduler_loop(settings.owner_telegram_id), name="global-style"
-        ),
-        asyncio.create_task(
-            smart_digest_loop(settings.owner_telegram_id), name="smart-digest"
-        ),
-        asyncio.create_task(
-            proactive_briefing_loop(settings.owner_telegram_id),
-            name="proactive-briefing",
-        ),
-        asyncio.create_task(
-            follow_up_loop(settings.owner_telegram_id), name="follow-up"
-        ),
-        asyncio.create_task(
-            sleep_tracker_loop(settings.owner_telegram_id), name="sleep-tracker"
-        ),
-        asyncio.create_task(
-            weekly_summary_loop(settings.owner_telegram_id), name="weekly-summary"
-        ),
-        asyncio.create_task(
-            weekly_digest_loop(settings.owner_telegram_id), name="weekly-digest"
-        ),
-        asyncio.create_task(
-            patterns_loop(settings.owner_telegram_id), name="memory-patterns"
-        ),
-        asyncio.create_task(
-            distillation_loop(settings.owner_telegram_id), name="distillation"
-        ),
-        asyncio.create_task(
-            temporal_migration_loop(settings.owner_telegram_id),
-            name="temporal-migration",
-        ),
-        asyncio.create_task(
-            conflict_check_loop(settings.owner_telegram_id),
-            name="conflict-check",
-        ),
-        asyncio.create_task(
-            conflict_predictor_loop(settings.owner_telegram_id),
-            name="conflict-predictor",
-        ),
-        asyncio.create_task(
-            habit_tracker_loop(settings.owner_telegram_id),
-            name="habit-tracker",
-        ),
-        asyncio.create_task(
-            cluster_loop(settings.owner_telegram_id), name="memory-cluster"
-        ),
-        asyncio.create_task(
-            instruction_optimizer_scheduler_loop(settings.owner_telegram_id),
-            name="instruction-optimizer",
-        ),
-        asyncio.create_task(
-            skill_optimizer_loop(settings.owner_telegram_id),
-            name="skill-optimizer",
-        ),
-    ]
+    _register_background_tasks()
+    task_manager.start_all()
 
     notification_queue.start()
 
     try:
         await run_bot(userbot_manager)
     finally:
-        for t in bg_tasks:
-            t.cancel()
-        for t in bg_tasks:
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):
-                pass
+        await task_manager.stop_all()
         await stop_worker()
         await notification_queue.stop()
 

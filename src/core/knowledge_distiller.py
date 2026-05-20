@@ -66,8 +66,8 @@ async def distill_cluster(
                 ],
                 heavy=False,
             )
-        except Exception as e:
-            logger.error(f"Distillation LLM call failed: {e}")
+        except Exception:
+            logger.exception("Distillation LLM call failed")
             return None
 
         # Парсинг JSON
@@ -167,6 +167,6 @@ async def distillation_loop(owner_id: int) -> None:
                         priority=Notification.PRIORITY_MEDIUM,
                     )
             await asyncio.sleep(settings.knowledge_distiller_interval_sec)
-        except Exception as e:
-            logger.error(f"Distillation loop error: {e}")
+        except Exception:
+            logger.exception("Distillation loop error")
             await asyncio.sleep(settings.knowledge_distiller_interval_sec)

@@ -282,6 +282,6 @@ async def proactive_briefing_loop(owner_id: int) -> None:
             await asyncio.sleep(
                 settings.proactive_briefing_check_sec
             )  # проверка каждые 5 минут
-        except Exception as e:
-            logger.error("Briefing loop error: %s", e)
+        except Exception:
+            logger.exception("Briefing loop error")
             await asyncio.sleep(settings.proactive_briefing_check_sec)

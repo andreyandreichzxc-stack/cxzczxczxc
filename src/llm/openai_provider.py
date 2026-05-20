@@ -33,14 +33,14 @@ class OpenAIProvider:
     async def embed(self, text: str) -> list[float]:
         from src.core.embedding_cache import get as cache_get, set as cache_set
 
-        cached = cache_get(text)
+        cached = cache_get(text, LLMDefaults.OPENAI_EMBED)
         if cached is not None:
             return cached
         resp = await self._client.embeddings.create(
             model=LLMDefaults.OPENAI_EMBED, input=text
         )
         result = resp.data[0].embedding
-        cache_set(text, result)
+        cache_set(text, result, LLMDefaults.OPENAI_EMBED)
         return result
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
@@ -54,7 +54,7 @@ class OpenAIProvider:
         uncached_texts: list[str] = []
         uncached_indices: list[int] = []
         for i, t in enumerate(texts):
-            cached = cache_get(t)
+            cached = cache_get(t, LLMDefaults.OPENAI_EMBED)
             if cached is not None:
                 results[i] = cached
             else:
@@ -67,7 +67,7 @@ class OpenAIProvider:
             )
             api_results = [d.embedding for d in resp.data]
             for idx, emb in zip(uncached_indices, api_results):
-                cache_set(texts[idx], emb)
+                cache_set(texts[idx], emb, LLMDefaults.OPENAI_EMBED)
                 results[idx] = emb
 
         return results  # type: ignore[return-value]

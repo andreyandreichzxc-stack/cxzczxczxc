@@ -57,7 +57,7 @@ class GeminiProvider:
     async def embed(self, text: str) -> list[float]:
         from src.core.embedding_cache import get as cache_get, set as cache_set
 
-        cached = cache_get(text)
+        cached = cache_get(text, LLMDefaults.GEMINI_EMBED)
         if cached is not None:
             return cached
 
@@ -69,7 +69,7 @@ class GeminiProvider:
             return list(resp.embeddings[0].values)
 
         result = await asyncio.to_thread(_call)
-        cache_set(text, result)
+        cache_set(text, result, LLMDefaults.GEMINI_EMBED)
         return result
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
@@ -83,7 +83,7 @@ class GeminiProvider:
         uncached_texts: list[str] = []
         uncached_indices: list[int] = []
         for i, t in enumerate(texts):
-            cached = cache_get(t)
+            cached = cache_get(t, LLMDefaults.GEMINI_EMBED)
             if cached is not None:
                 results[i] = cached
             else:
@@ -107,7 +107,7 @@ class GeminiProvider:
                 api_results.extend(await asyncio.to_thread(_call))
 
             for idx, emb in zip(uncached_indices, api_results):
-                cache_set(texts[idx], emb)
+                cache_set(texts[idx], emb, LLMDefaults.GEMINI_EMBED)
                 results[idx] = emb
 
         return results  # type: ignore[return-value]

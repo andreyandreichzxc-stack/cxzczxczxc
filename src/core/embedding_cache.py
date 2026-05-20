@@ -7,20 +7,21 @@ _cache: OrderedDict = OrderedDict()
 MAX_SIZE = 500
 
 
-def _hash(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()[:16]
+def _hash(text: str, model: str = "") -> str:
+    raw = f"{model}||{text}" if model else text
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-def get(text: str) -> list[float] | None:
-    key = _hash(text)
+def get(text: str, model: str = "") -> list[float] | None:
+    key = _hash(text, model)
     if key in _cache:
         _cache.move_to_end(key)
         return _cache[key]
     return None
 
 
-def set(text: str, embedding: list[float]) -> None:
-    key = _hash(text)
+def set(text: str, embedding: list[float], model: str = "") -> None:
+    key = _hash(text, model)
     if key in _cache:
         _cache.move_to_end(key)
         _cache[key] = embedding

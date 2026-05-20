@@ -23,7 +23,7 @@ from src.core.timeutil import TZ_PRESETS, is_valid_tz, tz_short
 from src.db.repo import get_api_key, get_or_create_user, list_folders, upsert_api_key
 from src.db.session import get_session
 from src.userbot.dialogs import sync_dialogs
-from src.userbot.manager import _MANAGER_SINGLETON
+from src.userbot import get_active_telethon_client, get_userbot_manager
 from src.llm.gemini_provider import GeminiProvider
 from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
@@ -938,17 +938,18 @@ async def cb_folder_toggle(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "set:folder:refresh")
 async def cb_folder_refresh(callback: CallbackQuery) -> None:
-    if _MANAGER_SINGLETON:
-        client = _MANAGER_SINGLETON.get_client(callback.from_user.id)
-        if client:
-            async with get_session() as session:
-                owner = await get_or_create_user(session, callback.from_user.id)
-            await sync_dialogs(client, owner, limit=500)
-            await callback.answer("✅ Папки обновлены!")
+    client = get_active_telethon_client(callback.from_user.id)
+    if client:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, callback.from_user.id)
+        await sync_dialogs(client, owner, limit=500)
+        await callback.answer("✅ Папки обновлены!")
+    else:
+        mgr = get_userbot_manager()
+        if mgr is None:
+            await callback.answer("❌ Userbot не запущен", show_alert=True)
         else:
             await callback.answer("❌ Сначала /login", show_alert=True)
-    else:
-        await callback.answer("❌ Userbot не запущен", show_alert=True)
 
     await _refresh_section(callback, "folders")
 

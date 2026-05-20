@@ -43,8 +43,8 @@ async def memory_decay_loop(owner_id: int) -> None:
             await asyncio.sleep(
                 settings.memory_check_interval_sec
             )  # каждые 10 минут проверка
-        except (ValueError, AttributeError, LookupError, OSError) as e:
-            logger.error("Memory decay error: %s", e)
+        except (ValueError, AttributeError, LookupError, OSError):
+            logger.exception("Memory decay error")
             await asyncio.sleep(settings.memory_check_interval_sec)
 
 
