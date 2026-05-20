@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.crypto import decrypt, encrypt
 from src.core.vector_store import VectorStore
 from src.db.models import (
+    AdaptivePersona,
     ApiKey,
     AutoReplyLog,
     Commitment,
@@ -1581,3 +1582,28 @@ async def list_contact_profiles(
         .limit(limit)
     )
     return list(result.scalars().all())
+
+
+# ─── AdaptivePersona CRUD ──────────────────────────────────────────
+
+
+async def get_persona(session: AsyncSession, user: User) -> AdaptivePersona:
+    """Возвращает AdaptivePersona для пользователя, создаёт с дефолтами если нет."""
+    r = await session.execute(
+        select(AdaptivePersona).where(AdaptivePersona.user_id == user.id)
+    )
+    persona = r.scalar_one_or_none()
+    if persona is None:
+        persona = AdaptivePersona(user_id=user.id)
+        session.add(persona)
+        await session.flush()
+    return persona
+
+
+async def update_persona(session: AsyncSession, persona: AdaptivePersona, **kwargs):
+    """Обновляет поля AdaptivePersona и проставляет updated_at."""
+    for k, v in kwargs.items():
+        if hasattr(persona, k):
+            setattr(persona, k, v)
+    persona.updated_at = datetime.now(timezone.utc)
+    await session.flush()

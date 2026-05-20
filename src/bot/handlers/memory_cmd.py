@@ -30,10 +30,12 @@ from src.db.repo import (
     get_linked_memories,
     get_memory_stats,
     get_or_create_user,
+    get_persona,
     list_key_slots,
     list_memories,
     list_memory_candidates,
     search_memories,
+    update_persona,
 )
 from src.db.session import get_session
 from src.userbot.manager import UserbotManager
@@ -975,6 +977,87 @@ async def cmd_clusters(message: Message) -> None:
         lines.append(f"📦 <b>{cluster.topic}</b> — {fact_count} фактов")
         if cluster.summary:
             lines.append(f"   <i>{cluster.summary[:80]}</i>")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("persona"))
+async def cmd_persona(message: Message) -> None:
+    """Показать/сбросить адаптивный профиль личности."""
+    from src.core.adaptive_persona import format_persona_for_prompt
+
+    args = (message.text or "").split()
+
+    # /persona reset — сброс
+    if len(args) > 1 and args[1] == "reset":
+        async with get_session() as session:
+            owner_db = await get_or_create_user(session, message.from_user.id)
+            p = await get_persona(session, owner_db)
+            await update_persona(
+                session,
+                p,
+                brevity="normal",
+                formality="friendly",
+                emoji_usage="normal",
+                initiative="reactive",
+                preferred_format="text",
+                work_mode="normal",
+                forbidden_patterns=None,
+                max_response_len=500,
+            )
+        await message.answer("✅ Персона сброшена к стандартным настройкам.")
+        return
+
+    # /persona — показать
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        p = await get_persona(session, owner)
+
+    brevity_labels = {
+        "short": "📝 Коротко",
+        "normal": "📝 Обычно",
+        "detailed": "📝 Подробно",
+    }
+    formality_labels = {
+        "formal": "👔 Формально",
+        "friendly": "🤝 Дружелюбно",
+        "casual": "😎 Панибратски",
+    }
+    emoji_labels = {
+        "none": "🚫 Без эмодзи",
+        "minimal": "😊 Минимум",
+        "normal": "😊 Обычно",
+        "rich": "🎉 Много",
+    }
+    initiative_labels = {
+        "reactive": "🔇 По запросу",
+        "proactive": "📢 Инициативный",
+        "balanced": "⚖️ Умеренно",
+    }
+    work_labels = {
+        "normal": "💼 Обычный",
+        "focus": "🎯 Фокус",
+        "relax": "🏖 Отдых",
+    }
+    format_labels = {
+        "text": "📄 Текст",
+        "bullets": "📋 Список",
+        "numbered": "🔢 Нумерация",
+    }
+
+    lines = ["<b>🧑‍🎤 Твой стиль общения:</b>", ""]
+    lines.append(brevity_labels.get(p.brevity, p.brevity))
+    lines.append(formality_labels.get(p.formality, p.formality))
+    lines.append(emoji_labels.get(p.emoji_usage, p.emoji_usage))
+    lines.append(initiative_labels.get(p.initiative, p.initiative))
+    lines.append(format_labels.get(p.preferred_format, p.preferred_format))
+    lines.append(work_labels.get(p.work_mode, p.work_mode))
+    lines.append(f"📏 Макс. длина: {p.max_response_len} символов")
+    lines.append(f"🔄 Коррекций: {p.total_corrections}")
+    lines.append("")
+    lines.append(
+        "<i>Скажи «отвечай короче», «будь формальнее», «без смайликов» — я подстроюсь.\n"
+        "/persona reset — сбросить всё.</i>"
+    )
     await message.answer("\n".join(lines))
 
 

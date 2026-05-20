@@ -764,3 +764,50 @@ class InstructionEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
+
+
+class AdaptivePersona(Base):
+    """Адаптивный профиль личности бота — стиль общения подстраивается под пользователя."""
+
+    __tablename__ = "adaptive_personas"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    # Стиль
+    brevity: Mapped[str] = mapped_column(
+        String(16), default="normal"
+    )  # short/normal/detailed
+    formality: Mapped[str] = mapped_column(
+        String(16), default="friendly"
+    )  # formal/friendly/casual
+    emoji_usage: Mapped[str] = mapped_column(
+        String(16), default="normal"
+    )  # none/minimal/normal/rich
+    initiative: Mapped[str] = mapped_column(
+        String(16), default="reactive"
+    )  # reactive/proactive/balanced
+    # Формат
+    preferred_format: Mapped[str] = mapped_column(
+        String(16), default="text"
+    )  # text/bullets/numbered
+    use_html: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_response_len: Mapped[int] = mapped_column(
+        Integer, default=500
+    )  # макс символов в ответе
+    # Запреты
+    forbidden_patterns: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON-список запретов
+    # Режимы
+    quiet_hours_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    work_mode: Mapped[str] = mapped_column(
+        String(16), default="normal"
+    )  # normal/focus/relax
+    # Метрики
+    total_interactions: Mapped[int] = mapped_column(Integer, default=0)
+    total_corrections: Mapped[int] = mapped_column(Integer, default=0)
+    last_correction_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )

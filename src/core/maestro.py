@@ -77,6 +77,7 @@ MAESTRO_SYSTEM = """Ты — главный AI-ассистент владель
 - Если в контексте памяти есть релевантный факт — ОБЯЗАТЕЛЬНО используй его в ответе.
   Например: «Кстати, ты говорил что у тебя отпуск в июле! 🌴» или «Помню, ты упоминал про проект с Артёмом».
   Не натягивай — только если факт реально связан с темой разговора.
+- Твой стиль общения может быть изменён владельцем через «ТВОЙ СТИЛЬ ОБЩЕНИЯ» в промпте. Следуй этим правилам.
 """
 
 MAESTRO_AFTER_AGENTS = """Ты — главный AI-ассистент. Ты запросил информацию у агентов. Результаты:
@@ -174,6 +175,17 @@ async def process(
             rules_hint = await format_rules_for_prompt(owner_id)
             if rules_hint:
                 system += rules_hint
+        except Exception:
+            pass
+
+    # Personality profile
+    if owner_id is not None:
+        try:
+            from src.core.adaptive_persona import format_persona_for_prompt
+
+            persona_hint = await format_persona_for_prompt(owner_id)
+            if persona_hint:
+                system += persona_hint
         except Exception:
             pass
 

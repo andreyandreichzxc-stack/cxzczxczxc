@@ -635,6 +635,21 @@ async def _process_text(
     except Exception:
         logger.exception("adaptive instruction check failed")
 
+    # Adaptive persona — авто-подстройка стиля
+    try:
+        from src.core.adaptive_persona import (
+            detect_persona_change,
+            apply_persona_changes,
+        )
+
+        change = await detect_persona_change(raw)
+        if change:
+            await apply_persona_changes(owner_telegram_id, change["changes"])
+            await message.answer(f"✅ Понял! Буду {change['reason']}.")
+            return
+    except Exception:
+        logger.exception("adaptive persona check failed")
+
     # Smart AutoRouter — оркестрация
     _last_purpose = None
     try:
@@ -685,6 +700,15 @@ async def _process_text(
             fast_context_parts.append(router_plan.memory_context)
         if router_plan.self_profile:
             fast_context_parts.append(router_plan.self_profile)
+        # Инжект persona
+        try:
+            from src.core.adaptive_persona import format_persona_for_prompt
+
+            persona_hint = await format_persona_for_prompt(owner_telegram_id)
+            if persona_hint:
+                fast_context_parts.append(persona_hint)
+        except Exception:
+            pass
         fast_system = (
             "Ты ассистент. Ответь коротко.\n\n" + "\n\n".join(fast_context_parts)
             if fast_context_parts
@@ -716,6 +740,23 @@ async def _process_text(
             await message.answer(router_plan.final_response)
             return
 
+    # Инжект persona в global_style для MAESTRO
+    if owner.global_style_profile:
+        injected_style = owner.global_style_profile
+    else:
+        injected_style = None
+    try:
+        from src.core.adaptive_persona import format_persona_for_prompt
+
+        persona_hint = await format_persona_for_prompt(owner_telegram_id)
+        if persona_hint:
+            if injected_style:
+                injected_style += persona_hint
+            else:
+                injected_style = persona_hint
+    except Exception:
+        pass
+
     # MAESTRO — стандартный тяжёлый пайплайн
     try:
         pipeline_result = await run_pipeline(
@@ -724,7 +765,7 @@ async def _process_text(
             owner_id=owner_telegram_id,
             history_block=history_block,
             memory_context=router_plan.memory_context,
-            global_style=getattr(owner, "global_style_profile", None),
+            global_style=injected_style,
         )
         response_text = pipeline_result.get("final_response", "")
         if response_text:
