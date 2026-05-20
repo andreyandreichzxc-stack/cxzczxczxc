@@ -1,6 +1,7 @@
 """Краткосрочная память диалога с control-bot: последние N ходов и последний
 обсуждаемый контакт. Нужно чтобы «напиши ему», «в том же чате» правильно
 резолвились без повторения имени. In-memory, переживать рестарт не должно."""
+
 from __future__ import annotations
 
 from collections import deque
@@ -18,6 +19,7 @@ class _Ctx:
     last_peer_id: int | None = None
     last_peer_name: str | None = None
     last_peer_at: float = 0.0
+    last_purpose: str | None = None
 
 
 _STORE: dict[int, _Ctx] = {}
@@ -60,15 +62,29 @@ def get_recent_turns(user_id: int) -> list[tuple[str, str]]:
     return list(_get(user_id).turns)
 
 
+def set_last_purpose(user_id: int, purpose: str) -> None:
+    """Запоминает последний purpose для context chaining."""
+    ctx = _get(user_id)
+    ctx.last_purpose = purpose
+
+
+def get_last_purpose(user_id: int) -> str | None:
+    """Возвращает последний purpose для context chaining."""
+    ctx = _get(user_id)
+    return ctx.last_purpose
+
+
 def render_history_block(user_id: int) -> str:
     parts: list[str] = []
     last = get_last_peer(user_id)
     if last is not None:
         peer_id, name = last
         label = name or str(peer_id)
-        parts.append(f"Последний упомянутый контакт: {label} (peer_id={peer_id}). "
-                     f"Если фраза вроде «ему», «ей», «в том же чате», «там» — "
-                     f"подставляй именно его.")
+        parts.append(
+            f"Последний упомянутый контакт: {label} (peer_id={peer_id}). "
+            f"Если фраза вроде «ему», «ей», «в том же чате», «там» — "
+            f"подставляй именно его."
+        )
 
     turns = get_recent_turns(user_id)
     if turns:

@@ -1,8 +1,14 @@
 """/news_topics — управление темами для утренних авто-новостей."""
+
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
@@ -31,12 +37,16 @@ async def _render(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
         topics = await list_news_topics(session, owner)
-        s = owner.settings
+        news_enabled = owner.settings.news_enabled if owner.settings else False
+        news_digest_time = (
+            owner.settings.news_digest_time if owner.settings else "09:00"
+        )
+        tz_name = owner.settings.timezone if owner.settings else "UTC"
 
     text_lines = [
         "📰 <b>Темы для авто-новостей</b>",
         "",
-        f"Авто-новости: <b>{'ВКЛ' if s.news_enabled else 'ВЫКЛ'}</b> · ежедневно в <b>{s.news_digest_time}</b> · {tz_short(s.timezone)}",
+        f"Авто-новости: <b>{'ВКЛ' if news_enabled else 'ВЫКЛ'}</b> · ежедневно в <b>{news_digest_time}</b> · {tz_short(tz_name)}",
         "",
     ]
     if not topics:
@@ -46,7 +56,9 @@ async def _render(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
             text_lines.append(f"{_check(t.enabled)} <b>{t.topic}</b> · окно {t.hours}ч")
 
     text_lines.append("")
-    text_lines.append("<i>Тапни тему, чтобы вкл/выкл. Включить авто-новости и время — в /settings → Новости.</i>")
+    text_lines.append(
+        "<i>Тапни тему, чтобы вкл/выкл. Включить авто-новости и время — в /settings → Новости.</i>"
+    )
 
     kb = InlineKeyboardBuilder()
     for t in topics:

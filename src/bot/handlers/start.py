@@ -50,12 +50,11 @@ WELCOME = (
 async def cmd_start(message: Message) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
+        has_session = owner.session is not None
+        llm = (owner.settings.llm_provider or "—").capitalize()
+        tz = tz_short(owner.settings.timezone) if owner.settings.timezone else "UTC"
 
-    # Статус
-    has_session = owner.session is not None
     auth_status = "Ты авторизован ✅" if has_session else "Не авторизован ❌"
-    llm = (owner.settings.llm_provider or "—").capitalize()
-    tz = tz_short(owner.settings.timezone) if owner.settings.timezone else "UTC"
 
     header = (
         f"👋 <b>Привет! Я твой AI-ассистент для Telegram</b>\n\n"
@@ -86,8 +85,8 @@ async def cmd_start(message: Message) -> None:
 async def cmd_help(message: Message) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-    auth_status = "✅" if owner.session else "❌"
-    llm = (owner.settings.llm_provider or "—").capitalize()
+        auth_status = "✅" if owner.session else "❌"
+        llm = (owner.settings.llm_provider or "—").capitalize()
     header = (
         f"📖 <b>Помощь по командам</b>\n"
         f"{'Ты авторизован' if owner.session else 'Не авторизован'} {auth_status} · "

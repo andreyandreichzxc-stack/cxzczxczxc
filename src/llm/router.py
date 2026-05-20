@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -282,6 +283,43 @@ async def build_provider(
             continue
         providers.append(MultiKeyProvider(name, _provider_class_for(name), keys))
     if not providers:
+        # Проверяем: есть слоты но все в кулдауне?
+        try:
+            from src.db.repo import list_key_slots
+
+            all_slots = await list_key_slots(
+                session,
+                user,
+                provider=user.settings.llm_provider if user.settings else "openai",
+            )
+            in_cooldown = [
+                s
+                for s in all_slots
+                if s.cooldown_until and s.cooldown_until > datetime.now(timezone.utc)
+            ]
+            if in_cooldown:
+                min_cooldown = min(
+                    (s.cooldown_until for s in in_cooldown if s.cooldown_until),
+                    default=None,
+                )
+                wait_sec = (
+                    int((min_cooldown - datetime.now(timezone.utc)).total_seconds())
+                    if min_cooldown
+                    else 60
+                )
+                return ExhaustedProvider(
+                    f"Все ключи в кулдауне. Попробуй через {wait_sec} сек."
+                )
+            elif all_slots:
+                return ExhaustedProvider(
+                    "Все ключи отключены (enabled=False). Проверь /keys."
+                )
+            else:
+                return ExhaustedProvider(
+                    "Нет ключей. Добавь через /keys add или /settings."
+                )
+        except Exception:
+            pass
         return None
     if len(providers) > 1:
         logger.info(
@@ -289,3 +327,26 @@ async def build_provider(
             " -> ".join(p.name for p in providers),
         )
     return ProviderFallback(providers)
+
+
+class ExhaustedProvider:
+    """Заглушка — все ключи в кулдауне или отсутствуют."""
+
+    name: str = "exhausted"
+
+    def __init__(self, reason: str = "no keys available") -> None:
+        self._reason = reason
+
+    async def validate_key(self) -> bool:
+        return False
+
+    async def chat(  # type: ignore[return]
+        self, messages: object, *, heavy: bool = False
+    ) -> str:
+        return f"❌ {self._reason}"
+
+    async def embed(self, text: str) -> list[float]:
+        return [0.0] * 1536
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [[0.0] * 1536] * len(texts)

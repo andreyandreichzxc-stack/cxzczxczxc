@@ -589,7 +589,9 @@ async def _process_text(
 ) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        tz_name = owner.settings.timezone
+        tz_name = owner.settings.timezone if owner.settings else "UTC"
+        owner_telegram_id = owner.telegram_id
+        use_heavy = owner.settings.use_heavy_model if owner.settings else True
 
     now_local_str = now_in_tz(tz_name).strftime("%Y-%m-%d %H:%M")
     history_block = ctx_store.render_history_block(message.from_user.id)
@@ -600,7 +602,7 @@ async def _process_text(
         from src.core.memory_recall import recall, format_recall_for_prompt
 
         recall_result = await recall(
-            owner.telegram_id,
+            owner_telegram_id,
             query=raw[:200],
             limit=12,
             include_self=True,
@@ -615,12 +617,12 @@ async def _process_text(
     try:
         from src.core.adaptive_instructions import detect_instruction, apply_instruction
 
-        instr = await detect_instruction(raw, owner.telegram_id)
+        instr = await detect_instruction(raw, owner_telegram_id)
         if instr:
             from src.db.models import InstructionCandidate, InstructionEvent
 
             async with get_session() as session:
-                owner_db = await get_or_create_user(session, owner.telegram_id)
+                owner_db = await get_or_create_user(session, owner_telegram_id)
                 event = InstructionEvent(
                     user_id=owner_db.id,
                     raw_text=raw[:500],
@@ -629,7 +631,7 @@ async def _process_text(
                 )
                 session.add(event)
                 if instr["is_safe"]:
-                    await apply_instruction(owner.telegram_id, instr["rule"])
+                    await apply_instruction(owner_telegram_id, instr["rule"])
                     await message.answer(f"✅ Понял! Больше не буду {instr['rule']}.")
                     await session.flush()
                     return
@@ -650,10 +652,16 @@ async def _process_text(
         pass  # не ломаем основной flow
 
     # Smart AutoRouter — оркестрация
+    _last_purpose = None
+    try:
+        _last_purpose = ctx_store.get_last_purpose(message.from_user.id)
+    except Exception:
+        pass
     router_plan = await make_plan(
         raw,
-        owner.telegram_id,
-        heavy_available=owner.settings.use_heavy_model if owner.settings else True,
+        owner_telegram_id,
+        heavy_available=use_heavy,
+        last_purpose=_last_purpose,
     )
     if router_plan.tasks:
         t0 = router_plan.tasks[0]
@@ -669,7 +677,7 @@ async def _process_text(
     # Строим провайдер с учётом purpose из auto-router'а
     purpose = router_plan.tasks[0].purpose.value if router_plan.tasks else "main"
     async with get_session() as session:
-        owner_db = await get_or_create_user(session, owner.telegram_id)
+        owner_db = await get_or_create_user(session, owner_telegram_id)
         provider = await build_provider(session, owner_db, purpose=purpose)
         if provider is None and purpose != "main":
             logger.debug("No key for purpose '%s', falling back to main", purpose)
@@ -686,7 +694,7 @@ async def _process_text(
         pipeline_result = await run_pipeline(
             provider,
             raw,
-            owner_id=owner.telegram_id,
+            owner_id=owner_telegram_id,
             history_block=history_block,
             memory_context=memory_context,
             global_style=getattr(owner, "global_style_profile", None),
@@ -717,7 +725,7 @@ async def _process_text(
             tz_name=tz_name,
             history_block=history_block,
             memory_context=memory_context,
-            user_id=owner.telegram_id,
+            user_id=owner_telegram_id,
         )
     except Exception as e:
         logger.exception("agent route_intent failed")
@@ -744,6 +752,14 @@ async def _process_text(
 
     summary = _summarize_intent_for_memory(intent)
     ctx_store.add_turn(message.from_user.id, raw, summary)
+    # Обновляем last_purpose для context chaining
+    try:
+        if router_plan and router_plan.tasks:
+            ctx_store.set_last_purpose(
+                message.from_user.id, router_plan.tasks[0].purpose.value
+            )
+    except Exception:
+        pass
 
 
 def _summarize_intent_for_memory(intent: dict) -> str:
@@ -993,12 +1009,13 @@ async def _exec_add_reminder(intent, message, *, tz_name: str) -> None:
             text=text,
             deadline_at=when,
         )
+        reminders_enabled = owner.settings.reminders_enabled if owner.settings else True
 
     when_str = fmt_local(when, tz_name) if when else "без срока"
     extra = f" (контакт: {peer_name})" if peer_name else ""
     note = (
         ""
-        if owner.settings.reminders_enabled
+        if reminders_enabled
         else "\n\n⚠ Напоминания выключены — включи в /settings → ⏰."
     )
     await message.answer(
@@ -1063,8 +1080,9 @@ async def _exec_add_reminders_from_chat(intent, message, userbot_manager) -> Non
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         contact = await get_contact(session, owner, target.peer_id)
+        owner_telegram_id = owner.telegram_id
     items = await extract_and_save_commitments(
-        provider, telegram_id=owner.telegram_id, contact=contact, messages=msgs
+        provider, telegram_id=owner_telegram_id, contact=contact, messages=msgs
     )
     if not items:
         await message.answer("🤷 Явных обещаний в этом чате не нашёл.")
@@ -1333,6 +1351,7 @@ async def _exec_show_self(intent: dict, message: Message) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         prof = await get_self_profile(session, owner)
+        owner_telegram_id = owner.telegram_id
 
     lines = ["🧑 <b>Что я знаю о тебе:</b>", ""]
 
@@ -1353,7 +1372,7 @@ async def _exec_show_self(intent: dict, message: Message) -> None:
     # Recall (self-факты)
     try:
         result = await recall(
-            owner.telegram_id,
+            owner_telegram_id,
             limit=5,
             include_self=True,
             include_pinned=True,
@@ -1368,7 +1387,7 @@ async def _exec_show_self(intent: dict, message: Message) -> None:
 
     # Чего НЕ знаю (fuel gauge — истощённые зоны)
     try:
-        fuel = await get_fuel_stats(owner.telegram_id)
+        fuel = await get_fuel_stats(owner_telegram_id)
         if fuel.get("depleted"):
             lines.append("")
             lines.append("🤷 <b>Чего НЕ знаю:</b>")

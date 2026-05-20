@@ -84,6 +84,7 @@ async def make_plan(
     *,
     provider_available: bool = True,
     heavy_available: bool = True,
+    last_purpose: str | None = None,
 ) -> RouterPlan:
     """
     Строит план обработки запроса.
@@ -92,6 +93,42 @@ async def make_plan(
     risk = await classify_risk(user_text)
     plan = RouterPlan()
     start = time.monotonic()
+    meta: dict[str, Any] = {}
+
+    # ---------- Слой 1: Recall-first ----------
+    try:
+        from src.core.memory_recall import recall
+
+        recall_result = await recall(
+            telegram_id,
+            query=user_text[:200],
+            limit=3,
+            include_self=True,
+            include_pinned=True,
+            include_tasks=True,
+        )
+        if recall_result and recall_result.facts:
+            meta["recall_hit"] = len(recall_result.facts)
+            meta["recall_facts"] = [rf.fact[:80] for rf in recall_result.facts[:3]]
+    except Exception:
+        pass
+
+    # ---------- Слой 4: Context chain (last_purpose) ----------
+    if (
+        last_purpose
+        and len(user_text) < 30
+        and any(w in user_text.lower() for w in ("а ещё", "и", "тоже", "также"))
+    ):
+        meta["context_chain"] = last_purpose
+        task = RouterTask(
+            user_text,
+            purpose=RoutePurpose(last_purpose),
+            risk=risk,
+            heavy=False,
+        )
+        plan.tasks.append(task)
+        plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+        return plan
 
     t = user_text.lower().strip()
 
@@ -110,6 +147,41 @@ async def make_plan(
         plan.tasks.append(task)
         plan.elapsed_ms = int((time.monotonic() - start) * 1000)
         return plan
+
+    # ---------- Слой 2: Contact-aware routing ----------
+    try:
+        from src.core.contact_resolver import resolve
+        from src.db.session import get_session
+        from src.db.repo import get_or_create_user, get_conversation_state
+        import re
+
+        names = re.findall(
+            r"(?:скажи|напиши|отправь|передай|ответь)\s+(\S+)",
+            user_text,
+            re.IGNORECASE,
+        )
+        if names:
+            async with get_session() as session:
+                owner = await get_or_create_user(session, telegram_id)
+                contacts = await resolve(None, owner, names[0])
+                if contacts and contacts[0].score >= 70:
+                    peer_id = contacts[0].peer_id
+                    state = await get_conversation_state(session, owner, peer_id)
+                    if state and state.status == "waiting_reply":
+                        meta["contact_status"] = "waiting_reply"
+                        meta["contact_id"] = peer_id
+                        meta["contact_name"] = contacts[0].display_name
+                        task = RouterTask(
+                            user_text,
+                            purpose=RoutePurpose.DRAFT,
+                            risk=RiskLevel.HIGH,
+                            need_agents=["search", "draft"],
+                        )
+                        plan.tasks.append(task)
+                        plan.elapsed_ms = int((time.monotonic() - start) * 1000)
+                        return plan
+    except Exception:
+        pass
 
     # Отправка сообщения
     if any(w in t for w in ("отправь", "напиши", "скажи", "передай", "ответь")):
@@ -181,10 +253,39 @@ async def make_plan(
         plan.elapsed_ms = int((time.monotonic() - start) * 1000)
         return plan
 
+    # ---------- Слой 3: Urgency escalation ----------
+    try:
+        from src.core.conflict_predictor import detect_silence_triggers
+
+        triggers = await detect_silence_triggers(telegram_id)
+        if triggers:
+            risky_names = [t["contact_name"].lower() for t in triggers]
+            if any(name in user_text.lower() for name in risky_names):
+                if risk == RiskLevel.LOW:
+                    risk = RiskLevel.MEDIUM
+                    meta["escalated_from"] = "low"
+                elif risk == RiskLevel.MEDIUM:
+                    risk = RiskLevel.HIGH
+                    meta["escalated_from"] = "medium"
+                meta["conflict_risk"] = [t["contact_name"] for t in triggers[:2]]
+    except Exception:
+        pass
+
     # Всё остальное → MAIN + light
     task = RouterTask(
         user_text, purpose=RoutePurpose.MAIN, risk=risk, heavy=False, cache_ttl=0
     )
+
+    # ---------- Слой 5: Heavy/Light intelligence ----------
+    should_use_heavy = heavy_available and bool(
+        risk in (RiskLevel.HIGH, RiskLevel.CRITICAL)
+        or len(user_text) > 200
+        or meta.get("recall_hit", 0) > 5
+        or meta.get("conflict_risk")
+    )
+    task.heavy = should_use_heavy
+    task.meta = meta
+
     plan.tasks.append(task)
     plan.elapsed_ms = int((time.monotonic() - start) * 1000)
     return plan

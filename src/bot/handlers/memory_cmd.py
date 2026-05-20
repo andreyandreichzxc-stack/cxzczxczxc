@@ -70,10 +70,64 @@ async def cmd_keys(message: Message) -> None:
                 purpose=purpose,
                 label=f"{provider}/{purpose}",
             )
-        await message.answer(
-            f"✅ Ключ добавлен: {provider}/{purpose} (слот #{slot.id})"
-        )
-        return
+        # Валидируем ключ
+        try:
+            from src.llm.router import _provider_class_for
+            from src.crypto import decrypt
+
+            key = decrypt(slot.key_enc)
+            prov_class = _provider_class_for(provider)
+            prov = prov_class(key)
+            valid = await prov.validate_key()
+            if not valid:
+                # Удаляем невалидный слот
+                async with get_session() as session:
+                    owner = await get_or_create_user(session, message.from_user.id)
+                    bad_slot = await session.get(LlmKeySlot, slot.id)
+                    if bad_slot:
+                        await session.delete(bad_slot)
+                        await session.flush()
+                await message.answer(
+                    f"❌ Ключ {provider}/{purpose} не прошёл валидацию. Проверь ключ."
+                )
+                return
+            await message.answer(
+                f"✅ Ключ {provider}/{purpose} добавлен и проверен! (слот #{slot.id})"
+            )
+            return
+        except Exception as e:
+            await message.answer(f"✅ Ключ сохранён, но проверить не удалось: {e}")
+            return
+
+    if len(args) >= 2 and args[1] == "--stats":
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            slots = await list_key_slots(session, owner)
+            if not slots:
+                await message.answer("Нет ключевых слотов.")
+                return
+            lines = ["<b>📊 Статистика ключей:</b>", ""]
+            total_used = sum(s.usage_count for s in slots)
+            total_fail = sum(s.failure_count for s in slots)
+            fail_rate = (total_fail / max(total_used, 1)) * 100
+            lines.append(f"Всего вызовов: {total_used}")
+            lines.append(f"Всего фейлов: {total_fail} ({fail_rate:.1f}%)")
+            lines.append(f"Активных: {sum(1 for s in slots if s.enabled)}")
+            lines.append(
+                f"В кулдауне: {sum(1 for s in slots if s.cooldown_until and s.cooldown_until > datetime.now(timezone.utc))}"
+            )
+            lines.append("")
+            for s in sorted(
+                slots,
+                key=lambda s: s.failure_count / max(s.usage_count, 1),
+                reverse=True,
+            )[:5]:
+                fail_pct = (s.failure_count / max(s.usage_count, 1)) * 100
+                lines.append(
+                    f"<b>{s.provider}/{s.purpose}</b>: {s.usage_count}× вызовов, {s.failure_count}× фейлов ({fail_pct:.1f}%)"
+                )
+            await message.answer("\n".join(lines))
+            return
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
