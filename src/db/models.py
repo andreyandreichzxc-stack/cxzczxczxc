@@ -57,6 +57,11 @@ class User(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    key_slots: Mapped[list["LlmKeySlot"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
 
 
 class UserSettings(Base):
@@ -158,6 +163,39 @@ class ApiKey(Base):
     key_enc: Mapped[str] = mapped_column(Text)
 
     user: Mapped[User] = relationship(back_populates="api_keys")
+
+
+class LlmKeySlot(Base):
+    """Слот LLM-ключа — один ключ для конкретного провайдера и назначения."""
+
+    __tablename__ = "llm_key_slots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(16))  # openai/gemini/mistral
+    purpose: Mapped[str] = mapped_column(
+        String(32), default="main"
+    )  # main/draft/memory/background/search/analysis/urgent/fallback
+    label: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )  # человекочитаемая метка "основной", "для черновиков"
+    key_enc: Mapped[str] = mapped_column(Text)
+    priority: Mapped[int] = mapped_column(
+        Integer, default=0
+    )  # чем выше, тем приоритетнее
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    usage_count: Mapped[int] = mapped_column(Integer, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+    user: Mapped[User] = relationship(back_populates="key_slots")
 
 
 class Contact(Base):
@@ -648,6 +686,60 @@ class Folder(Base):
     telegram_folder_id: Mapped[int] = mapped_column(Integer, index=True)
     title: Mapped[str] = mapped_column(String(128))
     emoji: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class InstructionProfile(Base):
+    """Профиль инструкций — активные правила поведения бота."""
+
+    __tablename__ = "instruction_profiles"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    rules_json: Mapped[str] = mapped_column(Text, default="[]")  # JSON список правил
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class InstructionCandidate(Base):
+    """Кандидат в инструкции — предложенное правило, ждёт подтверждения."""
+
+    __tablename__ = "instruction_candidates"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    rule: Mapped[str] = mapped_column(Text)  # текст правила
+    category: Mapped[str] = mapped_column(
+        String(32), default="tone"
+    )  # tone/format/privacy/memory/agent
+    is_safe: Mapped[bool] = mapped_column(
+        Boolean, default=False
+    )  # безопасное → авто-применить
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class InstructionEvent(Base):
+    """Событие — когда пользователь дал обратную связь."""
+
+    __tablename__ = "instruction_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    raw_text: Mapped[str] = mapped_column(Text)  # что сказал пользователь
+    detected_rule: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # какое правило извлекли
+    action: Mapped[str] = mapped_column(
+        String(16), default="detected"
+    )  # detected/applied/asked/ignored
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

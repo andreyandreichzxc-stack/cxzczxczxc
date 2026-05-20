@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, or_, select, text as sql_text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -18,6 +18,7 @@ from src.db.models import (
     ContactProfile,
     ConversationState,
     Folder,
+    LlmKeySlot,
     Memory,
     MemoryCandidate,
     MemoryCluster,
@@ -131,6 +132,104 @@ async def get_api_keys(session: AsyncSession, user: User, provider: str) -> list
     if not raw:
         return []
     return [k.strip() for k in raw.split(",") if k.strip()]
+
+
+# ─── LlmKeySlot CRUD ────────────────────────────────────────────────
+
+
+async def add_key_slot(
+    session: AsyncSession,
+    user: User,
+    provider: str,
+    key: str,
+    *,
+    purpose: str = "main",
+    label: str | None = None,
+    priority: int = 0,
+) -> LlmKeySlot:
+    """Добавляет слот ключа."""
+    slot = LlmKeySlot(
+        user_id=user.id,
+        provider=provider,
+        purpose=purpose,
+        label=label,
+        key_enc=encrypt(key),
+        priority=priority,
+    )
+    session.add(slot)
+    await session.flush()
+    return slot
+
+
+async def list_key_slots(
+    session: AsyncSession,
+    user: User,
+    provider: str | None = None,
+    purpose: str | None = None,
+) -> list[LlmKeySlot]:
+    """Список слотов с фильтрацией."""
+    q = select(LlmKeySlot).where(LlmKeySlot.user_id == user.id)
+    if provider:
+        q = q.where(LlmKeySlot.provider == provider)
+    if purpose:
+        q = q.where(LlmKeySlot.purpose == purpose)
+    q = q.order_by(LlmKeySlot.priority.desc())
+    r = await session.execute(q)
+    return list(r.scalars().all())
+
+
+async def get_active_keys(
+    session: AsyncSession,
+    user: User,
+    provider: str,
+    purpose: str = "main",
+) -> list[LlmKeySlot]:
+    """Активные (enabled, не в кулдауне) ключи для провайдера и назначения."""
+    now = datetime.now(timezone.utc)
+    q = (
+        select(LlmKeySlot)
+        .where(
+            LlmKeySlot.user_id == user.id,
+            LlmKeySlot.provider == provider,
+            LlmKeySlot.purpose == purpose,
+            LlmKeySlot.enabled == True,
+            or_(LlmKeySlot.cooldown_until.is_(None), LlmKeySlot.cooldown_until <= now),
+        )
+        .order_by(LlmKeySlot.priority.desc())
+    )
+    r = await session.execute(q)
+    return list(r.scalars().all())
+
+
+async def mark_key_failure(
+    session: AsyncSession,
+    slot_id: int,
+    error_msg: str,
+    cooldown_sec: int = 120,
+) -> None:
+    """Помечает ключ как упавший с кулдауном."""
+    slot = await session.get(LlmKeySlot, slot_id)
+    if slot:
+        slot.failure_count = (slot.failure_count or 0) + 1
+        slot.last_error = error_msg[:256]
+        slot.last_error_at = datetime.now(timezone.utc)
+        slot.cooldown_until = datetime.now(timezone.utc) + timedelta(
+            seconds=cooldown_sec
+        )
+        await session.flush()
+
+
+async def mark_key_used(session: AsyncSession, slot_id: int) -> None:
+    """Инкремент счётчика использования."""
+    slot = await session.get(LlmKeySlot, slot_id)
+    if slot:
+        slot.usage_count = (slot.usage_count or 0) + 1
+        slot.cooldown_until = None
+        slot.last_error = None
+        await session.flush()
+
+
+# ─── Contacts ────────────────────────────────────────────────────────
 
 
 async def upsert_contact(

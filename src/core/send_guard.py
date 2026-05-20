@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from src.core.temporal_layers import utc_naive, utcnow_naive
 from src.db.session import get_session
 from src.db.repo import (
     get_or_create_user,
@@ -15,7 +16,6 @@ from src.db.repo import (
 )
 
 logger = logging.getLogger(__name__)
-UTC_NAIVE = lambda: datetime.now(timezone.utc).replace(tzinfo=None)
 
 _undo_buffer: dict[int, list] = {}
 
@@ -43,7 +43,7 @@ async def build_send_guard(
     telegram_id: int, peer_id: int, draft_text: str = ""
 ) -> SendGuardResult:
     result = SendGuardResult(risk_level="low")
-    now = UTC_NAIVE()
+    now = utcnow_naive()
 
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
@@ -58,7 +58,7 @@ async def build_send_guard(
             and m.sentiment == "negative"
             and m.is_active
             and m.created_at
-            and (now - m.created_at).days < 14
+            and (now - utc_naive(m.created_at)).days < 14
         ]
         if neg:
             result.risk_level = "high"
@@ -71,7 +71,7 @@ async def build_send_guard(
             prof = await get_contact_profile(session, owner, peer_id)
             if prof:
                 if prof.communication_style:
-                    result.memory_hints.append(
+                    result.profile_hints.append(
                         f"Стиль: {prof.communication_style[:60]}"
                     )
                 if prof.communication_dos:

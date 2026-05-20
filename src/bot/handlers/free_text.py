@@ -20,6 +20,7 @@ from src.config import settings as app_settings
 from src.core.agent import route_intent
 from src.core.chat_service import load_chat
 from src.core.maestro import run_pipeline
+from src.core.smart_autorouter import make_plan, RoutePurpose
 from src.core.commitment_extractor import extract_and_save_commitments
 from src.core.contact_resolver import resolve, resolve_with_llm
 from src.core.news import build_news_digest
@@ -247,94 +248,23 @@ async def _execute_intent(
                 action = await create_pending_action(
                     session, user_id=owner.id, kind="send_message", payload=payload
                 )
-                # подгружаем факты о собеседнике
-                facts_hint = ""
-                profile_hint = ""
-                neg_warning = ""
+                guard_hint = ""
                 if target.peer_id:
-                    contact_facts: list = []
                     try:
-                        from src.core.memory_recall import recall, format_recall_human
+                        from src.core.send_guard import build_send_guard
 
-                        contact_facts_result = await recall(
-                            owner.telegram_id,
-                            contact_id=target.peer_id,
-                            query=text[:200],
-                            limit=3,
-                            include_self=False,
-                            include_pinned=False,
-                            include_tasks=False,
+                        guard = await build_send_guard(
+                            owner.telegram_id, target.peer_id, text
                         )
-                        if contact_facts_result.facts:
-                            fact_lines = [
-                                f"{rf.reason}: {rf.fact[:60]}"
-                                for rf in contact_facts_result.facts
-                            ]
-                            facts_hint = "\n\n📝 О собеседнике: " + "; ".join(
-                                fact_lines
-                            )
+                        if guard.formatted_html:
+                            guard_hint = "\n\n" + guard.formatted_html
                     except Exception:
-                        pass
-
-                    # подгружаем профиль (стиль, dos/donts)
-                    try:
-                        profile = await get_contact_profile(
-                            session, owner, target.peer_id
-                        )
-                        if profile:
-                            hints = []
-                            if profile.communication_style:
-                                hints.append(profile.communication_style)
-                            if profile.communication_dos:
-                                import json as _json
-
-                                dos = (
-                                    _json.loads(profile.communication_dos)
-                                    if profile.communication_dos.startswith("[")
-                                    else [profile.communication_dos]
-                                )
-                                hints.append(f"✅ {', '.join(dos[:3])}")
-                            if profile.communication_donts:
-                                import json as _json
-
-                                donts = (
-                                    _json.loads(profile.communication_donts)
-                                    if profile.communication_donts.startswith("[")
-                                    else [profile.communication_donts]
-                                )
-                                hints.append(f"❌ {', '.join(donts[:3])}")
-                            if hints:
-                                profile_hint = "\n\n👤 Профиль: " + " | ".join(hints)
-                    except Exception:
-                        pass
-
-                    # Негативные факты о контакте — предупреждение
-                    try:
-                        from src.core.temporal_layers import utc_naive, utcnow_naive
-
-                        now = utcnow_naive()
-                        neg_mems = await list_memories(
-                            session, owner, contact_id=target.peer_id
-                        )
-                        recent_neg = [
-                            m
-                            for m in neg_mems
-                            if m.sentiment == "negative"
-                            and m.created_at
-                            and (now - utc_naive(m.created_at)).days < 7
-                        ]
-                        if recent_neg:
-                            neg_warning = (
-                                "\n\n⚠️ <b>Внимание:</b> за последнюю неделю негативные факты: "
-                                + "; ".join(m.fact[:50] for m in recent_neg[:2])
-                            )
-                    except Exception:
-                        logger.warning("negative memory warning failed", exc_info=True)
+                        logger.warning("send guard failed", exc_info=True)
 
             await message.answer(
                 f"🤔 <b>Готов отправить</b>\n\n"
                 f"→ <b>Кому:</b> {target.label()}\n"
-                f"→ <b>Текст:</b>\n{text}{facts_hint}{neg_warning}{profile_hint}",
+                f"→ <b>Текст:</b>\n{text}{guard_hint}",
                 reply_markup=_confirm_keyboard(action.id),
             )
         else:
@@ -687,6 +617,62 @@ async def _process_text(
         memory_context = format_recall_for_prompt(recall_result)
     except Exception:
         pass
+
+    # Adaptive instructions — проверяем не инструкция ли это
+    try:
+        from src.core.adaptive_instructions import detect_instruction, apply_instruction
+
+        instr = await detect_instruction(raw, owner.telegram_id)
+        if instr:
+            from src.db.models import InstructionCandidate, InstructionEvent
+
+            async with get_session() as session:
+                owner_db = await get_or_create_user(session, owner.telegram_id)
+                event = InstructionEvent(
+                    user_id=owner_db.id,
+                    raw_text=raw[:500],
+                    detected_rule=instr["rule"],
+                    action=instr["action"],
+                )
+                session.add(event)
+                if instr["is_safe"]:
+                    await apply_instruction(owner.telegram_id, instr["rule"])
+                    await message.answer(f"✅ Понял! Больше не буду {instr['rule']}.")
+                    await session.flush()
+                    return
+                else:
+                    candidate = InstructionCandidate(
+                        user_id=owner_db.id,
+                        rule=instr["rule"],
+                        category=instr["category"],
+                        is_safe=False,
+                    )
+                    session.add(candidate)
+                    await session.flush()
+                    await message.answer(
+                        f"🤔 Понял: «{instr['rule']}». Применить это правило? (да/нет)"
+                    )
+                    return
+    except Exception:
+        pass  # не ломаем основной flow
+
+    # Smart AutoRouter — оркестрация
+    router_plan = await make_plan(
+        raw,
+        owner.telegram_id,
+        provider_available=provider is not None,
+        heavy_available=owner.settings.use_heavy_model if owner.settings else True,
+    )
+    if router_plan.tasks:
+        t0 = router_plan.tasks[0]
+        logger.debug(
+            "AutoRouter plan: risk=%s purpose=%s heavy=%s cache_ttl=%d agents=%s",
+            t0.risk.value,
+            t0.purpose.value,
+            t0.heavy,
+            t0.cache_ttl,
+            t0.need_agents or "—",
+        )
 
     # Сначала пробуем Maestro + агенты — полный пайплайн
     try:

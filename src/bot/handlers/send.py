@@ -177,9 +177,18 @@ async def _create_and_confirm(
         action = await create_pending_action(
             session, user_id=owner.id, kind="send_message", payload=payload
         )
+    guard_hint = ""
+    try:
+        from src.core.send_guard import build_send_guard
+
+        guard = await build_send_guard(owner_telegram_id, peer_id, text)
+        if guard.formatted_html:
+            guard_hint = "\n\n" + guard.formatted_html
+    except Exception:
+        logger.warning("send guard failed", exc_info=True)
 
     await message.answer(
-        f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{text}\n\n<i>Подтверди отправку 👇</i>",
+        f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{text}{guard_hint}\n\n<i>Подтверди отправку 👇</i>",
         reply_markup=_confirm_keyboard(action.id),
     )
 
@@ -196,6 +205,15 @@ async def cb_pick(callback: CallbackQuery, state: FSMContext) -> None:
         owner = await get_or_create_user(session, callback.from_user.id)
         contact = await get_contact(session, owner, peer_id)
     label = contact.display_name if contact else str(peer_id)
+    guard_hint = ""
+    try:
+        from src.core.send_guard import build_send_guard
+
+        guard = await build_send_guard(callback.from_user.id, peer_id, text)
+        if guard.formatted_html:
+            guard_hint = "\n\n" + guard.formatted_html
+    except Exception:
+        logger.warning("send guard failed", exc_info=True)
 
     payload = json.dumps({"peer_id": peer_id, "text": text}, ensure_ascii=False)
     async with get_session() as session:
@@ -209,7 +227,7 @@ async def cb_pick(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.edit_text(
             f"🤔 <b>Готов отправить</b>\n\n"
             f"→ <b>Кому:</b> {label}\n"
-            f"→ <b>Текст:</b>\n{text}",
+            f"→ <b>Текст:</b>\n{text}{guard_hint}",
             reply_markup=_confirm_keyboard(action.id),
         )
     await callback.answer()
@@ -262,10 +280,19 @@ async def step_edit(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         contact = await get_contact(session, owner, peer_id)
     label = contact.display_name if contact else str(peer_id)
+    guard_hint = ""
+    try:
+        from src.core.send_guard import build_send_guard
+
+        guard = await build_send_guard(message.from_user.id, peer_id, new_text)
+        if guard.formatted_html:
+            guard_hint = "\n\n" + guard.formatted_html
+    except Exception:
+        logger.warning("send guard failed", exc_info=True)
 
     await state.clear()
     await message.answer(
-        f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{new_text}",
+        f"🤔 <b>Готов отправить</b>\n\n→ <b>Кому:</b> {label}\n→ <b>Текст:</b>\n{new_text}{guard_hint}",
         reply_markup=_confirm_keyboard(action_id),
     )
 

@@ -579,6 +579,24 @@ async def cb_pattern_action(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.message(Command("instructions"))
+async def cmd_instructions(message: Message) -> None:
+    from src.core.adaptive_instructions import get_active_rules
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+    rules = await get_active_rules(message.from_user.id)
+    if not rules:
+        await message.answer(
+            "У тебя нет активных правил. Скажи что-то вроде «отвечай короче» или «не используй смайлики»."
+        )
+        return
+    lines = ["<b>📋 Активные правила:</b>", ""]
+    for i, r in enumerate(rules, 1):
+        lines.append(f"{i}. {r}")
+    await message.answer("\n".join(lines))
+
+
 @router.message(Command("tag"))
 async def cmd_tag(message: Message) -> None:
     """Проставить теги всем нетэгированным фактам."""

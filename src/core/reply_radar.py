@@ -15,10 +15,9 @@ from src.db.repo import (
     list_memories,
 )
 from src.db.models import ConversationState
-from sqlalchemy import select
+from src.core.temporal_layers import utc_naive, utcnow_naive
 
 logger = logging.getLogger(__name__)
-UTC_NAIVE = lambda: datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 @dataclass
@@ -34,42 +33,39 @@ class RadarItem:
     latest_snippet: str = ""
     archetype: str | None = None
     reply_window: str = ""  # "вечером 19-21" — из habit_tracker
+    suggested_action: str = "reply"  # reply | draft | wait | check
 
 
 async def collect_reply_radar(owner_id: int, limit: int = 5) -> list[RadarItem]:
     """Собирает приоритизированный список диалогов для ответа."""
     items = []
-    now = UTC_NAIVE()
+    now = utcnow_naive()
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
-        # Только waiting_reply, исключаем snoozed
         convos = await list_active_conversations(
             session, owner, status="waiting_reply", limit=30
         )
-        snooze_field = getattr(ConversationState, "radar_snoozed_until", None)
+        mems = await list_memories(session, owner)
+        commits = await list_open_commitments(session, owner)
 
         for conv in convos:
-            # Проверка snooze
-            if snooze_field is not None:
-                stmt = select(ConversationState).where(ConversationState.id == conv.id)
-                res = await session.execute(stmt)
-                full_conv = res.scalar_one_or_none()
-                if full_conv and getattr(full_conv, "radar_snoozed_until", None):
-                    if full_conv.radar_snoozed_until > now:
-                        continue
+            snoozed_until = getattr(conv, "radar_snoozed_until", None)
+            if snoozed_until and utc_naive(snoozed_until) > now:
+                continue
 
             # Проверка: владелец ещё не ответил
-            if conv.last_outgoing_at and conv.last_incoming_at:
-                if conv.last_outgoing_at >= conv.last_incoming_at:
+            if not conv.last_incoming_at:
+                continue
+            last_incoming = utc_naive(conv.last_incoming_at)
+            if conv.last_outgoing_at:
+                if utc_naive(conv.last_outgoing_at) >= last_incoming:
                     continue
 
             contact = await get_contact(session, owner, conv.peer_id)
             name = contact.display_name if contact else str(conv.peer_id)
 
             # Возраст ожидания (часы)
-            waiting_hours = 0
-            if conv.last_incoming_at:
-                waiting_hours = (now - conv.last_incoming_at).total_seconds() / 3600
+            waiting_hours = (now - last_incoming).total_seconds() / 3600
 
             # --- SCORING ---
             score = 0
@@ -84,21 +80,19 @@ async def collect_reply_radar(owner_id: int, limit: int = 5) -> list[RadarItem]:
             score += unread_score
 
             # Негативные факты / tension
-            mems = await list_memories(session, owner)
             recent_neg = [
                 m
                 for m in mems
                 if m.contact_id == conv.peer_id
                 and m.sentiment == "negative"
                 and m.created_at
-                and (now - m.created_at).days < 14
+                and (now - utc_naive(m.created_at)).days < 14
             ]
             if recent_neg:
                 score += 20
                 reasons.append("недавний негатив")
 
             # Открытые commitments с этим контактом
-            commits = await list_open_commitments(session, owner)
             contact_commits = [
                 c
                 for c in commits
@@ -133,6 +127,7 @@ async def collect_reply_radar(owner_id: int, limit: int = 5) -> list[RadarItem]:
                 risk = "medium"
             else:
                 risk = "low"
+            suggested_action = "draft" if risk in {"high", "medium"} else "reply"
 
             # Memory hints (3 факта)
             hints = [
@@ -147,7 +142,6 @@ async def collect_reply_radar(owner_id: int, limit: int = 5) -> list[RadarItem]:
             for m in msgs:
                 if not m.is_outgoing and (m.text or m.transcript):
                     snippet = (m.text or m.transcript or "")[:100]
-                    break
 
             # Reply window (из habit_tracker — если есть)
             reply_window = ""
@@ -182,6 +176,7 @@ async def collect_reply_radar(owner_id: int, limit: int = 5) -> list[RadarItem]:
                     latest_snippet=snippet,
                     archetype=archetype,
                     reply_window=reply_window,
+                    suggested_action=suggested_action,
                 )
             )
 

@@ -27,6 +27,7 @@ from src.db.repo import (
 from src.core.reply_radar import collect_reply_radar, format_radar, RadarItem
 from src.core.memory_health import calculate_health_score, format_health_compact
 from src.core.memory_fuel import get_fuel_stats, format_fuel_line
+from src.core.temporal_layers import utc_naive, utcnow_naive
 
 logger = logging.getLogger(__name__)
 router = Router(name="today_cmd")
@@ -67,14 +68,17 @@ async def cmd_today(message: Message):
 
         # Commitments
         commits = await list_open_commitments(session, owner)
-        now = datetime.now(timezone.utc)
-        overdue = [c for c in commits if c.deadline_at and c.deadline_at < now][:3]
+        now = utcnow_naive()
+        overdue = [
+            c for c in commits if c.deadline_at and utc_naive(c.deadline_at) < now
+        ][:3]
         today = [
             c
             for c in commits
             if c.deadline_at
-            and c.deadline_at >= now
-            and c.deadline_at <= now.replace(hour=23, minute=59, second=59)
+            and utc_naive(c.deadline_at) >= now
+            and utc_naive(c.deadline_at)
+            <= now.replace(hour=23, minute=59, second=59)
         ][:3]
 
         # Memory inbox
@@ -204,18 +208,19 @@ async def cb_radar_why(callback: CallbackQuery):
 async def cb_radar_snooze(callback: CallbackQuery):
     peer_id = int(callback.data.split(":")[2])
     async with get_session() as session:
-        from sqlalchemy import select, update
+        from sqlalchemy import select
         from src.db.models import ConversationState
 
+        owner = await get_or_create_user(session, callback.from_user.id)
         res = await session.execute(
             select(ConversationState).where(
-                ConversationState.user_id == callback.from_user.id,
+                ConversationState.user_id == owner.id,
                 ConversationState.peer_id == peer_id,
             )
         )
         conv = res.scalar_one_or_none()
         if conv:
-            conv.radar_snoozed_until = datetime.now(timezone.utc) + timedelta(hours=24)
+            conv.radar_snoozed_until = utcnow_naive() + timedelta(hours=24)
             await session.commit()
     await callback.answer("Отложено на 24ч")
     if callback.message:

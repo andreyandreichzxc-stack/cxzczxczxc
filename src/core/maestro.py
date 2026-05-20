@@ -166,6 +166,17 @@ async def process(
             system + "\n\nРелевантный контекст из истории переписок:\n" + rag_context
         )
 
+    # Активные правила
+    if owner_id is not None:
+        try:
+            from src.core.adaptive_instructions import format_rules_for_prompt
+
+            rules_hint = await format_rules_for_prompt(owner_id)
+            if rules_hint:
+                system += rules_hint
+        except Exception:
+            pass
+
     try:
         raw = await provider.chat(
             [
