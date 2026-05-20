@@ -9,7 +9,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.crypto import decrypt, encrypt
-from src.core.vector_store import VectorStore
+from src.core.actions.vector_store import VectorStore
 from src.db.models import (
     AdaptivePersona,
     ApiKey,
@@ -919,7 +919,7 @@ async def add_memory(
     всегда создаётся новая запись.
     Если embedding передан, индексирует факт в Qdrant для будущих проверок.
     """
-    from src.core.stats_cache import invalidate
+    from src.core.actions.stats_cache import invalidate
 
     fact = fact.strip()
     if len(fact) < 3:
@@ -959,7 +959,7 @@ async def add_memory(
         # --- Уровень 2: семантическая дедупликация через Qdrant ---
         if embedding is not None and vector_store_obj is not None:
             # Проверяем кэш эмбеддингов (на случай если embed уже закэширован)
-            from src.core.embedding_cache import get as _cache_get
+            from src.core.actions.embedding_cache import get as _cache_get
 
             # Ищем кандидатов с запасом (порог 0.7)
             similar = await vector_store_obj.search_similar_memories(
@@ -1055,7 +1055,7 @@ async def list_memories(
 
 
 async def delete_memory(session: AsyncSession, user: User, memory_id: int) -> bool:
-    from src.core.stats_cache import invalidate
+    from src.core.actions.stats_cache import invalidate
 
     m = await session.get(Memory, memory_id)
     if m is None or m.user_id != user.id:
@@ -1263,7 +1263,7 @@ async def find_similar_memories(
 
 async def get_memory_stats(session: AsyncSession, user: User) -> dict:
     """Статистика по памяти (кэшируется на 5 минут)."""
-    from src.core.stats_cache import get_cached, set_cache
+    from src.core.actions.stats_cache import get_cached, set_cache
 
     cache_key = f"mem_stats:{user.id}"
     cached = await get_cached(cache_key)

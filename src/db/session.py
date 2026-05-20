@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 engine = create_async_engine(settings.database_url, future=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
+# Alembic is configured for schema migrations (alembic/).
+# Future model changes should be captured via:
+#   alembic revision --autogenerate -m "description"
+# The ALTER TABLE blocks below handle legacy migrations for existing DBs.
 
 # SQLite FTS5: virtual table + триггеры синхронизации с messages.
 # Хранит rowid = messages.id.

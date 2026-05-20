@@ -17,22 +17,22 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
 from src.config import settings
-from src.core.agent import route_intent
-from src.core.chat_service import load_chat
-from src.core.maestro import run_pipeline
-from src.core.smart_autorouter import make_plan, RoutePurpose, ResponseMode
-from src.core.action_guard import guard_intent
-from src.core.commitment_extractor import extract_and_save_commitments
-from src.core.contact_resolver import resolve, resolve_with_llm
-from src.core.news import build_news_digest
-from src.core.summarizer import catchup, draft_reply, summarize_chat
-from src.core import conversation_context as ctx_store
-from src.core.text_sanitizer import sanitize_html
-from src.core.timeutil import (
+from src.core.intelligence.agent import route_intent
+from src.core.contacts.chat_service import load_chat
+from src.core.intelligence.maestro import run_pipeline
+from src.core.intelligence.smart_autorouter import make_plan, RoutePurpose, ResponseMode
+from src.core.actions.action_guard import guard_intent
+from src.core.actions.commitment_extractor import extract_and_save_commitments
+from src.core.contacts.contact_resolver import resolve, resolve_with_llm
+from src.core.scheduling.news import build_news_digest
+from src.core.intelligence.summarizer import catchup, draft_reply, summarize_chat
+from src.core.memory import conversation_context as ctx_store
+from src.core.infra.text_sanitizer import sanitize_html
+from src.core.infra.timeutil import (
     fmt_local,
     now_in_tz,
 )
-from src.core.transcription import transcription_service
+from src.core.infra.transcription import transcription_service
 from src.db.repo import (
     add_commitment,
     get_api_key,
@@ -46,8 +46,8 @@ from src.db.repo import (
 )
 from src.db.session import get_session
 from src.llm.router import build_provider
-from src.core.trajectory import actions_from_intent, record_trajectory
-from src.core.skills import build_skill_index, record_skill_usages
+from src.core.actions.trajectory import actions_from_intent, record_trajectory
+from src.core.intelligence.skills import build_skill_index, record_skill_usages
 from src.userbot import get_active_telethon_client, get_userbot_manager
 from src.userbot.manager import UserbotManager
 
@@ -120,7 +120,7 @@ async def _execute_intent(
         if not items:
             await message.answer("🎉 Открытых обязательств нет")
             return
-        from src.core.timeutil import fmt_local
+        from src.core.infra.timeutil import fmt_local
 
         lines = []
         for c in items[:30]:
@@ -166,7 +166,7 @@ async def _execute_intent(
                 guard_hint = ""
                 if target.peer_id:
                     try:
-                        from src.core.send_guard import build_send_guard
+                        from src.core.contacts.send_guard import build_send_guard
 
                         guard = await build_send_guard(
                             owner.telegram_id, target.peer_id, text
@@ -370,7 +370,7 @@ async def _execute_intent(
 
 
 async def _find_chats_and_offer(message, client, query: str, action: str) -> None:
-    from src.core.chat_finder import smart_find
+    from src.core.contacts.chat_finder import smart_find
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -456,7 +456,10 @@ async def _process_text(
 
     # Adaptive instructions — проверяем не инструкция ли это
     try:
-        from src.core.adaptive_instructions import detect_instruction, apply_instruction
+        from src.core.intelligence.adaptive_instructions import (
+            detect_instruction,
+            apply_instruction,
+        )
 
         instr = await detect_instruction(raw, owner_telegram_id)
         if instr:
@@ -499,7 +502,7 @@ async def _process_text(
 
     # Adaptive persona — авто-подстройка стиля
     try:
-        from src.core.adaptive_persona import (
+        from src.core.intelligence.adaptive_persona import (
             detect_persona_change,
             apply_persona_changes,
         )
@@ -570,11 +573,16 @@ async def _process_text(
         # Собираем контекст через prompt_assembler (Block 4)
         fast_system = "Ты ассистент. Ответь коротко."
         try:
-            from src.core.prompt_assembler import AssemblyContext, prompt_assembler
+            from src.core.intelligence.prompt_assembler import (
+                AssemblyContext,
+                prompt_assembler,
+            )
 
             persona_block = ""
             try:
-                from src.core.adaptive_persona import format_persona_for_prompt
+                from src.core.intelligence.adaptive_persona import (
+                    format_persona_for_prompt,
+                )
 
                 persona_block = await format_persona_for_prompt(owner_telegram_id) or ""
             except Exception:
@@ -600,7 +608,9 @@ async def _process_text(
             if router_plan.self_profile:
                 fast_context_parts.append(router_plan.self_profile)
             try:
-                from src.core.adaptive_persona import format_persona_for_prompt
+                from src.core.intelligence.adaptive_persona import (
+                    format_persona_for_prompt,
+                )
 
                 persona_hint = await format_persona_for_prompt(owner_telegram_id)
                 if persona_hint:
@@ -1004,7 +1014,7 @@ async def _exec_add_reminders_from_chat(intent, message, userbot_manager) -> Non
         await message.answer("Сначала /login.")
         return
 
-    from src.core.contact_resolver import resolve
+    from src.core.contacts.contact_resolver import resolve
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -1094,8 +1104,8 @@ async def _exec_show_inbox(intent, message, userbot_manager) -> None:
 
 async def _exec_show_self(intent: dict, message: Message) -> None:
     """Показать что бот знает о пользователе (self-profile + recall + fuel)."""
-    from src.core.memory_fuel import get_fuel_stats, format_depleted_contacts
-    from src.core.memory_recall import recall, format_recall_human
+    from src.core.memory.memory_fuel import get_fuel_stats, format_depleted_contacts
+    from src.core.memory.memory_recall import recall, format_recall_human
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -1164,7 +1174,10 @@ async def _exec_full_analysis(intent, message) -> None:
             if not provider:
                 await status_msg.edit_text("❌ Нет LLM провайдера.")
                 return
-        from src.core.full_analyzer import run_full_analysis, format_analysis_report
+        from src.core.infra.full_analyzer import (
+            run_full_analysis,
+            format_analysis_report,
+        )
 
         result = await run_full_analysis(
             owner_id=message.from_user.id,

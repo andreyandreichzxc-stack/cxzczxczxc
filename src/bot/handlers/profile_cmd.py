@@ -13,8 +13,8 @@ from aiogram.types import (
 )
 
 from src.bot.filters import OwnerOnly
-from src.core.contact_resolver import resolve
-from src.core.profile_builder import build_profile
+from src.core.contacts.contact_resolver import resolve
+from src.core.contacts.profile_builder import build_profile
 from src.db.repo import (
     get_contact,
     get_contact_profile,
@@ -56,7 +56,7 @@ async def cmd_me(message: Message, command: CommandObject) -> None:
                 await message.answer("\u274c Нет LLM-провайдера. Настрой /settings.")
                 return
 
-            from src.core.self_profile_builder import build_self_profile
+            from src.core.contacts.self_profile_builder import build_self_profile
 
             profile = await build_self_profile(message.from_user.id, provider)
             if profile:

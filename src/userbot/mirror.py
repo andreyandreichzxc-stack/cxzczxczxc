@@ -11,8 +11,8 @@ from telethon import TelegramClient, events
 from telethon.tl.custom import Message as TgMessage
 from telethon.tl.types import User as TgUser
 
-from src.core.notification_queue import notification_queue
-from src.core.notifier import notifier
+from src.core.scheduling.notification_queue import notification_queue
+from src.core.infra.notifier import notifier
 from src.db.repo import (
     get_contact,
     get_or_create_user,
@@ -94,7 +94,7 @@ async def _process_incoming_bg(
 
     Открывает собственную сессию БД, не роняет обработчик при ошибках.
     """
-    from src.core.inbox_manager import InboxAction, process_incoming
+    from src.core.actions.inbox_manager import InboxAction, process_incoming
 
     try:
         async with get_session() as _im_session:
@@ -219,7 +219,7 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
 
                 # детекция фраз отсутствия в исходящих сообщениях
                 if msg.out and msg.text:
-                    from src.core.absence_detector import detect_absence_phrases
+                    from src.core.scheduling.absence_detector import detect_absence_phrases
 
                     status, message_text = detect_absence_phrases(msg.text)
                     if status:

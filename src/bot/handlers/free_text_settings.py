@@ -5,8 +5,8 @@ import logging
 from aiogram import Router
 from aiogram.types import Message
 
-from src.core.text_sanitizer import sanitize_html
-from src.core.timeutil import HM_RE, tz_short
+from src.core.infra.text_sanitizer import sanitize_html
+from src.core.infra.timeutil import HM_RE, tz_short
 from src.db.repo import (
     add_news_topic,
     delete_news_topic,

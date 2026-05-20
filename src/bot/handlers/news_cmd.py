@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
-from src.core.news import build_news_digest
+from src.core.scheduling.news import build_news_digest
 from src.db.repo import (
     get_or_create_user,
     list_contacts,

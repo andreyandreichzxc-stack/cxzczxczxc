@@ -15,9 +15,9 @@ os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
 
 import pytest
 
-from src.core.smart_autorouter import make_plan, ResponseMode
-from src.core.text_sanitizer import sanitize_html
-from src.core.agent import route_intent
+from src.core.intelligence.smart_autorouter import make_plan, ResponseMode
+from src.core.infra.text_sanitizer import sanitize_html
+from src.core.intelligence.agent import route_intent
 from src.llm.base import ChatMessage
 
 

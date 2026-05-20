@@ -116,7 +116,7 @@ class UserbotManager:
                             "Saved session for %s is not authorized anymore",
                             user.telegram_id,
                         )
-                        from src.core.notification_queue import notification_queue
+                        from src.core.scheduling.notification_queue import notification_queue
 
                         await notification_queue.enqueue(
                             topic=f"userbot:{user.telegram_id}",

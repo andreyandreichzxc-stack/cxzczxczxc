@@ -7,10 +7,10 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import or_, select
 
 from src.bot.filters import OwnerOnly
-from src.core.chat_service import load_chat
-from src.core.contact_resolver import resolve
-from src.core.indexer import index_chat
-from src.core.vector_store import vector_store
+from src.core.contacts.chat_service import load_chat
+from src.core.contacts.contact_resolver import resolve
+from src.core.actions.indexer import index_chat
+from src.core.actions.vector_store import vector_store
 from src.db.models import Message as DBMessage
 from src.db.repo import (
     FtsHit,

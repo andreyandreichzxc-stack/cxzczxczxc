@@ -4,7 +4,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
-from src.core.timeutil import fmt_local
+from src.core.infra.timeutil import fmt_local
 from src.db.models import Commitment
 from src.db.repo import (
     add_memory,

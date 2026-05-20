@@ -11,7 +11,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from src.core.text_sanitizer import sanitize_html
+from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import (
     add_memory,
     add_memory_candidate,
@@ -56,7 +56,7 @@ async def _exec_store_memory(intent, message) -> None:
             owner = await get_or_create_user(session, message.from_user.id)
         client = get_active_telethon_client(message.from_user.id)
         if client is not None:
-            from src.core.contact_resolver import resolve
+            from src.core.contacts.contact_resolver import resolve
 
             candidates = await resolve(client, owner, contact_name)
             if candidates:
@@ -107,7 +107,7 @@ async def _exec_forget_memory(intent, message) -> None:
             owner = await get_or_create_user(session, message.from_user.id)
         client = get_active_telethon_client(message.from_user.id)
         if client is not None:
-            from src.core.contact_resolver import resolve
+            from src.core.contacts.contact_resolver import resolve
 
             candidates = await resolve(client, owner, contact_name)
             if candidates:
@@ -143,7 +143,7 @@ async def _exec_list_memories(intent, message) -> None:
             owner = await get_or_create_user(session, message.from_user.id)
         client = get_active_telethon_client(message.from_user.id)
         if client is not None:
-            from src.core.contact_resolver import resolve
+            from src.core.contacts.contact_resolver import resolve
 
             candidates = await resolve(client, owner, contact_name)
             if candidates:
@@ -185,7 +185,7 @@ async def _exec_extract_memories(intent, message, userbot_manager) -> None:
         await message.answer("Сначала /login.")
         return
 
-    from src.core.contact_resolver import resolve
+    from src.core.contacts.contact_resolver import resolve
 
     candidates = await resolve(client, owner, contact_name)
     if not candidates:
@@ -194,8 +194,8 @@ async def _exec_extract_memories(intent, message, userbot_manager) -> None:
 
     peer_id = candidates[0].peer_id
 
-    from src.core.chat_service import load_chat, message_to_text
-    from src.core.memory_queue import enqueue, MemoryJob
+    from src.core.contacts.chat_service import load_chat, message_to_text
+    from src.core.memory.memory_queue import enqueue, MemoryJob
 
     # Загружаем сообщения и строим транскрипт
     messages = await load_chat(client, message.from_user.id, peer_id, limit=100)
@@ -366,7 +366,7 @@ async def cb_memq_explain(callback: CallbackQuery) -> None:
         if client is not None:
             async with get_session() as session:
                 owner = await get_or_create_user(session, callback.from_user.id)
-            from src.core.contact_resolver import resolve
+            from src.core.contacts.contact_resolver import resolve
 
             candidates = await resolve(client, owner, contact_name)
             if candidates:

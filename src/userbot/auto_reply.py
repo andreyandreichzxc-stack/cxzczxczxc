@@ -19,14 +19,14 @@ from telethon.tl.types import (
 )
 
 from src.config import settings
-from src.core.chat_service import load_chat, message_to_text
-from src.core.notification_queue import notification_queue
-from src.core.notifier import notifier
-from src.core.style_profile import style_profile_as_prompt_hint
-from src.core.timeutil import get_user_tz, now_in_tz
-from src.core.vector_store import vector_store
+from src.core.contacts.chat_service import load_chat, message_to_text
+from src.core.scheduling.notification_queue import notification_queue
+from src.core.infra.notifier import notifier
+from src.core.contacts.style_profile import style_profile_as_prompt_hint
+from src.core.infra.timeutil import get_user_tz, now_in_tz
+from src.core.actions.vector_store import vector_store
 from src.db.models import AutoReplyLog, User
-from src.core.memory_recall import recall, format_recall_for_prompt
+from src.core.memory.memory_recall import recall, format_recall_for_prompt
 from src.db.repo import (
     add_auto_reply_log,
     get_contact,
@@ -172,7 +172,7 @@ async def _build_reply_text(
 
         # Contact Archetype — вычисляем если ещё не задан
         if contact and contact.archetype is None:
-            from src.core.contact_archetypes import classify_contact
+            from src.core.contacts.contact_archetypes import classify_contact
 
             archetype = await classify_contact(owner_telegram_id, peer_id)
             if archetype:
@@ -262,7 +262,7 @@ async def _build_reply_text(
 
     # Архетип контакта (подсказка для тона)
     if contact_archetype:
-        from src.core.contact_archetypes import archetype_reply_hint
+        from src.core.contacts.contact_archetypes import archetype_reply_hint
 
         hint = archetype_reply_hint(contact_archetype)
         if hint:

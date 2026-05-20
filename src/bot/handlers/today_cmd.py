@@ -24,10 +24,10 @@ from src.db.repo import (
     get_memory_stats,
     list_memory_candidates,
 )
-from src.core.reply_radar import collect_reply_radar, format_radar, RadarItem
-from src.core.memory_health import calculate_health_score, format_health_compact
-from src.core.memory_fuel import get_fuel_stats, format_fuel_line
-from src.core.temporal_layers import utc_naive, utcnow_naive
+from src.core.contacts.reply_radar import collect_reply_radar, format_radar, RadarItem
+from src.core.memory.memory_health import calculate_health_score, format_health_compact
+from src.core.memory.memory_fuel import get_fuel_stats, format_fuel_line
+from src.core.memory.temporal_layers import utc_naive, utcnow_naive
 
 logger = logging.getLogger(__name__)
 router = Router(name="today_cmd")

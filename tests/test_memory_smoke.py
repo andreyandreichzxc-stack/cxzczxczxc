@@ -29,9 +29,9 @@ from src.db.repo import (
     upsert_conversation_state,
     upsert_message,
 )
-from src.core.conflict_predictor import detect_silence_triggers
-from src.core.temporal_layers import get_prompt_facts
-from src.core.memory_checker import _run_decay_and_validation
+from src.core.actions.conflict_predictor import detect_silence_triggers
+from src.core.memory.temporal_layers import get_prompt_facts
+from src.core.memory.memory_checker import _run_decay_and_validation
 
 OWNER_TG_ID = 123456789
 

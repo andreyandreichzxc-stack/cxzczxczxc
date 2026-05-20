@@ -8,8 +8,8 @@ import time
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from src.core.timeutil import HM_RE, is_valid_tz, get_user_tz
-from src.core.trajectory import record_trajectory
+from src.core.infra.timeutil import HM_RE, is_valid_tz, get_user_tz
+from src.core.actions.trajectory import record_trajectory
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
 
@@ -218,7 +218,7 @@ def _parse_iso_to_utc_naive(value, tz_name: str | None = None):
         return None
     try:
         from datetime import datetime, timezone
-        from src.core.timeutil import parse_tz
+        from src.core.infra.timeutil import parse_tz
 
         s = str(value).replace("Z", "+00:00")
         dt = datetime.fromisoformat(s)
@@ -277,7 +277,7 @@ async def _post_turn_optimize(
         try:
             from src.db.session import get_session
             from src.db.repo import get_or_create_user
-            from src.core.instruction_optimizer import instruction_optimizer
+            from src.core.intelligence.instruction_optimizer import instruction_optimizer
 
             async with get_session() as session:
                 owner = await get_or_create_user(session, telegram_id)

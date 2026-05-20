@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
-from src.core.contact_resolver import ContactCandidate, resolve
+from src.core.contacts.contact_resolver import ContactCandidate, resolve
 from src.db.repo import (
     create_pending_action,
     delete_pending_action,
@@ -179,7 +179,7 @@ async def _create_and_confirm(
         )
     guard_hint = ""
     try:
-        from src.core.send_guard import build_send_guard
+        from src.core.contacts.send_guard import build_send_guard
 
         guard = await build_send_guard(owner_telegram_id, peer_id, text)
         if guard.formatted_html:
@@ -207,7 +207,7 @@ async def cb_pick(callback: CallbackQuery, state: FSMContext) -> None:
     label = contact.display_name if contact else str(peer_id)
     guard_hint = ""
     try:
-        from src.core.send_guard import build_send_guard
+        from src.core.contacts.send_guard import build_send_guard
 
         guard = await build_send_guard(callback.from_user.id, peer_id, text)
         if guard.formatted_html:
@@ -282,7 +282,7 @@ async def step_edit(message: Message, state: FSMContext) -> None:
     label = contact.display_name if contact else str(peer_id)
     guard_hint = ""
     try:
-        from src.core.send_guard import build_send_guard
+        from src.core.contacts.send_guard import build_send_guard
 
         guard = await build_send_guard(message.from_user.id, peer_id, new_text)
         if guard.formatted_html:
@@ -319,7 +319,7 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
         await delete_pending_action(session, action_id, user)
 
     # Send Guard — предупреждение перед отправкой
-    from src.core.send_guard import build_send_guard, store_undo
+    from src.core.contacts.send_guard import build_send_guard, store_undo
 
     guard = await build_send_guard(callback.from_user.id, peer_id, text)
     if guard.warnings:
@@ -376,7 +376,7 @@ async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -
 
 @router.callback_query(F.data.startswith("send:undo:"))
 async def cb_undo(callback: CallbackQuery, userbot_manager=None):
-    from src.core.send_guard import get_undo
+    from src.core.contacts.send_guard import get_undo
 
     peer_id = int(callback.data.split(":")[2])
     client = (

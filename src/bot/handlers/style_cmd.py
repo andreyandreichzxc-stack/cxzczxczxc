@@ -3,8 +3,8 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
-from src.core.contact_resolver import resolve
-from src.core.style_profile import update_style_profile_for_contact
+from src.core.contacts.contact_resolver import resolve
+from src.core.contacts.style_profile import update_style_profile_for_contact
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.llm.router import build_provider

@@ -5,7 +5,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
-from src.core.skills import suggest_skills_from_trajectories
+from src.core.intelligence.skills import suggest_skills_from_trajectories
 from src.db.repo import get_or_create_user, list_skills, list_trajectories
 from src.db.session import get_session
 

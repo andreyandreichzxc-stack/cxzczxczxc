@@ -9,7 +9,7 @@ from src.bot.filters import OwnerOnly
 from src.db.session import get_session
 from src.db.repo import get_or_create_user
 from src.llm.router import build_provider
-from src.core.full_analyzer import (
+from src.core.infra.full_analyzer import (
     run_full_analysis,
     format_analysis_report,
     AnalysisProgress,

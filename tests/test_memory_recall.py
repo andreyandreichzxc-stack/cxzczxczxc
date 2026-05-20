@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.db.session import get_session
 from src.db.repo import get_or_create_user, add_memory, add_commitment
-from src.core.memory_recall import recall, format_recall_for_prompt
+from src.core.memory.memory_recall import recall, format_recall_for_prompt
 
 
 def utc_naive():

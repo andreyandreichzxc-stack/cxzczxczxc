@@ -33,7 +33,7 @@ from src.bot.handlers import (
     trajectory_cmd,
 )
 from src.config import settings
-from src.core.notifier import notifier
+from src.core.infra.notifier import notifier
 from src.userbot.manager import UserbotManager
 
 

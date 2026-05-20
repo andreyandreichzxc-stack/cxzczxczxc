@@ -11,8 +11,8 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
-from src.core.contact_resolver import resolve
-from src.core.conflict_resolver import find_conflicts
+from src.core.contacts.contact_resolver import resolve
+from src.core.actions.conflict_resolver import find_conflicts
 from src.db.repo import get_contact, get_or_create_user, list_memories, get_memory_graph
 from src.db.session import get_session
 from src.userbot.manager import UserbotManager
@@ -169,7 +169,7 @@ async def build_explain_text(
                 graph_nodes.extend(nodes)
 
     # 4. Recall причины
-    from src.core.memory_recall import recall
+    from src.core.memory.memory_recall import recall
 
     try:
         explain_result = await recall(

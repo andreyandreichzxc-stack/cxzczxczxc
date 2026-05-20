@@ -18,7 +18,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from src.bot.filters import OwnerOnly
 from src.bot.states import SettingsStates
 from src.config import LLMDefaults
-from src.core.timeutil import HM_RE, TZ_PRESETS, is_valid_tz, tz_short
+from src.core.infra.timeutil import HM_RE, TZ_PRESETS, is_valid_tz, tz_short
 from src.db.repo import get_api_key, get_or_create_user, list_folders, upsert_api_key
 from src.db.session import get_session
 from src.userbot.dialogs import sync_dialogs

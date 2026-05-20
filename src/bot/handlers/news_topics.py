@@ -15,7 +15,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
 from src.bot.states import NewsTopicStates
-from src.core.timeutil import get_user_tz, tz_short
+from src.core.infra.timeutil import get_user_tz, tz_short
 from src.db.repo import (
     add_news_topic,
     delete_news_topic,

@@ -55,7 +55,7 @@ class GeminiProvider:
         return await asyncio.to_thread(_call)
 
     async def embed(self, text: str) -> list[float]:
-        from src.core.embedding_cache import get as cache_get, set as cache_set
+        from src.core.actions.embedding_cache import get as cache_get, set as cache_set
 
         cached = cache_get(text, LLMDefaults.GEMINI_EMBED)
         if cached is not None:
@@ -73,7 +73,7 @@ class GeminiProvider:
         return result
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        from src.core.embedding_cache import get as cache_get, set as cache_set
+        from src.core.actions.embedding_cache import get as cache_get, set as cache_set
 
         if not texts:
             return []

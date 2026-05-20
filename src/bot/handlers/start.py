@@ -10,7 +10,7 @@ from aiogram.types import (
 from src.bot.filters import OwnerOnly
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
-from src.core.timeutil import tz_short
+from src.core.infra.timeutil import tz_short
 
 
 router = Router(name="start")

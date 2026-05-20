@@ -1,6 +1,6 @@
-from src.core.action_guard import guard_intent
-from src.core.context_compressor import compress_maestro_context
-from src.core.prompt_assembler import AssemblyContext, prompt_assembler
+from src.core.actions.action_guard import guard_intent
+from src.core.intelligence.context_compressor import compress_maestro_context
+from src.core.intelligence.prompt_assembler import AssemblyContext, prompt_assembler
 
 
 def test_action_guard_blocks_unknown_intent():

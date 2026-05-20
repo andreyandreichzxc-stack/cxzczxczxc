@@ -5,7 +5,7 @@ from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
 from src.bot.handlers.chat_cmd import _actions_keyboard, _candidates_keyboard
-from src.core.contact_resolver import resolve
+from src.core.contacts.contact_resolver import resolve
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.userbot.manager import UserbotManager

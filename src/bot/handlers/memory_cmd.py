@@ -11,13 +11,13 @@ from aiogram.types import (
 )
 
 from src.bot.filters import OwnerOnly
-from src.core.contact_resolver import resolve
-from src.core.memory_fuel import (
+from src.core.contacts.contact_resolver import resolve
+from src.core.memory.memory_fuel import (
     format_depleted_contacts,
     format_fuel_line,
     get_fuel_stats,
 )
-from src.core.memory_neighbors import format_neighbors, get_neighbors
+from src.core.memory.memory_neighbors import format_neighbors, get_neighbors
 from src.db.models import Commitment, LlmKeySlot, Memory, MemoryCandidate
 from src.db.repo import (
     add_commitment,
@@ -264,7 +264,7 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
     if tag_mode:
         parts = args.split("--tag", 1)
         tag = parts[1].strip().split()[0] if len(parts) > 1 and parts[1].strip() else ""
-        from src.core.memory_tagger import format_tagged, search_by_tag
+        from src.core.memory.memory_tagger import format_tagged, search_by_tag
 
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
@@ -300,7 +300,7 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
 
     if story_mode:
         if contact_id:
-            from src.core.memory_chain import build_chain_narrative
+            from src.core.memory.memory_chain import build_chain_narrative
 
             narrative = await build_chain_narrative(contact_id, message.from_user.id)
             if narrative:
@@ -353,7 +353,7 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
     stat_line = f"🧠 <b>Память{label}</b>: {stats['total']} фактов ({pos} позитивных, {neg} негативных, {neu} нейтральных)\n"
 
     # Индикатор здоровья памяти
-    from src.core.memory_health import calculate_health_score, format_health_compact
+    from src.core.memory.memory_health import calculate_health_score, format_health_compact
 
     health = await calculate_health_score(message.from_user.id)
     health_line = format_health_compact(health)
@@ -485,7 +485,7 @@ async def cb_memory_clear_negative(callback: CallbackQuery) -> None:
 @router.message(Command("health"))
 async def cmd_health(message: Message) -> None:
     """Показать здоровье памяти — единый скоринг 0-100."""
-    from src.core.memory_health import calculate_health_score, format_health
+    from src.core.memory.memory_health import calculate_health_score, format_health
 
     health = await calculate_health_score(message.from_user.id)
     text = format_health(health)
@@ -587,7 +587,7 @@ async def cmd_remember(
 @router.message(Command("habits"))
 async def cmd_habits(message: Message) -> None:
     """Показать обнаруженные привычки на основе повторяющихся фактов."""
-    from src.core.habit_tracker import find_habit_candidates, format_habits
+    from src.core.scheduling.habit_tracker import find_habit_candidates, format_habits
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -600,7 +600,7 @@ async def cmd_habits(message: Message) -> None:
 
 @router.message(Command("insights"))
 async def cmd_insights(message: Message) -> None:
-    from src.core.memory_patterns import detect_patterns, format_insights
+    from src.core.memory.memory_patterns import detect_patterns, format_insights
 
     insights = await detect_patterns(message.from_user.id)
     text, keyboards = format_insights(insights)
@@ -645,7 +645,7 @@ async def cmd_forget(
 @router.message(Command("archetypes"))
 async def cmd_archetypes(message: Message) -> None:
     """Показать архетипы всех контактов."""
-    from src.core.contact_archetypes import (
+    from src.core.contacts.contact_archetypes import (
         classify_all_contacts,
         format_archetype_stats,
     )
@@ -659,7 +659,7 @@ async def cmd_archetypes(message: Message) -> None:
 @router.message(Command("distill"))
 async def cmd_distill(message: Message, userbot_manager: UserbotManager) -> None:
     """Запустить дистилляцию фактов (10+ → 1 summary)."""
-    from src.core.knowledge_distiller import run_distillation
+    from src.core.memory.knowledge_distiller import run_distillation
 
     args = (message.text or "").split()
     contact_name = args[1] if len(args) > 1 else None
@@ -742,7 +742,7 @@ async def cb_pattern_action(callback: CallbackQuery) -> None:
 
 @router.message(Command("instructions"))
 async def cmd_instructions(message: Message) -> None:
-    from src.core.adaptive_instructions import get_active_rules
+    from src.core.intelligence.adaptive_instructions import get_active_rules
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
@@ -761,7 +761,7 @@ async def cmd_instructions(message: Message) -> None:
 @router.message(Command("tag"))
 async def cmd_tag(message: Message) -> None:
     """Проставить теги всем нетэгированным фактам."""
-    from src.core.memory_tagger import tag_all_untagged
+    from src.core.memory.memory_tagger import tag_all_untagged
 
     await message.answer("🏷 Тегирую факты...")
     count = await tag_all_untagged(message.from_user.id)
@@ -786,7 +786,7 @@ async def cb_mem_neighbors(callback: CallbackQuery) -> None:
 @router.message(Command("conflicts"))
 async def cmd_conflicts(message: Message) -> None:
     """Показать и разрешить конфликты в памяти."""
-    from src.core.conflict_resolver import find_conflicts, format_conflicts
+    from src.core.actions.conflict_resolver import find_conflicts, format_conflicts
 
     conflicts = await find_conflicts(message.from_user.id)
     text = format_conflicts(conflicts)
@@ -796,7 +796,7 @@ async def cmd_conflicts(message: Message) -> None:
 @router.message(Command("warnings"))
 async def cmd_warnings(message: Message) -> None:
     """Показать активные предупреждения о риске конфликтов."""
-    from src.core.conflict_predictor import (
+    from src.core.actions.conflict_predictor import (
         detect_silence_triggers,
         format_conflict_warnings,
     )
@@ -943,7 +943,7 @@ async def cb_conflict_resolve(callback: CallbackQuery) -> None:
     positive_id = int(parts[2])
     negative_id = int(parts[3])
     resolution = parts[4]
-    from src.core.conflict_resolver import resolve_conflict
+    from src.core.actions.conflict_resolver import resolve_conflict
 
     success = await resolve_conflict(
         callback.from_user.id, positive_id, negative_id, resolution
@@ -959,7 +959,7 @@ async def cb_conflict_resolve(callback: CallbackQuery) -> None:
 @router.message(Command("clusters"))
 async def cmd_clusters(message: Message) -> None:
     """Показать кластеры памяти."""
-    from src.core.memory_clusterer import rebuild_clusters
+    from src.core.memory.memory_clusterer import rebuild_clusters
     from src.db.repo import get_cluster_members, list_clusters_for_contact
 
     async with get_session() as session:
@@ -983,7 +983,7 @@ async def cmd_clusters(message: Message) -> None:
 @router.message(Command("persona"))
 async def cmd_persona(message: Message) -> None:
     """Показать/сбросить адаптивный профиль личности."""
-    from src.core.adaptive_persona import format_persona_for_prompt
+    from src.core.intelligence.adaptive_persona import format_persona_for_prompt
 
     args = (message.text or "").split()
 

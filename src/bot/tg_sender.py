@@ -6,7 +6,7 @@ import asyncio
 import logging
 from typing import Any
 
-from src.core.text_sanitizer import sanitize_html
+from src.core.infra.text_sanitizer import sanitize_html
 
 logger = logging.getLogger(__name__)
 

@@ -36,7 +36,7 @@ class MistralProvider:
         return resp.choices[0].message.content or ""
 
     async def embed(self, text: str) -> list[float]:
-        from src.core.embedding_cache import get as cache_get, set as cache_set
+        from src.core.actions.embedding_cache import get as cache_get, set as cache_set
 
         cached = cache_get(text, LLMDefaults.MISTRAL_EMBED)
         if cached is not None:
@@ -49,7 +49,7 @@ class MistralProvider:
         return result
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        from src.core.embedding_cache import get as cache_get, set as cache_set
+        from src.core.actions.embedding_cache import get as cache_get, set as cache_set
 
         if not texts:
             return []

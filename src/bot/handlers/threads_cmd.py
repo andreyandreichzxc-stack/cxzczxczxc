@@ -12,8 +12,8 @@ from aiogram.types import (
 )
 
 from src.bot.filters import OwnerOnly
-from src.core.memory_fuel import format_fuel_line, get_fuel_stats
-from src.core.memory_neighbors import format_neighbors, get_neighbors
+from src.core.memory.memory_fuel import format_fuel_line, get_fuel_stats
+from src.core.memory.memory_neighbors import format_neighbors, get_neighbors
 from src.db.repo import (
     fetch_chat_messages,
     get_contact,
@@ -198,7 +198,7 @@ async def cb_thread_open(callback: CallbackQuery) -> None:
                 lines.append(n_text)
 
             # Компактная история отношений
-            from src.core.memory_chain import build_chain_narrative
+            from src.core.memory.memory_chain import build_chain_narrative
 
             narrative = await build_chain_narrative(peer_id, callback.from_user.id)
             if narrative:
@@ -215,8 +215,8 @@ async def cb_thread_open(callback: CallbackQuery) -> None:
 async def cb_thread_reply(callback: CallbackQuery, userbot_manager=None) -> None:
     """Сгенерировать черновик ответа для треда."""
     peer_id = int(callback.data.split(":")[2])
-    from src.core.summarizer import draft_reply
-    from src.core.text_sanitizer import sanitize_html
+    from src.core.intelligence.summarizer import draft_reply
+    from src.core.infra.text_sanitizer import sanitize_html
     from src.llm.router import build_provider
 
     async with get_session() as session:

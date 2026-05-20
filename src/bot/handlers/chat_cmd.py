@@ -13,11 +13,11 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
-from src.core.chat_service import load_chat
-from src.core.commitment_extractor import extract_and_save_commitments
-from src.core.memory_extractor import extract_and_save_memories
-from src.core.contact_resolver import ContactCandidate, resolve
-from src.core.summarizer import catchup, draft_reply, summarize_chat
+from src.core.contacts.chat_service import load_chat
+from src.core.actions.commitment_extractor import extract_and_save_commitments
+from src.core.memory.memory_extractor import extract_and_save_memories
+from src.core.contacts.contact_resolver import ContactCandidate, resolve
+from src.core.intelligence.summarizer import catchup, draft_reply, summarize_chat
 from src.db.repo import get_contact, get_or_create_user, list_memories
 from src.db.session import get_session
 from src.llm.router import build_provider
@@ -593,7 +593,7 @@ async def cmd_recent(message: Message) -> None:
 async def cb_story(callback: CallbackQuery) -> None:
     """Показать историю отношений с контактом."""
     peer_id = int(callback.data.split(":")[2])
-    from src.core.memory_chain import build_chain_narrative
+    from src.core.memory.memory_chain import build_chain_narrative
 
     narrative = await build_chain_narrative(peer_id, callback.from_user.id)
     if callback.message:
@@ -623,7 +623,7 @@ async def cb_profile(callback: CallbackQuery, userbot_manager: UserbotManager) -
         owner = await get_or_create_user(session, callback.from_user.id)
         contact = await get_contact(session, owner, peer_id)
 
-    from src.core.contact_resolver import ContactCandidate
+    from src.core.contacts.contact_resolver import ContactCandidate
 
     candidate = ContactCandidate(
         peer_id=peer_id,

@@ -5,7 +5,7 @@ import logging
 from telethon import TelegramClient
 from telethon.tl.types import Channel, Chat, User as TgUser
 
-from src.core.chat_service import load_chat
+from src.core.contacts.chat_service import load_chat
 from src.db.models import User
 from src.db.repo import upsert_contact, upsert_folders
 from src.db.session import get_session
