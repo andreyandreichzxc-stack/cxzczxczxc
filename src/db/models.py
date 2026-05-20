@@ -302,6 +302,7 @@ class Message(Base):
             "user_id", "peer_id", "message_id", name="uq_msg_user_peer_id"
         ),
         Index("ix_messages_user_peer_date", "user_id", "peer_id", "date"),
+        Index("ix_messages_peer_user_date", "peer_id", "user_id", "date"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -330,6 +331,7 @@ class Commitment(Base):
     """Извлечённые обещания."""
 
     __tablename__ = "commitments"
+    __table_args__ = (Index("ix_commitments_user_status", "user_id", "status"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
@@ -356,6 +358,9 @@ class AutoReplyLog(Base):
     """Лог авто-ответов для прозрачности."""
 
     __tablename__ = "auto_reply_logs"
+    __table_args__ = (
+        Index("ix_auto_reply_logs_cooldown", "user_id", "peer_id", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
@@ -442,6 +447,7 @@ class Memory(Base):
     __table_args__ = (
         Index("ix_mem_active_contact", "is_active", "contact_id"),
         Index("ix_mem_user_active", "user_id", "is_active"),
+        Index("ix_memories_user_type_active", "user_id", "memory_type", "is_active"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -614,6 +620,12 @@ class ConversationState(Base):
     __tablename__ = "conversation_states"
     __table_args__ = (
         UniqueConstraint("user_id", "peer_id", name="uq_convstate_user_peer"),
+        Index(
+            "ix_conversation_states_user_active",
+            "user_id",
+            "status",
+            "last_incoming_at",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -879,7 +891,9 @@ class Trajectory(Base):
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     request_text: Mapped[str] = mapped_column(Text, nullable=False)
-    route_mode: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    route_mode: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
     intent_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     actions_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     used_skills_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
