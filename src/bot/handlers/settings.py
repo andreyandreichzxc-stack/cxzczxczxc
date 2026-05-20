@@ -1,6 +1,7 @@
 """/settings — главное меню и разделы. callback_data: set:sec / set:tog / set:choose / set:input."""
 
 import json
+import logging
 import re
 
 from aiogram import F, Router
@@ -28,6 +29,7 @@ from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
 
 
+logger = logging.getLogger(__name__)
 router = Router(name="settings")
 router.message.filter(OwnerOnly())
 router.callback_query.filter(OwnerOnly())
@@ -987,7 +989,7 @@ async def step_openai_key(message: Message, state: FSMContext) -> None:
     try:
         await message.delete()
     except Exception:
-        pass
+        logger.exception("failed to delete message with openai key")
     # Валидируем первый ключ как индикатор; остальные считаем рабочими
     if not await OpenAIProvider(parts[0]).validate_key():
         await message.answer("❌ Ключ не работает. Повтори или /cancel.")
@@ -1013,7 +1015,7 @@ async def step_gemini_key(message: Message, state: FSMContext) -> None:
     try:
         await message.delete()
     except Exception:
-        pass
+        logger.exception("failed to delete message with gemini key")
     # Валидируем первый ключ как индикатор; остальные считаем рабочими
     if not await GeminiProvider(parts[0]).validate_key():
         await message.answer("❌ Ключ не работает. Повтори или /cancel.")
@@ -1039,7 +1041,7 @@ async def step_mistral_key(message: Message, state: FSMContext) -> None:
     try:
         await message.delete()
     except Exception:
-        pass
+        logger.exception("failed to delete message with mistral key")
     # Валидируем первый ключ как индикатор; остальные считаем рабочими
     if not await MistralProvider(parts[0]).validate_key():
         await message.answer("❌ Ключ не работает. Повтори или /cancel.")

@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from telethon import TelegramClient
@@ -122,7 +122,9 @@ async def _process_one(
             sender_id=msg.sender_id,
             sender_name=sender_name,
             is_outgoing=bool(msg.out),
-            date=msg.date.replace(tzinfo=None) if msg.date else datetime.utcnow(),
+            date=msg.date.replace(tzinfo=None)
+            if msg.date
+            else datetime.now(timezone.utc).replace(tzinfo=None),
             kind=kind,
             text=text,
             transcript=transcript,
@@ -145,6 +147,7 @@ async def _last_cached_message_id(owner_id: int, peer_id: int) -> int:
 
 async def _cached_count(owner_id: int, peer_id: int) -> int:
     from sqlalchemy import func
+
     async with get_session() as session:
         result = await session.execute(
             select(func.count())
@@ -202,9 +205,14 @@ async def load_chat(
 
     if transcribe:
         await _backfill_transcripts(
-            client, owner.id, peer_id,
-            limit=limit, media_root=media_root,
-            openai_key=openai_key, gemini_key=gemini_key, mistral_key=mistral_key,
+            client,
+            owner.id,
+            peer_id,
+            limit=limit,
+            media_root=media_root,
+            openai_key=openai_key,
+            gemini_key=gemini_key,
+            mistral_key=mistral_key,
             transcription_mode=transcription_mode,
             api_provider=api_provider,
         )
@@ -252,7 +260,9 @@ async def _backfill_transcripts(
                 continue
             target = media_root / f"{peer_id}_{m.message_id}.ogg"
             await tg_msg.download_media(file=str(target))
-            file_id = str(getattr(tg_msg.file, "id", None) or f"{peer_id}:{m.message_id}")
+            file_id = str(
+                getattr(tg_msg.file, "id", None) or f"{peer_id}:{m.message_id}"
+            )
             transcript = await transcription_service.transcribe(
                 target,
                 file_id=file_id,
@@ -263,7 +273,11 @@ async def _backfill_transcripts(
                 api_provider=api_provider,
             )
         except Exception:
-            logger.exception("backfill transcript failed for msg %s in peer %s", m.message_id, peer_id)
+            logger.exception(
+                "backfill transcript failed for msg %s in peer %s",
+                m.message_id,
+                peer_id,
+            )
             continue
 
         if not transcript:
@@ -271,12 +285,17 @@ async def _backfill_transcripts(
         async with get_session() as session:
             await upsert_message(
                 session,
-                user_id=owner_id, peer_id=peer_id, message_id=m.message_id,
-                sender_id=m.sender_id, sender_name=m.sender_name,
-                is_outgoing=m.is_outgoing, date=m.date,
-                kind=m.kind, text=m.text,
+                user_id=owner_id,
+                peer_id=peer_id,
+                message_id=m.message_id,
+                sender_id=m.sender_id,
+                sender_name=m.sender_name,
+                is_outgoing=m.is_outgoing,
+                date=m.date,
+                kind=m.kind,
+                text=m.text,
                 transcript=transcript,
-                media_path=str(target) if 'target' in locals() else m.media_path,
+                media_path=str(target) if "target" in locals() else m.media_path,
                 extracted_text=m.extracted_text,
             )
 

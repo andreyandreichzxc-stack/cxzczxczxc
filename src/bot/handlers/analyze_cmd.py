@@ -65,7 +65,7 @@ async def cmd_analyze(message: Message, userbot_manager=None):
             elif progress.phase == "done":
                 await status_msg.edit_text("✅ Анализ завершён, формирую отчёт...")
         except Exception:
-            pass  # сообщение могло быть удалено
+            logger.exception("failed to update analysis progress")
 
     # Запустить анализ
     try:

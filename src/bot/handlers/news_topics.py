@@ -1,5 +1,7 @@
 """/news_topics — управление темами для утренних авто-новостей."""
 
+import logging
+
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -24,6 +26,7 @@ from src.db.repo import (
 from src.db.session import get_session
 
 
+logger = logging.getLogger(__name__)
 router = Router(name="news_topics")
 router.message.filter(OwnerOnly())
 router.callback_query.filter(OwnerOnly())
@@ -85,7 +88,7 @@ async def _refresh(callback: CallbackQuery) -> None:
         try:
             await callback.message.edit_text(text, reply_markup=kb)
         except Exception:
-            pass
+            logger.exception("failed to refresh news topics view")
 
 
 @router.callback_query(F.data == "nt:add")

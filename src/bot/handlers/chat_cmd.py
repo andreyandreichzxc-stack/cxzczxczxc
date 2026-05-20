@@ -548,7 +548,7 @@ async def _auto_extract_memories(message: Message, client, owner) -> None:
             )
             total += count
         except Exception:
-            pass
+            logger.exception("auto extract memories failed")
 
     if total:
         await message.answer(

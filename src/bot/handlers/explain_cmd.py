@@ -181,6 +181,7 @@ async def build_explain_text(
             include_tasks=True,
         )
     except Exception:
+        logger.exception("explain recall failed")
         explain_result = None
 
     return _build_explain_output(

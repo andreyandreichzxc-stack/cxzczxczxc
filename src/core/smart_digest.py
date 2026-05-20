@@ -4,7 +4,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -30,7 +30,9 @@ async def collect_recent_messages(
     Возвращает {peer_id: {"sender_name": str, "last_text": str,
                            "count": int, "urgency": str}}
     """
-    since = datetime.utcnow() - timedelta(minutes=since_minutes)
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        minutes=since_minutes
+    )
 
     result = await session.execute(
         select(Message)
@@ -162,7 +164,7 @@ async def smart_digest_loop(owner_telegram_id: int) -> None:
                     await asyncio.sleep(60)
                     continue
 
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
                 last_sent = settings.smart_digest_last_sent
                 interval = settings.smart_digest_interval_min
 

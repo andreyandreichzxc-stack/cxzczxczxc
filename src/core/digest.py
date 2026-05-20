@@ -1,6 +1,7 @@
 """Утренний дайджест: входящие без ответа, горящие обещания и авто-ответы за ночь."""
+
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -31,7 +32,7 @@ DIGEST_SYSTEM = (
 
 
 async def _gather_payload(owner: User) -> dict:
-    since = datetime.utcnow() - timedelta(hours=14)
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=14)
 
     async with get_session() as session:
         # входящие за период
@@ -66,19 +67,22 @@ async def _gather_payload(owner: User) -> dict:
                 .limit(1)
             )
             if my_after.scalar_one_or_none() is None:
-                snippet = (last_in.transcript or last_in.text or last_in.extracted_text or "")[:200]
+                snippet = (
+                    last_in.transcript or last_in.text or last_in.extracted_text or ""
+                )[:200]
                 waiting.append((peer_id, last_in.sender_name, snippet))
 
         mine = await list_open_commitments(session, owner, direction="mine")
         theirs = await list_open_commitments(session, owner, direction="theirs")
 
         autoreplies_result = await session.execute(
-            select(AutoReplyLog)
-            .where(AutoReplyLog.user_id == owner.id, AutoReplyLog.created_at >= since)
+            select(AutoReplyLog).where(
+                AutoReplyLog.user_id == owner.id, AutoReplyLog.created_at >= since
+            )
         )
         autoreplies = list(autoreplies_result.scalars().all())
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     soon = now + timedelta(hours=24)
 
     def _hot(items: list[Commitment]) -> list[Commitment]:
@@ -101,7 +105,10 @@ async def _gather_payload(owner: User) -> dict:
 def _payload_to_text(payload: dict, tz_name: str) -> str:
     parts: list[str] = []
     if payload["waiting"]:
-        lines = [f"- {name or peer_id}: {snippet}" for peer_id, name, snippet in payload["waiting"][:20]]
+        lines = [
+            f"- {name or peer_id}: {snippet}"
+            for peer_id, name, snippet in payload["waiting"][:20]
+        ]
         parts.append("Ждут ответа:\n" + "\n".join(lines))
     if payload["mine_hot"]:
         lines = []
@@ -117,7 +124,9 @@ def _payload_to_text(payload: dict, tz_name: str) -> str:
         parts.append("Обещания мне (горящие):\n" + "\n".join(lines))
     if payload["autoreplies"]:
         peers = {a.peer_name or a.peer_id for a in payload["autoreplies"]}
-        parts.append(f"Авто-ответов: {len(payload['autoreplies'])} (кому: {', '.join(map(str, peers))})")
+        parts.append(
+            f"Авто-ответов: {len(payload['autoreplies'])} (кому: {', '.join(map(str, peers))})"
+        )
     return "\n\n".join(parts) or "Активности не было."
 
 
@@ -155,6 +164,7 @@ async def digest_scheduler_loop() -> None:
     """Каждую минуту проверяет, пора ли отправлять дайджест.
     Сравнение времени — в TZ владельца (UserSettings.timezone)."""
     import asyncio
+
     last_sent: dict[int, str] = {}  # telegram_id -> "YYYY-MM-DD"
     while True:
         try:
@@ -167,7 +177,11 @@ async def digest_scheduler_loop() -> None:
             local_now = now_in_tz(tz_name)
             current_hm = local_now.strftime("%H:%M")
             current_day = local_now.strftime("%Y-%m-%d")
-            if enabled and target_hm == current_hm and last_sent.get(owner_id) != current_day:
+            if (
+                enabled
+                and target_hm == current_hm
+                and last_sent.get(owner_id) != current_day
+            ):
                 await send_digest(owner_id)
                 last_sent[owner_id] = current_day
         except Exception:

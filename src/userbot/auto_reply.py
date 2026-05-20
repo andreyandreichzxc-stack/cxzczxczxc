@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,7 +71,7 @@ async def _check_and_track_offline(
         me = await client.get_me()
         status = getattr(me, "status", None)
         if isinstance(status, UserStatusOnline):
-            owner.last_seen_online = datetime.utcnow()
+            owner.last_seen_online = datetime.now(timezone.utc).replace(tzinfo=None)
             # Сброс sleeping статуса — владелец онлайн
             if owner.absence_status == "sleeping":
                 owner.absence_status = None
@@ -79,7 +79,7 @@ async def _check_and_track_offline(
             await session.commit()
             return False
         if isinstance(status, UserStatusOffline):
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             last_seen = owner.last_seen_online
             if last_seen is None or (now - last_seen) > timedelta(minutes=10):
                 # Sleep detection — определяем, не спит ли владелец
@@ -116,7 +116,9 @@ async def _recently_replied(owner_telegram_id: int, peer_id: int) -> bool:
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
         cooldown = getattr(owner.settings, "auto_reply_cooldown_min", None) or 30
-        threshold = datetime.utcnow() - timedelta(minutes=cooldown)
+        threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            minutes=cooldown
+        )
         result = await session.execute(
             select(AutoReplyLog)
             .where(
@@ -189,7 +191,9 @@ async def _build_reply_text(
             if profile:
                 profile_hints = []
                 if profile.communication_style:
-                    profile_hints.append(f"Стиль общения: {profile.communication_style}")
+                    profile_hints.append(
+                        f"Стиль общения: {profile.communication_style}"
+                    )
                 if profile.communication_dos:
                     dos_list = (
                         json.loads(profile.communication_dos)
@@ -389,8 +393,8 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                     _ar_owner,
                     sender.id,
                     status="active",
-                    last_outgoing_at=datetime.utcnow(),
-                    last_auto_reply_at=datetime.utcnow(),
+                    last_outgoing_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                    last_auto_reply_at=datetime.now(timezone.utc).replace(tzinfo=None),
                 )
 
             async with get_session() as session:

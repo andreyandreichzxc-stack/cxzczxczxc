@@ -611,7 +611,7 @@ async def _process_text(
         )
         memory_context = format_recall_for_prompt(recall_result)
     except Exception:
-        pass
+        logger.exception("memory recall failed")
 
     # Adaptive instructions — проверяем не инструкция ли это
     try:
@@ -649,14 +649,14 @@ async def _process_text(
                     )
                     return
     except Exception:
-        pass  # не ломаем основной flow
+        logger.exception("adaptive instruction check failed")
 
     # Smart AutoRouter — оркестрация
     _last_purpose = None
     try:
         _last_purpose = ctx_store.get_last_purpose(message.from_user.id)
     except Exception:
-        pass
+        logger.exception("failed to get last purpose")
     router_plan = await make_plan(
         raw,
         owner_telegram_id,
@@ -759,7 +759,7 @@ async def _process_text(
                 message.from_user.id, router_plan.tasks[0].purpose.value
             )
     except Exception:
-        pass
+        logger.exception("failed to set last purpose")
 
 
 def _summarize_intent_for_memory(intent: dict) -> str:
@@ -872,7 +872,7 @@ async def free_voice(
         try:
             await notice.edit_text("❌ Не удалось распознать голосовое.")
         except Exception:
-            pass
+            logger.exception("failed to edit error notice after transcription")
         return
 
     text = (text or "").strip()
@@ -880,13 +880,13 @@ async def free_voice(
         try:
             await notice.edit_text("Не услышал текста в этом сообщении.")
         except Exception:
-            pass
+            logger.exception("failed to edit empty transcription notice")
         return
 
     try:
         await notice.edit_text(f"🎙 <i>Услышал:</i> {text}")
     except Exception:
-        pass
+        logger.exception("failed to edit transcription result notice")
 
     await _process_text(text, message, state, userbot_manager)
 
@@ -1383,7 +1383,7 @@ async def _exec_show_self(intent: dict, message: Message) -> None:
             lines.append("🧠 <b>Что помню:</b>")
             lines.append(format_recall_human(result))
     except Exception:
-        pass
+        logger.exception("self recall failed")
 
     # Чего НЕ знаю (fuel gauge — истощённые зоны)
     try:
@@ -1393,7 +1393,7 @@ async def _exec_show_self(intent: dict, message: Message) -> None:
             lines.append("🤷 <b>Чего НЕ знаю:</b>")
             lines.append(format_depleted_contacts(fuel))
     except Exception:
-        pass
+        logger.exception("fuel stats failed")
 
     text = "\n".join(lines)
     await message.answer(text)

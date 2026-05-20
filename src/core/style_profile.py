@@ -3,7 +3,7 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.core.chat_service import message_to_text
 from src.db.models import Contact, User
@@ -106,7 +106,7 @@ async def update_style_profile_for_contact(
         contact = await get_contact(session, owner, peer_id)
         if contact is not None:
             contact.style_profile = json.dumps(profile, ensure_ascii=False)
-            contact.style_updated_at = datetime.utcnow()
+            contact.style_updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     return profile
 
@@ -219,7 +219,7 @@ async def update_global_style_profile(user_id: int, provider=None):
     async with get_session() as session:
         owner = await get_or_create_user(session, user_id)
         owner.global_style_profile = json_str
-        owner.global_style_updated_at = datetime.utcnow()
+        owner.global_style_updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
         await session.commit()
 
     logger.info(

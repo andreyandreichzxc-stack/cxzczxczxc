@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from telethon import TelegramClient, events
 from telethon.tl.custom import Message as TgMessage
@@ -120,7 +120,7 @@ async def _process_incoming_bg(
                 peer_id,
                 status=status,
                 increment_unread=True,
-                last_incoming_at=datetime.utcnow(),
+                last_incoming_at=datetime.now(timezone.utc).replace(tzinfo=None),
             )
 
         # Применить решение (вне сессии)
@@ -208,7 +208,7 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                     is_outgoing=bool(msg.out),
                     date=msg.date.replace(tzinfo=None)
                     if msg.date
-                    else datetime.utcnow(),
+                    else datetime.now(timezone.utc).replace(tzinfo=None),
                     kind=kind,
                     text=text,
                     transcript=None,

@@ -59,7 +59,7 @@ async def cmd_keys(message: Message) -> None:
         try:
             await message.delete()
         except Exception:
-            pass
+            logger.exception("failed to delete message with key")
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
             slot = await add_key_slot(

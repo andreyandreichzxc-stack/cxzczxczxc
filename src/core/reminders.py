@@ -1,7 +1,8 @@
 """Напоминания о Commitment'ах: пинги об overdue и о приближении дедлайна."""
+
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -27,7 +28,7 @@ async def _check_once(owner_telegram_id: int) -> None:
             return
 
         tz_name = s.timezone
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         lead_hours = max(0, int(s.reminder_lead_hours))
         soon = now + timedelta(hours=lead_hours)
 
@@ -61,16 +62,10 @@ async def _check_once(owner_telegram_id: int) -> None:
         d = fmt_local(commitment.deadline_at, tz_name)
         if reason == "overdue":
             text = (
-                f"⏰ <b>Просрочено</b>\n"
-                f"<b>{who}</b>: {commitment.text}\n"
-                f"Срок был: {d}"
+                f"⏰ <b>Просрочено</b>\n<b>{who}</b>: {commitment.text}\nСрок был: {d}"
             )
         else:
-            text = (
-                f"⏳ <b>Скоро дедлайн</b>\n"
-                f"<b>{who}</b>: {commitment.text}\n"
-                f"До: {d}"
-            )
+            text = f"⏳ <b>Скоро дедлайн</b>\n<b>{who}</b>: {commitment.text}\nДо: {d}"
         await notifier.notify(text)
 
     # помечаем reminded чтобы не дублировать

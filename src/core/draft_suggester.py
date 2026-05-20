@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -20,7 +20,7 @@ _draft_timestamps: dict[int, deque] = {}
 
 
 def _check_rate_limit(user_id: int, max_per_hour: int) -> bool:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     if user_id not in _draft_timestamps:
         _draft_timestamps[user_id] = deque()
     q = _draft_timestamps[user_id]

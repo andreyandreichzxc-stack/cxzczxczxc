@@ -1,5 +1,5 @@
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -133,7 +133,9 @@ async def cmd_smart_digest(message: Message) -> None:
         interval = owner.settings.smart_digest_interval_min
         messages = await collect_recent_messages(session, owner, since_minutes=interval)
         text = build_smart_digest(messages, interval)
-        owner.settings.smart_digest_last_sent = datetime.utcnow()
+        owner.settings.smart_digest_last_sent = datetime.now(timezone.utc).replace(
+            tzinfo=None
+        )
     await message.answer(text)
 
 
