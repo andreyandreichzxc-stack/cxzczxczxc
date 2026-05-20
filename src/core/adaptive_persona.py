@@ -97,7 +97,11 @@ async def apply_persona_changes(telegram_id: int, changes: dict):
 
 
 async def format_persona_for_prompt(telegram_id: int) -> str:
-    """Форматирует persona для инжекции в промпт (компактно)."""
+    """Форматирует persona для инжекции в промпт через prompt_assembler.
+
+    Результат устанавливается как ctx.persona_block в AssemblyContext
+    и инжектится через PromptAssembler._tier2_context().
+    """
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
         p = await get_persona(session, owner)

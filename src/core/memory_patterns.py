@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from src.core.notifier import notifier
+from src.core.notification_queue import notification_queue
+from src.db.models import Notification
 from src.core.timeutil import now_in_tz
 from src.db.repo import (
     get_contact,
@@ -237,7 +238,12 @@ async def patterns_loop(owner_id: int) -> None:
                     detail = (
                         f"<b>{ins['title']}</b>\n{ins['detail']}\n💡 {ins['action']}"
                     )
-                    await notifier.notify(detail, reply_markup=kb)
+                    await notification_queue.enqueue(
+                        topic="memory_patterns",
+                        text=detail,
+                        priority=Notification.PRIORITY_MEDIUM,
+                        reply_markup=kb,
+                    )
                     await asyncio.sleep(0.5)
                 await asyncio.sleep(600)  # не повторять в этот час
             await asyncio.sleep(600)  # проверка каждые 10 минут

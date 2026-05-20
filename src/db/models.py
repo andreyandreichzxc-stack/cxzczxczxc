@@ -10,9 +10,11 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -60,7 +62,7 @@ class User(Base):
     key_slots: Mapped[list["LlmKeySlot"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="select",
     )
 
 
@@ -737,10 +739,13 @@ class InstructionCandidate(Base):
     rule: Mapped[str] = mapped_column(Text)  # текст правила
     category: Mapped[str] = mapped_column(
         String(32), default="tone"
-    )  # tone/format/privacy/memory/agent
+    )  # tone/format/privacy/memory/agent/llm_suggestion/consolidation/conflict
     is_safe: Mapped[bool] = mapped_column(
         Boolean, default=False
     )  # безопасное → авто-применить
+    llm_reviewed: Mapped[bool] = mapped_column(
+        Boolean, default=False
+    )  # обработано LLM-оптимизатором
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
@@ -810,4 +815,130 @@ class AdaptivePersona(Base):
     last_correction_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class Notification(Base):
+    """Очередь уведомлений с группировкой по теме."""
+
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    topic: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True
+    )  # memory, conflict, habit, digest, follow_up, ...
+    priority: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=2
+    )  # 0=CRITICAL, 1=HIGH, 2=MEDIUM, 3=LOW
+    category: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )  # подкатегория для группировки
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    flushed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, index=True
+    )
+
+    # Приоритеты как константы
+    PRIORITY_CRITICAL = 0
+    PRIORITY_HIGH = 1
+    PRIORITY_MEDIUM = 2
+    PRIORITY_LOW = 3
+
+
+class SoulSnapshot(Base):
+    """Снапшот tier-2 soul-блоков для версионирования промптов."""
+
+    __tablename__ = "soul_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)  # semver "1.0.0"
+    snapshot_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="auto"
+    )  # manual / auto / freeze
+    blocks_json: Mapped[dict] = mapped_column(JSON, nullable=False)  # все tier-2 блоки
+    diff_from_previous: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    approved_by: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="system"
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class Trajectory(Base):
+    """Recorded assistant turn for learning, debugging, and skill extraction."""
+
+    __tablename__ = "trajectories"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    request_text: Mapped[str] = mapped_column(Text, nullable=False)
+    route_mode: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    intent_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    actions_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    used_skills_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    memory_ids_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    success: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+
+class Skill(Base):
+    """Prompt-level procedural memory. V1 skills are hints, not executable code."""
+
+    __tablename__ = "skills"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trigger_patterns_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    review_status: Mapped[str] = mapped_column(
+        String(16), default="approved", index=True
+    )  # approved | pending | rejected
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class SkillUsage(Base):
+    """Skill application telemetry linked to a trajectory."""
+
+    __tablename__ = "skill_usages"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    skill_id: Mapped[int] = mapped_column(
+        ForeignKey("skills.id", ondelete="CASCADE"), index=True
+    )
+    trajectory_id: Mapped[int | None] = mapped_column(
+        ForeignKey("trajectories.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    success: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), index=True
     )

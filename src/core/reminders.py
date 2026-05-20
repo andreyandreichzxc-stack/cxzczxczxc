@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from src.config import settings as app_settings
-from src.core.notifier import notifier
+from src.core.notification_queue import notification_queue
+from src.db.models import Notification
 from src.core.timeutil import fmt_local
 from src.db.models import Commitment
 from src.db.repo import get_or_create_user, update_commitment_status
@@ -66,7 +67,12 @@ async def _check_once(owner_telegram_id: int) -> None:
             )
         else:
             text = f"⏳ <b>Скоро дедлайн</b>\n<b>{who}</b>: {commitment.text}\nДо: {d}"
-        await notifier.notify(text)
+        await notification_queue.enqueue(
+            topic="reminders",
+            text=text,
+            priority=Notification.PRIORITY_HIGH,
+            category=reason,  # "overdue" или "lead"
+        )
 
     # помечаем reminded чтобы не дублировать
     async with get_session() as session:

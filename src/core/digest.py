@@ -6,8 +6,9 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from src.config import settings as app_settings
-from src.core.notifier import notifier
+from src.core.notification_queue import notification_queue
 from src.core.text_sanitizer import sanitize_html
+from src.db.models import Notification
 from src.core.timeutil import fmt_local, now_in_tz
 from src.db.models import AutoReplyLog, Commitment, Message, User
 from src.db.repo import get_or_create_user, list_open_commitments
@@ -157,7 +158,12 @@ async def build_digest(owner_telegram_id: int) -> str:
 
 async def send_digest(owner_telegram_id: int) -> None:
     text = await build_digest(owner_telegram_id)
-    await notifier.notify(text)
+    await notification_queue.enqueue(
+        topic="digest",
+        text=text,
+        priority=Notification.PRIORITY_MEDIUM,
+        category="morning_report",
+    )
 
 
 async def digest_scheduler_loop() -> None:

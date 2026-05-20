@@ -6,7 +6,8 @@ from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Any
 
-from src.core.notifier import notifier
+from src.core.notification_queue import notification_queue
+from src.db.models import Notification
 from src.core.timeutil import now_in_tz
 from src.db.repo import get_or_create_user, list_memories
 from src.db.session import get_session
@@ -205,7 +206,11 @@ async def habit_tracker_loop(owner_id: int) -> None:
                     habits = find_habit_candidates(active)
                 if habits:
                     text = format_habits(habits)
-                    await notifier.notify(text)
+                    await notification_queue.enqueue(
+                        topic="habits",
+                        text=text,
+                        priority=Notification.PRIORITY_LOW,
+                    )
         except Exception as e:
             logger.exception("Habit tracker error: %s", e)
         await asyncio.sleep(3600)  # проверять каждый час

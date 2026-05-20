@@ -129,10 +129,13 @@ async def _process_incoming_bg(
                 f"🔴 <b>СРОЧНОЕ от {sender_name}!</b>\n\n<i>{text[:300]}</i>"
             )
         elif decision.action == InboxAction.DRAFT_SUGGEST:
-            await notifier.notify(
-                f"💬 <b>{sender_name}:</b>"
-                f" <i>{text[:200]}</i>\n\n"
-                f"→ Напиши ответ? /chat {sender_name}"
+            from src.core.notification_queue import notification_queue
+
+            await notification_queue.enqueue(
+                topic="inbox",
+                text=f"💬 <b>{sender_name}:</b> <i>{text[:200]}</i>\n\n→ Напиши ответ? /chat {sender_name}",
+                priority=2,
+                category="draft",
             )
         # SILENT_LOG / IGNORE — только сохранили в БД, ничего не делаем
     except Exception:

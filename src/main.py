@@ -8,6 +8,7 @@ from src.core.digest import digest_scheduler_loop
 from src.core.follow_up import follow_up_loop
 from src.core.memory_checker import memory_decay_loop
 from src.core.memory_queue import start_worker, stop_worker
+from src.core.notification_queue import notification_queue
 from src.core.temporal_layers import temporal_migration_loop
 from src.core.memory_patterns import patterns_loop
 from src.core.news import news_scheduler_loop
@@ -16,11 +17,14 @@ from src.core.reminders import reminders_loop
 from src.core.sleep_tracker import sleep_tracker_loop
 from src.core.smart_digest import smart_digest_loop
 from src.core.weekly_summarizer import weekly_summary_loop
+from src.core.weekly_digest import weekly_digest_loop
 from src.core.knowledge_distiller import distillation_loop
 from src.core.conflict_predictor import conflict_predictor_loop
 from src.core.conflict_resolver import conflict_check_loop
 from src.core.habit_tracker import habit_tracker_loop
 from src.core.memory_clusterer import cluster_loop
+from src.core.skills import skill_optimizer_loop
+from src.core.instruction_optimizer import instruction_optimizer
 from src.db.session import init_db
 from src.userbot.manager import UserbotManager
 
@@ -38,6 +42,16 @@ async def global_style_scheduler_loop(owner_telegram_id: int) -> None:
         except Exception as e:
             logger.error("Global style update failed: %s", e)
         await asyncio.sleep(12 * 3600)  # 12 hours
+
+
+async def instruction_optimizer_scheduler_loop(owner_telegram_id: int) -> None:
+    """Runs instruction optimization daily even if the optimizer implementation is one-shot."""
+    while True:
+        try:
+            await instruction_optimizer.instruction_optimizer_loop(owner_telegram_id)
+        except Exception as e:
+            logger.error("Instruction optimizer failed: %s", e)
+        await asyncio.sleep(24 * 3600)
 
 
 async def main() -> None:
@@ -82,6 +96,9 @@ async def main() -> None:
             weekly_summary_loop(settings.owner_telegram_id), name="weekly-summary"
         ),
         asyncio.create_task(
+            weekly_digest_loop(settings.owner_telegram_id), name="weekly-digest"
+        ),
+        asyncio.create_task(
             patterns_loop(settings.owner_telegram_id), name="memory-patterns"
         ),
         asyncio.create_task(
@@ -106,7 +123,17 @@ async def main() -> None:
         asyncio.create_task(
             cluster_loop(settings.owner_telegram_id), name="memory-cluster"
         ),
+        asyncio.create_task(
+            instruction_optimizer_scheduler_loop(settings.owner_telegram_id),
+            name="instruction-optimizer",
+        ),
+        asyncio.create_task(
+            skill_optimizer_loop(settings.owner_telegram_id),
+            name="skill-optimizer",
+        ),
     ]
+
+    notification_queue.start()
 
     try:
         await run_bot(userbot_manager)
@@ -119,6 +146,7 @@ async def main() -> None:
             except (asyncio.CancelledError, Exception):
                 pass
         await stop_worker()
+        await notification_queue.stop()
 
         from src.core.vector_store import vector_store
 

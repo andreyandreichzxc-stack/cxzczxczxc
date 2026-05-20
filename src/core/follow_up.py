@@ -2,7 +2,8 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from src.core.notifier import notifier
+from src.core.notification_queue import notification_queue
+from src.db.models import Notification
 from src.db.repo import get_or_create_user, get_contact, list_active_conversations
 from src.db.session import get_session
 
@@ -35,9 +36,11 @@ async def follow_up_loop(owner_id: int) -> None:
                 if stale:
                     names = ", ".join(stale[:5])
                     suffix = f" и ещё {len(stale) - 5}" if len(stale) > 5 else ""
-                    await notifier.notify(
-                        f"⚠️ <b>Без ответа >24ч:</b> {names}{suffix}\n"
-                        f"<i>/threads — просмотреть и ответить</i>"
+                    await notification_queue.enqueue(
+                        topic="follow_up",
+                        text=f"⚠️ <b>Без ответа >24ч:</b> {names}{suffix}\n"
+                        f"<i>/threads — просмотреть и ответить</i>",
+                        priority=Notification.PRIORITY_HIGH,
                     )
             await asyncio.sleep(4 * 3600)  # раз в 4 часа
         except Exception as e:

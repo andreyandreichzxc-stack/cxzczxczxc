@@ -29,7 +29,10 @@ from src.db.models import (
     NewsTopic,
     PendingAction,
     SelfProfile,
+    Skill,
+    SkillUsage,
     TelegramSession,
+    Trajectory,
     TranscriptionCache,
     User,
     UserSettings,
@@ -161,6 +164,169 @@ async def add_key_slot(
     session.add(slot)
     await session.flush()
     return slot
+
+
+# ─── Learning loop: trajectories and skills ────────────────────────
+
+
+async def add_trajectory(
+    session: AsyncSession,
+    user: User,
+    *,
+    request_text: str,
+    route_mode: str | None = None,
+    intent_json: dict | None = None,
+    actions_json: list | None = None,
+    used_skills_json: list | None = None,
+    memory_ids_json: list | None = None,
+    response_text: str | None = None,
+    success: bool = True,
+    error: str | None = None,
+    latency_ms: int | None = None,
+) -> Trajectory:
+    row = Trajectory(
+        user_id=user.id,
+        request_text=request_text[:8000],
+        route_mode=route_mode,
+        intent_json=intent_json,
+        actions_json=actions_json,
+        used_skills_json=used_skills_json,
+        memory_ids_json=memory_ids_json,
+        response_text=response_text[:8000] if response_text else None,
+        success=success,
+        error=error[:4000] if error else None,
+        latency_ms=latency_ms,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def list_trajectories(
+    session: AsyncSession,
+    user: User,
+    *,
+    only_errors: bool = False,
+    limit: int = 20,
+) -> list[Trajectory]:
+    q = select(Trajectory).where(Trajectory.user_id == user.id)
+    if only_errors:
+        q = q.where(Trajectory.success == False)
+    q = q.order_by(Trajectory.created_at.desc()).limit(limit)
+    r = await session.execute(q)
+    return list(r.scalars().all())
+
+
+async def upsert_skill(
+    session: AsyncSession,
+    user: User,
+    *,
+    name: str,
+    description: str | None = None,
+    trigger_patterns_json: list | None = None,
+    body: str,
+    enabled: bool = True,
+    review_status: str = "approved",
+) -> Skill:
+    result = await session.execute(
+        select(Skill).where(
+            Skill.user_id == user.id,
+            func.lower(Skill.name) == name.lower().strip(),
+        )
+    )
+    skill = result.scalar_one_or_none()
+    if skill is None:
+        skill = Skill(
+            user_id=user.id,
+            name=name.strip(),
+            description=description,
+            trigger_patterns_json=trigger_patterns_json or [],
+            body=body,
+            enabled=enabled,
+            review_status=review_status,
+        )
+        session.add(skill)
+    else:
+        skill.description = description
+        skill.trigger_patterns_json = trigger_patterns_json or []
+        skill.body = body
+        skill.enabled = enabled
+        skill.review_status = review_status
+        skill.updated_at = datetime.now(timezone.utc)
+    await session.flush()
+    return skill
+
+
+async def list_skills(
+    session: AsyncSession,
+    user: User,
+    *,
+    enabled: bool | None = None,
+    review_status: str | None = None,
+    limit: int = 50,
+) -> list[Skill]:
+    q = select(Skill).where(Skill.user_id == user.id)
+    if enabled is not None:
+        q = q.where(Skill.enabled == enabled)
+    if review_status:
+        q = q.where(Skill.review_status == review_status)
+    q = q.order_by(Skill.success_count.desc(), Skill.updated_at.desc()).limit(limit)
+    r = await session.execute(q)
+    return list(r.scalars().all())
+
+
+async def get_skill_by_name(session: AsyncSession, user: User, name: str) -> Skill | None:
+    r = await session.execute(
+        select(Skill).where(
+            Skill.user_id == user.id,
+            func.lower(Skill.name) == name.lower().strip(),
+        )
+    )
+    return r.scalar_one_or_none()
+
+
+async def set_skill_enabled(
+    session: AsyncSession,
+    user: User,
+    name: str,
+    enabled: bool,
+    *,
+    review_status: str | None = None,
+) -> Skill | None:
+    skill = await get_skill_by_name(session, user, name)
+    if skill is None:
+        return None
+    skill.enabled = enabled
+    if review_status is not None:
+        skill.review_status = review_status
+    skill.updated_at = datetime.now(timezone.utc)
+    await session.flush()
+    return skill
+
+
+async def add_skill_usage(
+    session: AsyncSession,
+    user: User,
+    skill: Skill,
+    *,
+    trajectory_id: int | None = None,
+    success: bool = True,
+) -> SkillUsage:
+    usage = SkillUsage(
+        user_id=user.id,
+        skill_id=skill.id,
+        trajectory_id=trajectory_id,
+        success=success,
+    )
+    session.add(usage)
+    if success:
+        skill.success_count = (skill.success_count or 0) + 1
+    else:
+        skill.failure_count = (skill.failure_count or 0) + 1
+    skill.last_used_at = datetime.now(timezone.utc)
+    skill.updated_at = datetime.now(timezone.utc)
+    await session.flush()
+    return usage
 
 
 async def list_key_slots(

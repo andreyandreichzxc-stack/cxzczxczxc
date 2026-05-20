@@ -1,6 +1,7 @@
 """Свободный текст (и голос) → агент → действие. Регистрируется последним в bot/app.py,
 чтобы команды и FSM перехватывали свои события раньше."""
 
+import asyncio
 import json
 import logging
 import time
@@ -22,6 +23,7 @@ from src.core.agent import route_intent
 from src.core.chat_service import load_chat
 from src.core.maestro import run_pipeline
 from src.core.smart_autorouter import make_plan, RoutePurpose, ResponseMode
+from src.core.action_guard import guard_intent
 from src.core.commitment_extractor import extract_and_save_commitments
 from src.core.contact_resolver import resolve, resolve_with_llm
 from src.core.news import build_news_digest
@@ -53,6 +55,8 @@ from src.db.repo import (
 )
 from src.db.session import get_session
 from src.llm.router import build_provider
+from src.core.trajectory import actions_from_intent, record_trajectory
+from src.core.skills import build_skill_index, record_skill_usages
 from src.userbot.manager import UserbotManager, _MANAGER_SINGLETON
 
 
@@ -521,6 +525,7 @@ async def _exec_set_setting(intent, message) -> None:
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         setattr(owner.settings, key, validated)
+        await session.flush()
         new_tz = owner.settings.timezone
     if key == "timezone":
         await message.answer(f"✅ Часовой пояс: <b>{tz_short(new_tz)}</b>")
@@ -588,6 +593,8 @@ async def _process_text(
     state: FSMContext,
     userbot_manager: UserbotManager,
 ) -> None:
+    turn_started = time.monotonic()
+    used_skills: list[dict] = []
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         tz_name = owner.settings.timezone if owner.settings else "UTC"
@@ -625,6 +632,7 @@ async def _process_text(
                         rule=instr["rule"],
                         category=instr["category"],
                         is_safe=False,
+                        llm_reviewed=False,  # будет дообработан InstructionOptimizer
                     )
                     session.add(candidate)
                     await session.flush()
@@ -676,6 +684,16 @@ async def _process_text(
     # INSTANT — отвечаем сразу, без БД, без LLM
     if router_plan.response_mode == "instant" and router_plan.final_response:
         await message.answer(router_plan.final_response)
+        await record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="instant",
+            intent_json={"intent": "chat"},
+            response_text=router_plan.final_response,
+            success=True,
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
+        await _post_turn_optimize(owner_telegram_id, raw, router_plan.final_response)
         return
 
     # Строим провайдер с учётом purpose из auto-router'а
@@ -695,25 +713,50 @@ async def _process_text(
 
     # FAST_ROUTE — один light LLM-вызов с готовым контекстом
     if router_plan.response_mode == "fast_route":
-        fast_context_parts = []
-        if router_plan.memory_context:
-            fast_context_parts.append(router_plan.memory_context)
-        if router_plan.self_profile:
-            fast_context_parts.append(router_plan.self_profile)
-        # Инжект persona
+        # Собираем контекст через prompt_assembler (Block 4)
+        fast_system = "Ты ассистент. Ответь коротко."
         try:
-            from src.core.adaptive_persona import format_persona_for_prompt
+            from src.core.prompt_assembler import AssemblyContext, prompt_assembler
 
-            persona_hint = await format_persona_for_prompt(owner_telegram_id)
-            if persona_hint:
-                fast_context_parts.append(persona_hint)
+            persona_block = ""
+            try:
+                from src.core.adaptive_persona import format_persona_for_prompt
+
+                persona_block = await format_persona_for_prompt(owner_telegram_id) or ""
+            except Exception:
+                pass
+
+            fast_ctx = AssemblyContext(
+                target="summarizer",  # лёгкий режим — без тяжёлых блоков
+                user_id=owner_telegram_id,
+                memory_context=router_plan.memory_context or "",
+                self_profile=router_plan.self_profile or "",
+                persona_block=persona_block,
+            )
+            fast_ctx.skill_index, used_skills = await build_skill_index(
+                owner_telegram_id, raw, "fast_route"
+            )
+            fast_system = prompt_assembler.assemble(fast_ctx)
         except Exception:
-            pass
-        fast_system = (
-            "Ты ассистент. Ответь коротко.\n\n" + "\n\n".join(fast_context_parts)
-            if fast_context_parts
-            else "Ты ассистент. Ответь коротко."
-        )
+            # Fallback для fast route
+            fast_context_parts = []
+            if router_plan.memory_context:
+                fast_context_parts.append(router_plan.memory_context)
+            if router_plan.self_profile:
+                fast_context_parts.append(router_plan.self_profile)
+            try:
+                from src.core.adaptive_persona import format_persona_for_prompt
+
+                persona_hint = await format_persona_for_prompt(owner_telegram_id)
+                if persona_hint:
+                    fast_context_parts.append(persona_hint)
+            except Exception:
+                pass
+            fast_system = (
+                "Ты ассистент. Ответь коротко.\n\n" + "\n\n".join(fast_context_parts)
+                if fast_context_parts
+                else "Ты ассистент. Ответь коротко."
+            )
         fast_start = time.monotonic()
         try:
             from src.llm.base import ChatMessage
@@ -738,26 +781,28 @@ async def _process_text(
                 "Fast route metrics: %s", json.dumps(router_plan.metrics, default=str)
             )
             await message.answer(router_plan.final_response)
+            trajectory_id = await record_trajectory(
+                owner_telegram_id,
+                request_text=raw,
+                route_mode="fast_route",
+                intent_json={"intent": "chat"},
+                used_skills_json=used_skills,
+                response_text=router_plan.final_response,
+                success=True,
+                latency_ms=int((time.monotonic() - turn_started) * 1000),
+            )
+            await record_skill_usages(
+                owner_telegram_id, used_skills, trajectory_id, True
+            )
+            await _post_turn_optimize(
+                owner_telegram_id, raw, router_plan.final_response
+            )
             return
 
-    # Инжект persona в global_style для MAESTRO
-    if owner.global_style_profile:
-        injected_style = owner.global_style_profile
-    else:
-        injected_style = None
-    try:
-        from src.core.adaptive_persona import format_persona_for_prompt
-
-        persona_hint = await format_persona_for_prompt(owner_telegram_id)
-        if persona_hint:
-            if injected_style:
-                injected_style += persona_hint
-            else:
-                injected_style = persona_hint
-    except Exception:
-        pass
-
     # MAESTRO — стандартный тяжёлый пайплайн
+    # Persona инжектится через prompt_assembler в maestro.py (system prompt, не дублируем)
+    injected_style = owner.global_style_profile or None
+    rag_needed = router_plan.recall_mode == "deep"
     try:
         pipeline_result = await run_pipeline(
             provider,
@@ -766,6 +811,7 @@ async def _process_text(
             history_block=history_block,
             memory_context=router_plan.memory_context,
             global_style=injected_style,
+            rag_enabled=rag_needed,
         )
         response_text = pipeline_result.get("final_response", "")
         if response_text:
@@ -780,6 +826,18 @@ async def _process_text(
                 response_text,
                 reply_markup=memory_quick_keyboard(),
             )
+            await record_trajectory(
+                owner_telegram_id,
+                request_text=raw,
+                route_mode="maestro",
+                intent_json={"intent": "maestro"},
+                actions_json=pipeline_result.get("plan", []),
+                response_text=response_text,
+                success=True,
+                error="; ".join(errors) if errors else None,
+                latency_ms=int((time.monotonic() - turn_started) * 1000),
+            )
+            await _post_turn_optimize(owner_telegram_id, raw, response_text)
             return
     except Exception:
         logger.debug("Maestro pipeline failed, falling back to route_intent")
@@ -798,6 +856,14 @@ async def _process_text(
     except Exception as e:
         logger.exception("agent route_intent failed")
         err_msg = str(e)
+        await record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="intent",
+            success=False,
+            error=err_msg[:4000],
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
         if len(err_msg) > 300:
             err_msg = err_msg[:300] + "…"
         await message.answer(
@@ -817,6 +883,17 @@ async def _process_text(
             await _dispatch(sub, message, state, userbot_manager, tz_name=tz_name)
     else:
         await _dispatch(intent, message, state, userbot_manager, tz_name=tz_name)
+
+    await record_trajectory(
+        owner_telegram_id,
+        request_text=raw,
+        route_mode="intent",
+        intent_json=intent,
+        actions_json=actions_from_intent(intent),
+        response_text=_summarize_intent_for_memory(intent),
+        success=True,
+        latency_ms=int((time.monotonic() - turn_started) * 1000),
+    )
 
     summary = _summarize_intent_for_memory(intent)
     ctx_store.add_turn(message.from_user.id, raw, summary)
@@ -960,6 +1037,22 @@ async def free_voice(
 
 
 async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) -> None:
+    guard = guard_intent(intent)
+    if not guard.allowed:
+        await record_trajectory(
+            message.from_user.id,
+            request_text=message.text or "",
+            route_mode="dispatch_guard",
+            intent_json=intent if isinstance(intent, dict) else None,
+            actions_json=actions_from_intent(
+                intent if isinstance(intent, dict) else None
+            ),
+            success=False,
+            error=guard.reason,
+        )
+        await message.answer(f"⚠️ Действие остановлено guardrail: {guard.reason}")
+        return
+    intent = guard.intent
     kind = intent.get("intent")
     if kind == "set_setting":
         await _exec_set_setting(intent, message)
@@ -1664,3 +1757,60 @@ async def cb_memq_explain(callback: CallbackQuery) -> None:
     if callback.message:
         await callback.message.answer(text)
     await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# InstructionOptimizer integration — post-turn LLM review
+# ---------------------------------------------------------------------------
+
+
+# Rate-limit для post_turn_optimize: не чаще 1 раза в 5 минут на пользователя
+_post_turn_last_call: dict[int, float] = {}
+_post_turn_lock: "asyncio.Lock | None" = None
+
+
+def _get_post_turn_lock() -> asyncio.Lock:
+    global _post_turn_lock
+    if _post_turn_lock is None:
+        _post_turn_lock = asyncio.Lock()
+    return _post_turn_lock
+
+
+async def _post_turn_optimize(
+    telegram_id: int,
+    user_message: str,
+    assistant_response: str,
+) -> None:
+    """
+    Запускает LLM-ревью диалога через InstructionOptimizer.
+    FIRE-AND-FORGET: не ждёт результат, rate-limited (1 раз в 5 мин).
+    """
+    if not user_message or not assistant_response:
+        return
+
+    now = time.monotonic()
+    async with _get_post_turn_lock():
+        if telegram_id in _post_turn_last_call:
+            if now - _post_turn_last_call[telegram_id] < 300:
+                return  # rate-limited
+        _post_turn_last_call[telegram_id] = now
+
+    async def _do_optimize():
+        try:
+            from src.db.session import get_session
+            from src.db.repo import get_or_create_user
+            from src.core.instruction_optimizer import instruction_optimizer
+
+            async with get_session() as session:
+                owner = await get_or_create_user(session, telegram_id)
+                await instruction_optimizer.post_turn_review(
+                    session=session,
+                    user_id=owner.id,
+                    user_obj=owner,
+                    user_message=user_message,
+                    assistant_response=assistant_response,
+                )
+        except Exception:
+            logger.debug("post_turn_optimize skipped", exc_info=True)
+
+    asyncio.create_task(_do_optimize())

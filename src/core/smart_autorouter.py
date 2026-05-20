@@ -11,6 +11,13 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _get_active_telethon_client(telegram_id: int):
+    """Получить активный Telethon-клиент из синглтона UserbotManager."""
+    from src.userbot.manager import _MANAGER_SINGLETON
+
+    return _MANAGER_SINGLETON.get_client(telegram_id) if _MANAGER_SINGLETON else None
+
+
 class RoutePurpose(str, enum.Enum):
     MAIN = "main"
     DRAFT = "draft"
@@ -94,6 +101,7 @@ class RouterPlan:
     contact_profile: str = ""  # ContactProfile для упомянутого контакта
     rag_context: str = ""  # RAG-контекст
     response_mode: str = "maestro"  # instant | fast_route | maestro
+    recall_mode: str = "deep"  # light | normal | deep
     metrics: dict = field(
         default_factory=dict
     )  # {recall_ms, router_ms, llm_ms, maestro_ms, total_ms}
@@ -188,6 +196,17 @@ async def make_plan(
     meta: dict[str, Any] = {}
 
     # ---------- Слой 1: Memory recall (один раз!) ----------
+    try:
+        from src.core.conversation_depth import decide_context_depth
+
+        depth_decision = decide_context_depth(telegram_id, user_text)
+        plan.recall_mode = depth_decision.recall_mode
+        plan.metrics["dialog_depth"] = depth_decision.depth
+        plan.metrics["message_weight"] = round(depth_decision.message_weight, 2)
+        plan.metrics["recall_mode"] = depth_decision.recall_mode
+    except Exception:
+        plan.recall_mode = "deep"
+
     t1 = time.monotonic()
     try:
         from src.core.memory_recall import recall, format_recall_for_prompt
@@ -199,6 +218,8 @@ async def make_plan(
             include_self=True,
             include_pinned=True,
             include_tasks=True,
+            include_deep=plan.recall_mode == "deep",
+            mode=plan.recall_mode,
         )
         plan.recall_result = recall_result
         plan.memory_context = format_recall_for_prompt(recall_result)
@@ -281,7 +302,9 @@ async def make_plan(
         if names:
             async with get_session() as session:
                 owner = await get_or_create_user(session, telegram_id)
-                contacts = await resolve(None, owner, names[0])
+                contacts = await resolve(
+                    _get_active_telethon_client(telegram_id), owner, names[0]
+                )
                 if contacts and contacts[0].score >= 70:
                     peer_id = contacts[0].peer_id
                     state = await get_conversation_state(session, owner, peer_id)

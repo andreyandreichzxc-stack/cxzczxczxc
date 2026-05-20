@@ -7,7 +7,8 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from src.core.chat_service import message_to_text
-from src.core.notifier import notifier
+from src.core.notification_queue import notification_queue
+from src.db.models import Notification
 from src.core.timeutil import now_in_tz
 from src.db.repo import (
     add_memory,
@@ -137,9 +138,11 @@ async def weekly_summary_loop(owner_id: int) -> None:
                             total_facts += 1
                         await asyncio.sleep(0.3)  # rate-limit LLM
                     if total_facts > 0:
-                        await notifier.notify(
-                            f"📊📝 <b>Недельное саммари:</b> {total_facts} фактов "
-                            f"из {len(contacts[:20])} контактов сохранено в память."
+                        await notification_queue.enqueue(
+                            topic="weekly_summary",
+                            text=f"📊📝 <b>Недельное саммари:</b> {total_facts} фактов "
+                            f"из {len(contacts[:20])} контактов сохранено в память.",
+                            priority=Notification.PRIORITY_MEDIUM,
                         )
                         # После сохранения weekly фактов — консолидация
                         consolidated = await consolidate_tier(
@@ -236,10 +239,17 @@ async def consolidate_tier(
                         fact_count=len(group),
                     )
 
-                    # Деактивируем исходные факты
+                    # НЕ деактивируем факты — повышаем tier и помечаем как сконсолидированные
                     for m in group:
-                        m.is_active = False
-                        m.validity_end = datetime.now(timezone.utc)
+                        m.memory_tier = to_tier
+                        m.updated_at = datetime.now(timezone.utc)
+                        # Добавляем 'consolidated' в comma-separated tags
+                        current_tags = [
+                            t.strip() for t in (m.tags or "").split(",") if t.strip()
+                        ]
+                        if "consolidated" not in current_tags:
+                            current_tags.append("consolidated")
+                        m.tags = ",".join(current_tags)
 
                     consolidated += len(group)
             except Exception:

@@ -140,8 +140,9 @@ async def distillation_loop(owner_id: int) -> None:
     """Фоновый цикл: раз в день (14:00) запускает дистилляцию общих фактов."""
     import asyncio
 
-    from src.core.notifier import notifier
+    from src.core.notification_queue import notification_queue
     from src.core.timeutil import now_in_tz
+    from src.db.models import Notification
 
     last_run_date = None
     while True:
@@ -156,10 +157,14 @@ async def distillation_loop(owner_id: int) -> None:
                 # Дистилляция общих фактов
                 result = await run_distillation(owner_id, contact_id=None)
                 if result["success"]:
-                    await notifier.notify(
-                        f"🧠 <b>Дистилляция знаний:</b>\n"
-                        f"Сжато {result['deactivated']} фактов в одно знание:\n"
-                        f"<i>«{result['fact'][:200]}»</i>"
+                    await notification_queue.enqueue(
+                        topic="knowledge_distillation",
+                        text=(
+                            f"🧠 <b>Дистилляция знаний:</b>\n"
+                            f"Сжато {result['deactivated']} фактов в одно знание:\n"
+                            f"<i>«{result['fact'][:200]}»</i>"
+                        ),
+                        priority=Notification.PRIORITY_MEDIUM,
                     )
             await asyncio.sleep(600)
         except Exception as e:

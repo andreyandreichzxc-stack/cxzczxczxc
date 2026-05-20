@@ -102,6 +102,7 @@ async def process(
     memory_context: str | None = None,
     global_style: str | None = None,
     self_profile: str | None = None,
+    rag_enabled: bool = True,
 ) -> dict[str, Any]:
     """Главная точка входа. Maestro понимает пользователя и составляет план."""
     ctx_parts = []
@@ -123,7 +124,7 @@ async def process(
 
     # --- RAG: релевантный контекст из истории переписок ---
     rag_context = ""
-    if owner_id is not None:
+    if rag_enabled and owner_id is not None:
         try:
             query_vec = await provider.embed(user_text)
             hits = await vector_store.search(
@@ -158,36 +159,78 @@ async def process(
         except Exception:
             logger.debug("Memory recall failed, proceeding without", exc_info=True)
 
-    system = ""
-    if memory_recall_context:
-        system = memory_recall_context + "\n\n"
-    system += MAESTRO_SYSTEM
-    if rag_context:
-        system = (
-            system + "\n\nРелевантный контекст из истории переписок:\n" + rag_context
+    # --- Modular prompt assembly (Block 4) ---
+    try:
+        from src.core.prompt_assembler import AssemblyContext, prompt_assembler
+
+        # Собираем persona блок
+        persona_block = ""
+        if owner_id is not None:
+            try:
+                from src.core.adaptive_persona import format_persona_for_prompt
+
+                persona_block = await format_persona_for_prompt(owner_id) or ""
+            except Exception:
+                pass
+
+        # Собираем confirmed rules
+        confirmed_rules = []
+        if owner_id is not None:
+            try:
+                from src.core.adaptive_instructions import get_active_rules
+
+                confirmed_rules = await get_active_rules(owner_id)
+            except Exception:
+                pass
+
+        ctx = AssemblyContext(
+            target="maestro",
+            user_id=owner_id or 0,
+            memory_context=memory_recall_context,
+            rag_context=rag_context,
+            persona_block=persona_block,
+            confirmed_rules=confirmed_rules,
         )
+        if owner_id is not None:
+            try:
+                from src.core.skills import build_skill_index
 
-    # Активные правила
-    if owner_id is not None:
-        try:
-            from src.core.adaptive_instructions import format_rules_for_prompt
+                ctx.skill_index = (
+                    await build_skill_index(owner_id, user_text, "maestro")
+                )[0]
+            except Exception:
+                logger.debug("Failed to build skill index", exc_info=True)
+        system = prompt_assembler.assemble(ctx)
+    except Exception:
+        # Fallback: старая сборка (обратная совместимость)
+        logger.debug("Prompt assembler failed, using legacy assembly", exc_info=True)
+        system = MAESTRO_SYSTEM
+        if memory_recall_context:
+            system = memory_recall_context + "\n\n" + system
+        if rag_context:
+            system = (
+                system
+                + "\n\nРелевантный контекст из истории переписок:\n"
+                + rag_context
+            )
+        if owner_id is not None:
+            try:
+                from src.core.adaptive_instructions import format_rules_for_prompt
 
-            rules_hint = await format_rules_for_prompt(owner_id)
-            if rules_hint:
-                system += rules_hint
-        except Exception:
-            pass
+                rules_hint = await format_rules_for_prompt(owner_id)
+                if rules_hint:
+                    system += rules_hint
+            except Exception:
+                pass
+        if owner_id is not None:
+            try:
+                from src.core.adaptive_persona import format_persona_for_prompt
 
-    # Personality profile
-    if owner_id is not None:
-        try:
-            from src.core.adaptive_persona import format_persona_for_prompt
-
-            persona_hint = await format_persona_for_prompt(owner_id)
-            if persona_hint:
-                system += persona_hint
-        except Exception:
-            pass
+                persona_hint = await format_persona_for_prompt(owner_id)
+                if persona_hint:
+                    system += persona_hint
+            except Exception:
+                pass
 
     try:
         raw = await provider.chat(
@@ -248,9 +291,10 @@ async def _execute_agent(
     agent_spec: dict,
     *,
     owner_id: int,
-    session,  # AsyncSession
 ) -> dict:
     """Исполняет одного агента по спецификации из плана maestro."""
+    from src.db.session import get_session
+
     agent_type = agent_spec.get("agent", "")
     query = agent_spec.get("query", "")
     cache = agent_spec.get("cache", True)
@@ -261,12 +305,13 @@ async def _execute_agent(
             from src.agents.search_agent import resolve as search_resolve
             from src.db.repo import get_or_create_user, list_contacts
 
-            owner = await get_or_create_user(session, owner_id)
-            contacts = await list_contacts(session, owner)
-            contact_dicts = [
-                {"id": c.peer_id, "name": c.display_name, "username": c.username}
-                for c in contacts[:50]
-            ]
+            async with get_session() as session:
+                owner = await get_or_create_user(session, owner_id)
+                contacts = await list_contacts(session, owner)
+                contact_dicts = [
+                    {"id": c.peer_id, "name": c.display_name, "username": c.username}
+                    for c in contacts[:50]
+                ]
             data = await search_resolve(provider, query, contact_dicts)
             return {"data": data, "success": True}
 
@@ -274,9 +319,10 @@ async def _execute_agent(
             from src.agents.memory_agent import recall as memory_recall
             from src.db.repo import get_or_create_user, search_memories
 
-            owner = await get_or_create_user(session, owner_id)
-            facts_obj = await search_memories(session, owner, query)
-            facts_list = [m.fact for m in facts_obj] if facts_obj else []
+            async with get_session() as session:
+                owner = await get_or_create_user(session, owner_id)
+                facts_obj = await search_memories(session, owner, query)
+                facts_list = [m.fact for m in facts_obj] if facts_obj else []
             data = await memory_recall(provider, query, facts_list)
             return {"data": data, "success": True}
 
@@ -323,15 +369,14 @@ async def _execute_agent(
 
 
 async def _execute_agents_parallel(
-    provider, agents_to_call: list, *, owner_id: int, session
+    provider, agents_to_call: list, *, owner_id: int
 ) -> list[dict]:
-    """Запускает нескольких агентов параллельно."""
+    """Запускает нескольких агентов параллельно (каждый со своей сессией БД)."""
     if not agents_to_call:
         return []
 
     tasks = [
-        _execute_agent(provider, spec, owner_id=owner_id, session=session)
-        for spec in agents_to_call
+        _execute_agent(provider, spec, owner_id=owner_id) for spec in agents_to_call
     ]
     return await asyncio.gather(*tasks, return_exceptions=False)
 
@@ -345,6 +390,7 @@ async def run_pipeline(
     memory_context: str | None = None,
     global_style: str | None = None,
     self_profile: str | None = None,
+    rag_enabled: bool = True,
 ) -> dict[str, Any]:
     """Полный пайплайн: Maestro → агенты → финальный ответ.
 
@@ -387,6 +433,20 @@ async def run_pipeline(
         except Exception:
             logger.debug("Failed to load self_profile, continuing without")
 
+    # Maestro-only context compression: fast_route never reaches this function.
+    try:
+        from src.core.context_compressor import compress_maestro_context
+
+        compressed = compress_maestro_context(
+            history_block=history_block,
+            memory_context=memory_context,
+        )
+        if compressed.compressed_context and (memory_context or history_block):
+            memory_context = compressed.compressed_context
+            history_block = None
+    except Exception:
+        logger.debug("Context compression skipped", exc_info=True)
+
     # --- Шаг 1: Maestro планирует ---
     plan = await process(
         provider,
@@ -396,6 +456,7 @@ async def run_pipeline(
         memory_context=memory_context,
         global_style=global_style,
         self_profile=self_profile,
+        rag_enabled=rag_enabled,
     )
 
     used_agents = []
@@ -439,12 +500,9 @@ async def run_pipeline(
             "agent_errors": [],
         }
 
-    from src.db.session import get_session
-
-    async with get_session() as session:
-        results = await _execute_agents_parallel(
-            provider, agents_to_call, owner_id=owner_id, session=session
-        )
+    results = await _execute_agents_parallel(
+        provider, agents_to_call, owner_id=owner_id
+    )
 
     # Собираем результаты
     agent_texts = []

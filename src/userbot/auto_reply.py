@@ -408,10 +408,15 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                     reply_text=reply,
                 )
 
-            await notifier.notify(
-                f"🤖 <b>Авто-ответ</b> для <b>{display}</b>\n\n"
+            from src.core.notification_queue import notification_queue
+
+            await notification_queue.enqueue(
+                topic="auto_reply",
+                text=f"🤖 <b>Авто-ответ</b> для <b>{display}</b>\n\n"
                 f"<i>Им:</i> {incoming_text[:200]}\n"
-                f"<i>Я:</i> {reply}"
+                f"<i>Я:</i> {reply}",
+                priority=2,
+                category="auto_reply",
             )
         except Exception:
             logger.exception("auto-reply handler failed")

@@ -10,7 +10,8 @@ from src.core.memory_health import (
     format_health,
     format_health_compact,
 )
-from src.core.notifier import notifier
+from src.core.notification_queue import notification_queue
+from src.db.models import Notification
 from src.core.reply_radar import collect_reply_radar
 from src.core.temporal_layers import format_layer_stats, get_layer_stats
 from src.db.repo import (
@@ -259,12 +260,22 @@ async def proactive_briefing_loop(owner_id: int) -> None:
             if hour == 9:
                 data = await collect_briefing_data(owner_id)
                 text = format_briefing(data, "☀️ Утренний брифинг")
-                await notifier.notify(text)
+                await notification_queue.enqueue(
+                    topic="briefing",
+                    text=text,
+                    priority=Notification.PRIORITY_MEDIUM,
+                    category="morning",
+                )
                 await asyncio.sleep(3600)  # не повторять в этот час
             elif hour == 21:
                 data = await collect_briefing_data(owner_id)
                 text = format_briefing(data, "🌙 Вечерний брифинг")
-                await notifier.notify(text)
+                await notification_queue.enqueue(
+                    topic="briefing",
+                    text=text,
+                    priority=Notification.PRIORITY_MEDIUM,
+                    category="evening",
+                )
                 await asyncio.sleep(3600)
 
             await asyncio.sleep(300)  # проверка каждые 5 минут

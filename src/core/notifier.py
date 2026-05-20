@@ -1,3 +1,5 @@
+# NOTE: Для некритических уведомлений используй notification_queue.enqueue()
+# вместо notifier.notify(). Прямой вызов notifier.notify() — только для CRITICAL.
 import logging
 from typing import TYPE_CHECKING
 

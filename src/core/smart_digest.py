@@ -9,8 +9,9 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from src.config import settings as app_settings
-from src.core.notifier import notifier
+from src.core.notification_queue import notification_queue
 from src.core.urgency_classifier import classify_message
+from src.db.models import Notification
 from src.db.models import Message, User
 from src.db.repo import get_contact, get_or_create_user
 from src.db.session import get_session
@@ -179,7 +180,11 @@ async def smart_digest_loop(owner_telegram_id: int) -> None:
                 )
                 text = build_smart_digest(messages, interval)
 
-                await notifier.notify(text)
+                await notification_queue.enqueue(
+                    topic="smart_digest",
+                    text=text,
+                    priority=Notification.PRIORITY_MEDIUM,
+                )
 
                 settings.smart_digest_last_sent = now
         except Exception:

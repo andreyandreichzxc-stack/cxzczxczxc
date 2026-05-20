@@ -172,8 +172,9 @@ def format_conflicts(conflicts: list[dict]) -> str:
 async def conflict_check_loop(owner_id: int):
     """Фоновый цикл: раз в 12 часов проверяет конфликты."""
     import asyncio
-    from src.core.notifier import notifier
+    from src.core.notification_queue import notification_queue
     from src.core.timeutil import now_in_tz
+    from src.db.models import Notification
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
     last_check_date = None
@@ -211,7 +212,12 @@ async def conflict_check_loop(owner_id: int):
                             ],
                         ]
                     )
-                    await notifier.notify(text, reply_markup=kb)
+                    await notification_queue.enqueue(
+                        topic="conflict",
+                        text=text,
+                        priority=Notification.PRIORITY_HIGH,
+                        reply_markup=kb,
+                    )
             await asyncio.sleep(600)
         except Exception as e:
             logger.error(f"Conflict check error: {e}")

@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from src.core.notifier import notifier
+from src.core.notification_queue import notification_queue
+from src.db.models import Notification
 from src.db.models import Message
 from src.db.repo import (
     get_contact,
@@ -182,7 +183,11 @@ async def conflict_predictor_loop(owner_id: int) -> None:
             triggers = await detect_silence_triggers(owner_id)
             if triggers:
                 text = format_conflict_warnings(triggers)
-                await notifier.notify(text)
+                await notification_queue.enqueue(
+                    topic="conflict",
+                    text=text,
+                    priority=Notification.PRIORITY_HIGH,
+                )
         except Exception as e:
             logger.exception("Conflict predictor error: %s", e)
         await asyncio.sleep(3 * 3600)

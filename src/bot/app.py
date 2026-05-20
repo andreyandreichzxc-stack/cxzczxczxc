@@ -22,11 +22,13 @@ from src.bot.handlers import (
     search,
     send,
     settings as settings_handlers,
+    skills_cmd,
     start,
     style_cmd,
     threads_cmd,
     today_cmd,
     todos,
+    trajectory_cmd,
 )
 from src.config import settings
 from src.core.notifier import notifier
@@ -72,6 +74,8 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(threads_cmd.router)
     dp.include_router(explain_cmd.router)
     dp.include_router(today_cmd.router)
+    dp.include_router(skills_cmd.router)
+    dp.include_router(trajectory_cmd.router)
     # ВАЖНО: free_text — самым последним, чтобы команды и FSM перехватили текст раньше
     dp.include_router(free_text.router)
 

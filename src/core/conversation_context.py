@@ -39,7 +39,7 @@ def add_turn(user_id: int, user_text: str, assistant_summary: str) -> None:
     assistant_summary = (assistant_summary or "").strip()
     if not user_text and not assistant_summary:
         return
-    ctx.turns.append((user_text[:400], assistant_summary[:400]))
+    ctx.turns.append((time(), user_text[:400], assistant_summary[:400]))
 
 
 def set_last_peer(user_id: int, peer_id: int, peer_name: str | None) -> None:
@@ -59,7 +59,27 @@ def get_last_peer(user_id: int) -> tuple[int, str | None] | None:
 
 
 def get_recent_turns(user_id: int) -> list[tuple[str, str]]:
-    return list(_get(user_id).turns)
+    rows = []
+    for item in _get(user_id).turns:
+        if len(item) == 3:
+            _, user_text, assistant_summary = item
+            rows.append((user_text, assistant_summary))
+        else:
+            rows.append(item)
+    return rows
+
+
+def get_recent_turn_count(user_id: int, max_age_seconds: int = 3600) -> int:
+    now = time()
+    count = 0
+    for item in _get(user_id).turns:
+        if len(item) == 3:
+            ts = item[0]
+            if now - ts <= max_age_seconds:
+                count += 1
+        else:
+            count += 1
+    return count
 
 
 def set_last_purpose(user_id: int, purpose: str) -> None:

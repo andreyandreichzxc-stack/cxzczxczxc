@@ -1,4 +1,5 @@
 """Дайджест из подписанных каналов на тему: cosine-фильтр постов через embeddings + LLM-сводка."""
+
 from __future__ import annotations
 
 import asyncio
@@ -9,7 +10,8 @@ from datetime import datetime, timedelta, timezone
 from telethon import TelegramClient
 
 from src.config import settings as app_settings
-from src.core.notifier import notifier
+from src.core.notification_queue import notification_queue
+from src.db.models import Notification
 from src.core.text_sanitizer import sanitize_html
 from src.core.timeutil import now_in_tz
 from src.db.models import Contact, User
@@ -65,14 +67,16 @@ async def _gather_posts(
                 text = msg.text or msg.message
                 if not text or len(text) < 30:
                     continue
-                posts.append({
-                    "channel_name": ch.display_name,
-                    "channel_username": ch.username,
-                    "channel_peer_id": ch.peer_id,
-                    "message_id": msg.id,
-                    "date": msg.date,
-                    "text": text,
-                })
+                posts.append(
+                    {
+                        "channel_name": ch.display_name,
+                        "channel_username": ch.username,
+                        "channel_peer_id": ch.peer_id,
+                        "message_id": msg.id,
+                        "date": msg.date,
+                        "text": text,
+                    }
+                )
         except Exception:
             logger.exception("iter_messages failed for channel %s", ch.display_name)
             continue
@@ -94,7 +98,9 @@ async def build_news_digest(
     async with get_session() as session:
         owner: User = await get_or_create_user(session, owner_telegram_id)
         channels = await list_contacts(
-            session, owner, kinds=("channel",),
+            session,
+            owner,
+            kinds=("channel",),
             include_bots=False,
             only_news_sources=only_marked_sources,
         )
@@ -105,15 +111,20 @@ async def build_news_digest(
         provider = provider_override
         if provider is None:
             from src.llm.router import build_provider
+
             provider = await build_provider(session, owner)
         heavy = owner.settings.use_heavy_model
 
     if provider is None:
         return "Не задан LLM-ключ. Настрой в /settings → LLM."
     if not channels:
-        return "Не нашёл каналов. Сначала /sync, потом помечь нужные через /news_channels."
+        return (
+            "Не нашёл каналов. Сначала /sync, потом помечь нужные через /news_channels."
+        )
 
-    posts = await _gather_posts(client, channels, hours=hours, per_channel_limit=per_channel_limit)
+    posts = await _gather_posts(
+        client, channels, hours=hours, per_channel_limit=per_channel_limit
+    )
     if not posts:
         return f"За последние {hours}ч в твоих каналах постов не нашёл."
 
@@ -140,16 +151,19 @@ async def build_news_digest(
     else:
         # без embeddings — простая фильтрация по вхождению ключевых слов
         kw = topic.lower().split()
-        relevant = [
-            p for p in posts
-            if any(k in p["text"].lower() for k in kw)
-        ][:top_k] or posts[:top_k]
+        relevant = [p for p in posts if any(k in p["text"].lower() for k in kw)][
+            :top_k
+        ] or posts[:top_k]
 
     # формируем выжимку для LLM
     lines = []
     for p in relevant:
         when = p["date"].strftime("%Y-%m-%d %H:%M") if p["date"] else "?"
-        link_tail = f" (https://t.me/{p['channel_username']}/{p['message_id']})" if p["channel_username"] else ""
+        link_tail = (
+            f" (https://t.me/{p['channel_username']}/{p['message_id']})"
+            if p["channel_username"]
+            else ""
+        )
         lines.append(f"[{when}] <{p['channel_name']}>{link_tail}\n{p['text'][:1200]}")
     body = "\n\n---\n\n".join(lines)
 
@@ -184,26 +198,48 @@ async def news_scheduler_loop() -> None:
                     local_now = now_in_tz(tz_name)
                     current_hm = local_now.strftime("%H:%M")
                     current_day = local_now.strftime("%Y-%m-%d")
-                    if target_hm == current_hm and last_sent.get(owner_id) != current_day:
-                        topics = await list_news_topics(session, owner, only_enabled=True)
+                    if (
+                        target_hm == current_hm
+                        and last_sent.get(owner_id) != current_day
+                    ):
+                        topics = await list_news_topics(
+                            session, owner, only_enabled=True
+                        )
                         topics_to_run = [(t.topic, t.hours) for t in topics]
                         last_sent[owner_id] = current_day  # помечаем даже если тем нет
 
             if topics_to_run:
                 from src.userbot.manager import _MANAGER_SINGLETON
-                client = _MANAGER_SINGLETON.get_client(owner_id) if _MANAGER_SINGLETON else None
+
+                client = (
+                    _MANAGER_SINGLETON.get_client(owner_id)
+                    if _MANAGER_SINGLETON
+                    else None
+                )
                 if client is None:
-                    logger.warning("news scheduler: no userbot client for owner %s", owner_id)
+                    logger.warning(
+                        "news scheduler: no userbot client for owner %s", owner_id
+                    )
                 else:
-                    await notifier.notify(
-                        f"📰 <b>Авто-новости</b> · {len(topics_to_run)} тем(ы)…"
+                    await notification_queue.enqueue(
+                        topic="news",
+                        text=f"📰 <b>Авто-новости</b> · {len(topics_to_run)} тем(ы)…",
+                        priority=Notification.PRIORITY_LOW,
                     )
                     for topic, hours in topics_to_run:
                         try:
                             text = await build_news_digest(
-                                client, owner_id, topic, hours=hours,
+                                client,
+                                owner_id,
+                                topic,
+                                hours=hours,
                             )
-                            await notifier.notify(f"<b>«{topic}»</b>\n\n{text}")
+                            await notification_queue.enqueue(
+                                topic="news",
+                                text=f"<b>«{topic}»</b>\n\n{text}",
+                                priority=Notification.PRIORITY_LOW,
+                                category=topic,
+                            )
                         except Exception:
                             logger.exception("news topic failed: %s", topic)
         except Exception:

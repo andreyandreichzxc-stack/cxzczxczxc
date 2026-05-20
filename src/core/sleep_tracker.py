@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 async def sleep_tracker_loop(owner_id: int) -> None:
     """Фоновый цикл: каждые 15 минут проверяет паттерны сна."""
-    from src.core.notifier import notifier
+    from src.core.notification_queue import notification_queue
+    from src.db.models import Notification
 
     _notified_for_date: str | None = (
         None  # дата (YYYY-MM-DD) последнего sleep-уведомления
@@ -45,10 +46,14 @@ async def sleep_tracker_loop(owner_id: int) -> None:
                             today_str = now.strftime("%Y-%m-%d")
                             if _notified_for_date != today_str:
                                 _notified_for_date = today_str
-                                await notifier.notify(
-                                    "😴🌙 <b>Режим сна активирован</b>\n"
-                                    "Авто-ответы будут говорить что ты спишь.\n"
-                                    "Отключится автоматически утром."
+                                await notification_queue.enqueue(
+                                    topic="sleep",
+                                    text=(
+                                        "😴🌙 <b>Режим сна активирован</b>\n"
+                                        "Авто-ответы будут говорить что ты спишь.\n"
+                                        "Отключится автоматически утром."
+                                    ),
+                                    priority=Notification.PRIORITY_LOW,
                                 )
                 else:
                     # Дневное время — сброс sleeping статуса
@@ -57,9 +62,13 @@ async def sleep_tracker_loop(owner_id: int) -> None:
                         owner.absence_message = None
                         await session.commit()
                         if _notified_for_date is not None:
-                            await notifier.notify(
-                                "☀️ <b>Доброе утро!</b> Режим сна отключён. "
-                                "Авто-ответы вернулись в обычный режим."
+                            await notification_queue.enqueue(
+                                topic="sleep",
+                                text=(
+                                    "☀️ <b>Доброе утро!</b> Режим сна отключён. "
+                                    "Авто-ответы вернулись в обычный режим."
+                                ),
+                                priority=Notification.PRIORITY_LOW,
                             )
                             _notified_for_date = None
             await asyncio.sleep(900)  # каждые 15 минут

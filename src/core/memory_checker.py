@@ -135,11 +135,16 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
 
         if closed_count > 0:
             # Уведомление о ночной очистке
-            from src.core.notifier import notifier
+            from src.core.notification_queue import notification_queue
+            from src.db.models import Notification
 
-            await notifier.notify(
-                f"🧠🌙 <b>Ночная очистка памяти:</b> {closed_count} фактов устарело и закрыто.\n"
-                f"Обработано: {total_processed} активных фактов."
+            await notification_queue.enqueue(
+                topic="memory_health",
+                text=(
+                    f"🧠🌙 <b>Ночная очистка памяти:</b> {closed_count} фактов устарело и закрыто.\n"
+                    f"Обработано: {total_processed} активных фактов."
+                ),
+                priority=Notification.PRIORITY_MEDIUM,
             )
 
     from src.core.stats_cache import invalidate

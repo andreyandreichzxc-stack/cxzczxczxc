@@ -45,7 +45,9 @@ async def recall(
     include_self: bool = True,
     include_pinned: bool = True,
     include_tasks: bool = True,
+    include_deep: bool = True,
     semantic_threshold: float = 0.55,
+    mode: str = "deep",
 ) -> RecallResult:
     """
     Единый recall-сервис памяти.
@@ -58,10 +60,19 @@ async def recall(
     5. frequently-used — высокий use_count
     6. self-факты (глобальные, без contact_id)
     7. contact-факты (связанные с конкретным контактом)
+    8. deep — tier 2-3 префетч + BFS по MemoryLink графу (опционально)
 
     Возвращает список RecalledFact с причинами.
     """
     result = RecallResult()
+    mode = (mode or "deep").lower()
+    if mode not in {"light", "normal", "deep"}:
+        mode = "deep"
+    include_deep = include_deep and mode == "deep"
+    include_semantic = bool(query) and mode in {"normal", "deep"}
+    include_frequent = mode in {"normal", "deep"}
+    include_self_facts = include_self and mode in {"normal", "deep"}
+    include_contact_facts = mode in {"normal", "deep"}
     now = UTC_NAIVE()
     seen_ids: set[int] = set()
     ranked: list[RecalledFact] = []
@@ -77,9 +88,16 @@ async def recall(
             Memory.is_active == True,
             or_(Memory.expires_at.is_(None), Memory.expires_at > now),
         ]
-        all_facts_result = await session.execute(
-            select(Memory).where(*base_conditions).order_by(Memory.confidence.desc())
+        q_all = select(Memory).where(*base_conditions).order_by(
+            Memory.pinned.desc(),
+            Memory.created_at.desc(),
+            Memory.confidence.desc(),
         )
+        if mode == "light":
+            q_all = q_all.limit(max(limit * 8, 40))
+        elif mode == "normal":
+            q_all = q_all.limit(max(limit * 20, 160))
+        all_facts_result = await session.execute(q_all)
         all_facts: list[Memory] = list(all_facts_result.scalars().all())
 
         # --- 1. Pinned ---
@@ -132,7 +150,7 @@ async def recall(
                         seen_ids.add(m.id)
 
         # --- 3. Qdrant semantic ---
-        if query:
+        if include_semantic:
             try:
                 from src.core.vector_store import vector_store
                 from src.llm.router import build_provider
@@ -212,7 +230,7 @@ async def recall(
             seen_ids.add(m.id)
 
         # --- 6. Self-facts (глобальные) ---
-        if include_self:
+        if include_self_facts:
             self_facts = [
                 m for m in all_facts if m.id not in seen_ids and m.contact_id is None
             ]
@@ -231,7 +249,7 @@ async def recall(
                 seen_ids.add(m.id)
 
         # --- 7. Contact-specific facts ---
-        if contact_id:
+        if contact_id and include_contact_facts:
             contact_facts = [
                 m
                 for m in all_facts
@@ -251,9 +269,41 @@ async def recall(
                 )
                 seen_ids.add(m.id)
 
+        # --- 8. Deep memory: tier 2-3 prefetch + BFS graph expansion ---
+        if include_deep:
+            try:
+                from src.core.deep_memory import deep_memory as dm, _extract_keywords
+
+                keywords = _extract_keywords(query) if query else None
+                deep_result = await dm.retrieve(
+                    session=session,
+                    owner_id=owner.id,
+                    context_keywords=keywords,
+                    contact_id=contact_id,
+                    telegram_id=telegram_id,
+                )
+                for f in deep_result.facts:
+                    if f.memory_id not in seen_ids:
+                        ranked.append(
+                            RecalledFact(
+                                fact=f.fact,
+                                reason=f"🧠 deep:{f.reason}",
+                                confidence=f.confidence,
+                                memory_id=f.memory_id,
+                                contact_id=f.contact_id,
+                                layer="deep",
+                            )
+                        )
+                        seen_ids.add(f.memory_id)
+                # Сохраняем граф для форматирования
+                result.meta["deep_graph"] = deep_result.graph
+            except (ImportError, ValueError, ConnectionError, OSError):
+                logger.debug("Deep memory recall failed, skipping", exc_info=True)
+
         # Limit
         result.facts = ranked[:limit]
-        result.meta = {
+        result.meta |= {
+            "mode": mode,
             "total_active": len(all_facts),
             "returned": len(result.facts),
             "reasons_used": list(set(f.reason for f in result.facts)),
@@ -275,10 +325,46 @@ def format_recall_for_prompt(recall_result: RecallResult, max_facts: int = 8) ->
     """Форматирует результат recall для инжекции в LLM-промпт."""
     if not recall_result.facts:
         return ""
-    lines = ["<recall_context>"]
-    for rf in recall_result.facts[:max_facts]:
-        lines.append(f"[{rf.reason}] {rf.fact}")
-    lines.append("</recall_context>")
+
+    deep_facts = [rf for rf in recall_result.facts if rf.layer == "deep"]
+    surface_facts = [rf for rf in recall_result.facts if rf.layer != "deep"]
+
+    lines: list[str] = []
+
+    # Поверхностная память (шаги 1-7)
+    if surface_facts:
+        lines.append("<recall_context>")
+        for rf in surface_facts[:max_facts]:
+            lines.append(f"[{rf.reason}] {rf.fact}")
+        lines.append("</recall_context>")
+
+    # Глубокая память (шаг 8)
+    if deep_facts:
+        lines.append('<recall_context type="deep">')
+        for rf in deep_facts[:max_facts]:
+            lines.append(f"[{rf.reason}] {rf.fact}")
+        lines.append("</recall_context>")
+
+    # Граф MemoryLink (если есть)
+    deep_graph = recall_result.meta.get("deep_graph")
+    if deep_graph:
+        try:
+            from src.core.deep_memory import deep_memory as dm
+
+            graph_context = dm.format_deep_context(
+                facts=[],  # факты уже отформатированы выше
+                graph=deep_graph,
+            )
+            if graph_context and "<memory_links>" in graph_context:
+                # Извлекаем только <memory_links> секцию
+                start = graph_context.find("<memory_links>")
+                end_marker = graph_context.find("</memory_links>")
+                if start != -1 and end_marker != -1:
+                    end = end_marker + len("</memory_links>")
+                    lines.append(graph_context[start:end])
+        except Exception:
+            pass
+
     return "\n".join(lines)
 
 
