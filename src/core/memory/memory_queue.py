@@ -86,9 +86,9 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
             source=fact_data.get("source", "chat"),
             importance=fact_data.get("importance", 0.5),
             decay_rate=fact_data.get("decay_rate", 0.07),
+            memory_type=fact_data.get("memory_type"),
             embedding=fact_data.get("embedding"),
             vector_store_obj=vector_store if fact_data.get("embedding") else None,
-            deduplicate=False,  # дедупликация уже выполнена на этапе извлечения
         )
         if mem:
             saved_memories.append(mem)

@@ -143,6 +143,19 @@ async def extract_and_save_memories(
         if not isinstance(decay_rate, (int, float)):
             decay_rate = None
 
+        # --- Validate memory_type ---
+        memory_type = item.get("memory_type")
+        VALID_MEMORY_TYPES = {
+            "personal",
+            "contact_fact",
+            "relationship",
+            "task",
+            "preference",
+            "temporary",
+        }
+        if memory_type not in VALID_MEMORY_TYPES:
+            memory_type = None
+
         valid_facts.append(
             {
                 "fact": fact,
@@ -150,6 +163,7 @@ async def extract_and_save_memories(
                 "source": "chat",
                 "importance": importance,
                 "decay_rate": decay_rate,
+                "memory_type": memory_type,
                 "relation_type": item.get("relation_type"),
                 "relation_to_index": item.get("relation_to_index"),
             }

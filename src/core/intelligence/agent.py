@@ -10,6 +10,8 @@ import logging
 from typing import Any
 
 from src.core.actions.vector_store import vector_store
+from src.db.repo import get_or_create_user
+from src.db.session import get_session
 from src.llm.base import ChatMessage, LLMProvider
 
 
@@ -263,10 +265,16 @@ async def route_intent(
         rag_context = ""
         if user_id is not None:
             try:
-                query_vec = await provider.embed(user_text)
-                hits = await vector_store.search(
-                    user_id=user_id, embedding=query_vec, limit=3
-                )
+                async with get_session() as session:
+                    owner_db = await get_or_create_user(session, user_id)
+                    _owner_db_id = owner_db.id if owner_db else None
+                if _owner_db_id is not None:
+                    query_vec = await provider.embed(user_text)
+                    hits = await vector_store.search(
+                        user_id=_owner_db_id, embedding=query_vec, limit=3
+                    )
+                else:
+                    hits = []
                 if hits:
                     rag_lines = []
                     for h in hits:

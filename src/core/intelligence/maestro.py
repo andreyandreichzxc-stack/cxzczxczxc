@@ -129,10 +129,16 @@ async def process(
     rag_context = ""
     if rag_enabled and owner_id is not None:
         try:
-            query_vec = await provider.embed(user_text)
-            hits = await vector_store.search(
-                user_id=owner_id, embedding=query_vec, limit=5
-            )
+            async with get_session() as session:
+                owner_db = await get_or_create_user(session, owner_id)
+                _owner_db_id = owner_db.id if owner_db else None
+            if _owner_db_id is not None:
+                query_vec = await provider.embed(user_text)
+                hits = await vector_store.search(
+                    user_id=_owner_db_id, embedding=query_vec, limit=5
+                )
+            else:
+                hits = []
             if hits:
                 rag_lines = []
                 for h in hits:
@@ -164,13 +170,18 @@ async def process(
 
     # --- Modular prompt assembly (Block 4) ---
     try:
-        from src.core.intelligence.prompt_assembler import AssemblyContext, prompt_assembler
+        from src.core.intelligence.prompt_assembler import (
+            AssemblyContext,
+            prompt_assembler,
+        )
 
         # Собираем persona блок
         persona_block = ""
         if owner_id is not None:
             try:
-                from src.core.intelligence.adaptive_persona import format_persona_for_prompt
+                from src.core.intelligence.adaptive_persona import (
+                    format_persona_for_prompt,
+                )
 
                 persona_block = await format_persona_for_prompt(owner_id) or ""
             except Exception:
@@ -218,7 +229,9 @@ async def process(
             )
         if owner_id is not None:
             try:
-                from src.core.intelligence.adaptive_instructions import format_rules_for_prompt
+                from src.core.intelligence.adaptive_instructions import (
+                    format_rules_for_prompt,
+                )
 
                 rules_hint = await format_rules_for_prompt(owner_id)
                 if rules_hint:
@@ -227,7 +240,9 @@ async def process(
                 pass
         if owner_id is not None:
             try:
-                from src.core.intelligence.adaptive_persona import format_persona_for_prompt
+                from src.core.intelligence.adaptive_persona import (
+                    format_persona_for_prompt,
+                )
 
                 persona_hint = await format_persona_for_prompt(owner_id)
                 if persona_hint:
@@ -403,7 +418,9 @@ async def run_pipeline(
     # --- Загружаем self-profile, если не передан ---
     if self_profile is None:
         try:
-            from src.core.intelligence.prompt_assembler import assemble_self_profile_prompt
+            from src.core.intelligence.prompt_assembler import (
+                assemble_self_profile_prompt,
+            )
 
             self_profile = await assemble_self_profile_prompt(owner_id)
         except Exception:
