@@ -7,6 +7,7 @@ from sqlalchemy import or_, select
 
 from src.db.models import Memory
 from src.db.repo import get_or_create_user, list_memories
+from src.config import settings
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -180,4 +181,4 @@ async def temporal_migration_loop(owner_id: int) -> None:
             await update_temporal_layers(owner_id)
         except (ValueError, AttributeError, LookupError, OSError) as e:
             logger.error("Temporal migration error: %s", e)
-        await asyncio.sleep(3600)
+        await asyncio.sleep(settings.temporal_migration_interval_sec)

@@ -212,37 +212,17 @@ async def route_intent(
     self_profile_block = ""
     rag_context = ""
     try:
-        from src.core.prompt_assembler import AssemblyContext, prompt_assembler
+        from src.core.prompt_assembler import (
+            AssemblyContext,
+            assemble_self_profile_prompt,
+            prompt_assembler,
+        )
 
         # Self-profile
         self_profile_block = ""
         if user_id is not None:
             try:
-                from src.db.repo import get_or_create_user, get_self_profile
-                from src.db.session import get_session
-
-                async with get_session() as session:
-                    owner = await get_or_create_user(session, user_id)
-                    profile = await get_self_profile(session, owner)
-                    if profile:
-                        lines = ["ТВОЙ ПРОФИЛЬ (владелец):"]
-                        if profile.preferences:
-                            lines.append(f"Предпочтения: {profile.preferences}")
-                        if profile.goals:
-                            lines.append(f"Цели: {profile.goals}")
-                        if profile.current_projects:
-                            lines.append(f"Проекты: {profile.current_projects}")
-                        if profile.decision_style:
-                            lines.append(f"Стиль решений: {profile.decision_style}")
-                        if profile.communication_preferences:
-                            lines.append(
-                                f"Коммуникация: {profile.communication_preferences}"
-                            )
-                        if profile.sleep_pattern:
-                            lines.append(f"Сон: {profile.sleep_pattern}")
-                        if profile.work_hours:
-                            lines.append(f"Рабочие часы: {profile.work_hours}")
-                        self_profile_block = "\n".join(lines)
+                self_profile_block = await assemble_self_profile_prompt(user_id)
             except Exception:
                 logger.debug("Failed to load self_profile in route_intent, continuing")
 
@@ -277,7 +257,9 @@ async def route_intent(
             try:
                 from src.core.skills import build_skill_index
 
-                ctx.skill_index = (await build_skill_index(user_id, user_text, "agent"))[0]
+                ctx.skill_index = (
+                    await build_skill_index(user_id, user_text, "agent")
+                )[0]
             except Exception:
                 logger.debug("Failed to build skill index", exc_info=True)
         system = prompt_assembler.assemble(ctx)

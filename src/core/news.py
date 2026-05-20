@@ -244,4 +244,4 @@ async def news_scheduler_loop() -> None:
                             logger.exception("news topic failed: %s", topic)
         except Exception:
             logger.exception("news scheduler tick failed")
-        await asyncio.sleep(60)
+        await asyncio.sleep(app_settings.news_check_sec)

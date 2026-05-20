@@ -14,6 +14,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
+from src.config import settings
 from src.db.models import Skill, Trajectory
 from src.db.repo import (
     add_skill_usage,
@@ -154,17 +155,21 @@ async def suggest_skills_from_trajectories(telegram_id: int) -> int:
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
         rows = (
-            await session.execute(
-                select(Trajectory)
-                .where(
-                    Trajectory.user_id == owner.id,
-                    Trajectory.success == True,
-                    Trajectory.created_at >= since,
+            (
+                await session.execute(
+                    select(Trajectory)
+                    .where(
+                        Trajectory.user_id == owner.id,
+                        Trajectory.success == True,
+                        Trajectory.created_at >= since,
+                    )
+                    .order_by(Trajectory.created_at.desc())
+                    .limit(200)
                 )
-                .order_by(Trajectory.created_at.desc())
-                .limit(200)
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
         buckets: Counter[tuple[str, str]] = Counter()
         examples: dict[tuple[str, str], Trajectory] = {}
@@ -180,7 +185,11 @@ async def suggest_skills_from_trajectories(telegram_id: int) -> int:
             if count < 3:
                 continue
             name = _safe_skill_name(route_mode, intent_name)
-            existing = [s for s in await list_skills(session, owner, limit=200) if s.name == name]
+            existing = [
+                s
+                for s in await list_skills(session, owner, limit=200)
+                if s.name == name
+            ]
             if existing:
                 continue
             sample = examples[(route_mode, intent_name)]
@@ -195,7 +204,11 @@ async def suggest_skills_from_trajectories(telegram_id: int) -> int:
                 owner,
                 name=name,
                 description=f"Auto-suggested from {count} successful recent turns.",
-                trigger_patterns_json=[route_mode, intent_name, sample.request_text[:80]],
+                trigger_patterns_json=[
+                    route_mode,
+                    intent_name,
+                    sample.request_text[:80],
+                ],
                 body=body,
                 enabled=False,
                 review_status="pending",
@@ -219,5 +232,4 @@ async def skill_optimizer_loop(telegram_id: int) -> None:
                 )
         except Exception:
             logger.exception("skill_optimizer_loop failed")
-        await asyncio.sleep(24 * 3600)
-
+        await asyncio.sleep(settings.skill_optimizer_interval_sec)

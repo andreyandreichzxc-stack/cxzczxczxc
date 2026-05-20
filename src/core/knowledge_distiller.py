@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from src.db.repo import add_memory, get_or_create_user, list_memories
 from src.db.session import get_session
+from src.config import settings
 from src.llm.base import ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -166,7 +167,7 @@ async def distillation_loop(owner_id: int) -> None:
                         ),
                         priority=Notification.PRIORITY_MEDIUM,
                     )
-            await asyncio.sleep(600)
+            await asyncio.sleep(settings.knowledge_distiller_interval_sec)
         except Exception as e:
             logger.error(f"Distillation loop error: {e}")
-            await asyncio.sleep(3600)
+            await asyncio.sleep(settings.knowledge_distiller_interval_sec)

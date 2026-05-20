@@ -15,6 +15,7 @@ from src.core.temporal_layers import (
 from src.core.timeutil import now_in_tz
 from src.db.models import Memory
 from src.db.repo import get_or_create_user
+from src.config import settings
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -38,10 +39,12 @@ async def memory_decay_loop(owner_id: int) -> None:
                     logger.info(
                         "Memory decay done: %d closed, %d decayed", closed, decayed
                     )
-            await asyncio.sleep(600)  # каждые 10 минут проверка
+            await asyncio.sleep(
+                settings.memory_check_interval_sec
+            )  # каждые 10 минут проверка
         except (ValueError, AttributeError, LookupError, OSError) as e:
             logger.error("Memory decay error: %s", e)
-            await asyncio.sleep(3600)
+            await asyncio.sleep(settings.memory_check_interval_sec)
 
 
 async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:

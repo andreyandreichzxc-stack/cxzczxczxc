@@ -21,6 +21,7 @@ from src.db.repo import (
     list_memories,
     list_open_commitments,
 )
+from src.config import settings
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -278,7 +279,9 @@ async def proactive_briefing_loop(owner_id: int) -> None:
                 )
                 await asyncio.sleep(3600)
 
-            await asyncio.sleep(300)  # проверка каждые 5 минут
+            await asyncio.sleep(
+                settings.proactive_briefing_check_sec
+            )  # проверка каждые 5 минут
         except Exception as e:
             logger.error("Briefing loop error: %s", e)
-            await asyncio.sleep(600)
+            await asyncio.sleep(settings.proactive_briefing_check_sec)

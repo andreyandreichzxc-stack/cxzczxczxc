@@ -192,4 +192,4 @@ async def digest_scheduler_loop() -> None:
                 last_sent[owner_id] = current_day
         except Exception:
             logger.exception("digest scheduler tick failed")
-        await asyncio.sleep(60)
+        await asyncio.sleep(app_settings.digest_check_sec)

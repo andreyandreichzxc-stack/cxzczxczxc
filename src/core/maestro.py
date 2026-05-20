@@ -404,32 +404,9 @@ async def run_pipeline(
     # --- Загружаем self-profile, если не передан ---
     if self_profile is None:
         try:
-            from src.db.models import SelfProfile
-            from src.db.repo import get_or_create_user, get_self_profile
-            from src.db.session import get_session
+            from src.core.prompt_assembler import assemble_self_profile_prompt
 
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_id)
-                profile = await get_self_profile(session, owner)
-                if profile:
-                    lines = ["ТВОЙ ПРОФИЛЬ (владелец):"]
-                    if profile.preferences:
-                        lines.append(f"Предпочтения: {profile.preferences}")
-                    if profile.goals:
-                        lines.append(f"Цели: {profile.goals}")
-                    if profile.current_projects:
-                        lines.append(f"Проекты: {profile.current_projects}")
-                    if profile.decision_style:
-                        lines.append(f"Стиль решений: {profile.decision_style}")
-                    if profile.communication_preferences:
-                        lines.append(
-                            f"Коммуникация: {profile.communication_preferences}"
-                        )
-                    if profile.sleep_pattern:
-                        lines.append(f"Сон: {profile.sleep_pattern}")
-                    if profile.work_hours:
-                        lines.append(f"Рабочие часы: {profile.work_hours}")
-                    self_profile = "\n".join(lines)
+            self_profile = await assemble_self_profile_prompt(owner_id)
         except Exception:
             logger.debug("Failed to load self_profile, continuing without")
 

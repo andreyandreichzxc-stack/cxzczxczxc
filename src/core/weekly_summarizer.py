@@ -19,6 +19,7 @@ from src.db.repo import (
 )
 from src.db.session import get_session
 from src.llm.base import ChatMessage
+from src.config import settings
 from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
@@ -153,10 +154,10 @@ async def weekly_summary_loop(owner_id: int) -> None:
                                 "Consolidated %d episodic facts into weekly tier",
                                 consolidated,
                             )
-            await asyncio.sleep(3600)  # проверка раз в час
+            await asyncio.sleep(settings.weekly_summary_check_sec)  # проверка раз в час
         except Exception as e:
             logger.error("Weekly summary error: %s", e)
-            await asyncio.sleep(3600)
+            await asyncio.sleep(settings.weekly_summary_check_sec)
 
 
 CONSOLIDATION_PROMPT = (

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, func
 
 from src.core.notification_queue import notification_queue
+from src.config import settings
 from src.core.timeutil import now_in_tz
 from src.db.models import (
     Commitment,
@@ -450,10 +451,10 @@ async def weekly_digest_loop(owner_id: int) -> None:
                 )
                 logger.info("Weekly digest sent for owner %d", owner_id)
 
-            await asyncio.sleep(3600)  # проверка раз в час
+            await asyncio.sleep(settings.weekly_digest_check_sec)  # проверка раз в час
         except Exception as e:
             logger.error("Weekly digest error: %s", e)
-            await asyncio.sleep(3600)
+            await asyncio.sleep(settings.weekly_digest_check_sec)
 
 
 # Синглтон

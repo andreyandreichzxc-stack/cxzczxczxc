@@ -10,6 +10,7 @@ from src.core.notification_queue import notification_queue
 from src.db.models import Notification
 from src.core.timeutil import now_in_tz
 from src.db.repo import get_or_create_user, list_memories
+from src.config import settings
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -213,4 +214,4 @@ async def habit_tracker_loop(owner_id: int) -> None:
                     )
         except Exception as e:
             logger.exception("Habit tracker error: %s", e)
-        await asyncio.sleep(3600)  # проверять каждый час
+        await asyncio.sleep(settings.habit_tracker_interval_sec)  # проверять каждый час

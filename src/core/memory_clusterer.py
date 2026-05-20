@@ -15,6 +15,7 @@ from src.db.repo import (
     list_memories,
     upsert_memory_cluster,
 )
+from src.config import settings
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -122,4 +123,4 @@ async def cluster_loop(telegram_id: int) -> None:
                 logger.info("Clusters rebuilt: %d created", n)
         except Exception as e:
             logger.error("Cluster loop error: %s", e)
-        await asyncio.sleep(600)
+        await asyncio.sleep(settings.memory_clusterer_interval_sec)

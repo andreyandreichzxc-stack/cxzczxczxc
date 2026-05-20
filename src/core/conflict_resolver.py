@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from collections import defaultdict
 from src.db.session import get_session
+from src.config import settings
 from src.db.repo import get_or_create_user, list_memories, get_contact
 
 logger = logging.getLogger(__name__)
@@ -218,7 +219,7 @@ async def conflict_check_loop(owner_id: int):
                         priority=Notification.PRIORITY_HIGH,
                         reply_markup=kb,
                     )
-            await asyncio.sleep(600)
+            await asyncio.sleep(settings.conflict_resolver_interval_sec)
         except Exception as e:
             logger.error(f"Conflict check error: {e}")
-            await asyncio.sleep(3600)
+            await asyncio.sleep(settings.conflict_resolver_interval_sec)

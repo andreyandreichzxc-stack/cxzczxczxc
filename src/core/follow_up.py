@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from src.core.notification_queue import notification_queue
 from src.db.models import Notification
 from src.db.repo import get_or_create_user, get_contact, list_active_conversations
+from src.config import settings
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ async def follow_up_loop(owner_id: int) -> None:
                         f"<i>/threads — просмотреть и ответить</i>",
                         priority=Notification.PRIORITY_HIGH,
                     )
-            await asyncio.sleep(4 * 3600)  # раз в 4 часа
+            await asyncio.sleep(settings.follow_up_interval_sec)  # раз в 4 часа
         except Exception as e:
             logger.error("FollowUp loop error: %s", e)
-            await asyncio.sleep(3600)
+            await asyncio.sleep(settings.follow_up_interval_sec)

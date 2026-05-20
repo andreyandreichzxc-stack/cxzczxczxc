@@ -18,6 +18,7 @@ from src.db.repo import (
     list_contacts,
     list_memories,
 )
+from src.config import settings
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -246,7 +247,7 @@ async def patterns_loop(owner_id: int) -> None:
                     )
                     await asyncio.sleep(0.5)
                 await asyncio.sleep(600)  # не повторять в этот час
-            await asyncio.sleep(600)  # проверка каждые 10 минут
+            await asyncio.sleep(settings.memory_patterns_interval_sec)  # �������� ������ 10 �����
         except Exception as e:
             logger.error(f"Patterns loop error: {e}")
-            await asyncio.sleep(3600)
+            await asyncio.sleep(settings.memory_patterns_interval_sec)

@@ -18,6 +18,7 @@ from src.db.repo import (
     list_active_conversations,
     list_memories,
 )
+from src.config import settings
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -190,4 +191,4 @@ async def conflict_predictor_loop(owner_id: int) -> None:
                 )
         except Exception as e:
             logger.exception("Conflict predictor error: %s", e)
-        await asyncio.sleep(3 * 3600)
+        await asyncio.sleep(settings.conflict_predictor_interval_sec)

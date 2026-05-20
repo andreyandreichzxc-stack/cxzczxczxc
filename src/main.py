@@ -41,7 +41,7 @@ async def global_style_scheduler_loop(owner_telegram_id: int) -> None:
             await update_global_style_profile(owner_telegram_id)
         except Exception as e:
             logger.error("Global style update failed: %s", e)
-        await asyncio.sleep(12 * 3600)  # 12 hours
+        await asyncio.sleep(settings.global_style_interval_sec)  # 12 hours
 
 
 async def instruction_optimizer_scheduler_loop(owner_telegram_id: int) -> None:
@@ -51,7 +51,7 @@ async def instruction_optimizer_scheduler_loop(owner_telegram_id: int) -> None:
             await instruction_optimizer.instruction_optimizer_loop(owner_telegram_id)
         except Exception as e:
             logger.error("Instruction optimizer failed: %s", e)
-        await asyncio.sleep(24 * 3600)
+        await asyncio.sleep(settings.instruction_optimizer_interval_sec)
 
 
 async def main() -> None:

@@ -256,3 +256,45 @@ class PromptAssembler:
 
 # Глобальный синглтон (ленивый — не создаёт БД-соединений при импорте)
 prompt_assembler = PromptAssembler()
+
+
+async def assemble_self_profile_prompt(owner_id: int, session=None) -> str:
+    """Собирает блок self-profile из БД.
+
+    Args:
+        owner_id: ID владельца.
+        session: опциональная асинхронная сессия (если None — создаёт новую).
+
+    Returns:
+        отформатированный блок профиля или "" если профиля нет / ошибка.
+    """
+    from src.db.repo import get_or_create_user, get_self_profile
+    from src.db.session import get_session
+
+    if session is not None:
+        owner = await get_or_create_user(session, owner_id)
+        profile = await get_self_profile(session, owner)
+    else:
+        async with get_session() as _session:
+            owner = await get_or_create_user(_session, owner_id)
+            profile = await get_self_profile(_session, owner)
+
+    if not profile:
+        return ""
+
+    lines = ["ТВОЙ ПРОФИЛЬ (владелец):"]
+    if profile.preferences:
+        lines.append(f"Предпочтения: {profile.preferences}")
+    if profile.goals:
+        lines.append(f"Цели: {profile.goals}")
+    if profile.current_projects:
+        lines.append(f"Проекты: {profile.current_projects}")
+    if profile.decision_style:
+        lines.append(f"Стиль решений: {profile.decision_style}")
+    if profile.communication_preferences:
+        lines.append(f"Коммуникация: {profile.communication_preferences}")
+    if profile.sleep_pattern:
+        lines.append(f"Сон: {profile.sleep_pattern}")
+    if profile.work_hours:
+        lines.append(f"Рабочие часы: {profile.work_hours}")
+    return "\n".join(lines)

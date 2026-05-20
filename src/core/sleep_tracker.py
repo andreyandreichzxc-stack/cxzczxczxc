@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.core.timeutil import now_in_tz
 from src.db.repo import get_or_create_user
+from src.config import settings
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,7 @@ async def sleep_tracker_loop(owner_id: int) -> None:
                                 priority=Notification.PRIORITY_LOW,
                             )
                             _notified_for_date = None
-            await asyncio.sleep(900)  # каждые 15 минут
+            await asyncio.sleep(settings.sleep_tracker_check_sec)  # каждые 15 минут
         except Exception as e:
             logger.error("Sleep tracker error: %s", e)
-            await asyncio.sleep(600)
+            await asyncio.sleep(settings.sleep_tracker_fallback_sec)
