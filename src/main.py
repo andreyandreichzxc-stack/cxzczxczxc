@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 
 from src.config import settings
 from src.bot.app import run_bot
@@ -57,6 +58,39 @@ async def instruction_optimizer_scheduler_loop(owner_telegram_id: int) -> None:
         await asyncio.sleep(settings.instruction_optimizer_interval_sec)
 
 
+async def _disk_monitor_loop(owner_id: int) -> None:
+    """Мониторинг свободного места на диске."""
+    import shutil
+    from src.core.notification_queue import notification_queue
+
+    last_warning_at = 0.0
+
+    while True:
+        try:
+            usage = shutil.disk_usage(settings.data_dir)
+            free_mb = usage.free / (1024 * 1024)
+
+            if free_mb < settings.disk_critical_mb:
+                await notification_queue.enqueue(
+                    topic="disk_monitor",
+                    text=f"⛔ КРИТИЧНО: свободно {free_mb:.0f} MB на диске!",
+                    priority=0,
+                )
+            elif free_mb < settings.disk_warning_mb:
+                now = time.monotonic()
+                if now - last_warning_at > 3600:
+                    await notification_queue.enqueue(
+                        topic="disk_monitor",
+                        text=f"⚠️ Мало места на диске: {free_mb:.0f} MB свободно.",
+                        priority=1,
+                    )
+                    last_warning_at = now
+        except Exception:
+            logger.exception("disk monitor error")
+
+        await asyncio.sleep(settings.disk_monitor_interval_sec)
+
+
 def _register_background_tasks() -> None:
     """Register all background tasks into the global task_manager."""
     oid = settings.owner_telegram_id
@@ -84,6 +118,33 @@ def _register_background_tasks() -> None:
         "instruction-optimizer", lambda: instruction_optimizer_scheduler_loop(oid)
     )
     task_manager.register("skill-optimizer", lambda: skill_optimizer_loop(oid))
+    task_manager.register("disk-monitor", lambda: _disk_monitor_loop(oid))
+    task_manager.register(
+        "media_sweep",
+        lambda oid=oid: _media_sweep_loop(oid),
+    )
+
+
+async def _media_sweep_loop(owner_id: int):
+    """Периодическая очистка осиротевших медиа-файлов."""
+    from src.core.chat_service import sweep_orphaned_media
+    from src.db.models import Notification
+
+    await asyncio.sleep(60)  # первый запуск через минуту после старта
+    while True:
+        try:
+            deleted = await sweep_orphaned_media()
+            if deleted:
+                from src.core.notification_queue import notification_queue
+
+                await notification_queue.enqueue(
+                    topic="media_sweep",
+                    text=f"🧹 Очищено {deleted} временных медиа-файлов.",
+                    priority=Notification.PRIORITY_LOW,
+                )
+        except Exception:
+            logger.exception("media sweep loop error")
+        await asyncio.sleep(6 * 3600)  # раз в 6 часов
 
 
 async def main() -> None:
@@ -96,6 +157,10 @@ async def main() -> None:
     await init_db()
 
     start_worker()
+
+    from src.core.vector_store import vector_store
+
+    await vector_store.check_health_and_recover()
 
     userbot_manager = UserbotManager()
     await userbot_manager.restore_all()

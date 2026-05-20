@@ -5,7 +5,7 @@ from pathlib import Path
 from telethon import TelegramClient
 from telethon.tl.custom import Message as TgMessage
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
 from src.config import settings
 from src.core.documents import extract_text, is_supported
@@ -99,6 +99,12 @@ async def _process_one(
                 mistral_key=mistral_key,
                 api_provider=api_provider,
             )
+            # Транскрипция готова — файл больше не нужен
+            try:
+                target.unlink(missing_ok=True)
+                media_path = None
+            except Exception:
+                logger.debug("cleanup voice file failed: %s", target, exc_info=True)
         except Exception:
             logger.exception("transcription failed for msg %s", msg.id)
 
@@ -110,6 +116,12 @@ async def _process_one(
                 await msg.download_media(file=str(target))
                 media_path = str(target)
                 extracted = await extract_text(target)
+                # Текст извлечён — документ больше не нужен
+                try:
+                    target.unlink(missing_ok=True)
+                    media_path = None
+                except Exception:
+                    logger.debug("cleanup doc file failed: %s", target, exc_info=True)
             except Exception:
                 logger.exception("doc parse failed for msg %s", msg.id)
 
@@ -272,6 +284,11 @@ async def _backfill_transcripts(
                 mistral_key=mistral_key,
                 api_provider=api_provider,
             )
+            # Транскрипция готова — удаляем временный файл
+            try:
+                target.unlink(missing_ok=True)
+            except Exception:
+                logger.debug("backfill cleanup file failed: %s", target, exc_info=True)
         except Exception:
             logger.exception(
                 "backfill transcript failed for msg %s in peer %s",
@@ -295,7 +312,7 @@ async def _backfill_transcripts(
                 kind=m.kind,
                 text=m.text,
                 transcript=transcript,
-                media_path=str(target) if "target" in locals() else m.media_path,
+                media_path=None,
                 extracted_text=m.extracted_text,
             )
 
@@ -310,3 +327,65 @@ def message_to_text(m: Message) -> str:
 
 def messages_to_transcript(messages: list[Message]) -> str:
     return "\n".join(message_to_text(m) for m in messages)
+
+
+async def sweep_orphaned_media() -> int:
+    """Удаляет осиротевшие .ogg/.pdf/.docx в data/media/.
+    Файл считается осиротевшим, если в БД у этого сообщения уже есть транскрипт.
+    Возвращает количество удалённых файлов."""
+    from sqlalchemy import or_
+
+    from src.db.models import Message
+    from src.db.session import get_session
+
+    media_root = settings.data_dir / "media"
+    if not media_root.exists():
+        return 0
+
+    deleted = 0
+    # Собираем все message_id у которых есть транскрипт
+    async with get_session() as session:
+        result = await session.execute(
+            select(Message.message_id, Message.peer_id)
+            .where(
+                or_(
+                    Message.transcript.isnot(None),
+                    Message.extracted_text.isnot(None),
+                )
+            )
+            .group_by(Message.message_id, Message.peer_id)
+        )
+        transcribed_ids = {(r.message_id, r.peer_id) for r in result.all()}
+
+    # Удаляем .ogg файлы
+    for ogg in media_root.rglob("*.ogg"):
+        try:
+            name = ogg.stem  # формат: "{peer_id}_{message_id}"
+            parts = name.split("_", 1)
+            if len(parts) == 2:
+                peer_id = int(parts[0])
+                msg_id = int(parts[1])
+                if (msg_id, peer_id) in transcribed_ids:
+                    ogg.unlink(missing_ok=True)
+                    deleted += 1
+        except (ValueError, Exception):
+            pass
+
+    # Удаляем .pdf/.docx файлы (формат: "{peer_id}_{message_id}_{filename}")
+    for ext in ("*.pdf", "*.docx"):
+        for doc in media_root.rglob(ext):
+            try:
+                name = doc.stem
+                parts = name.split("_", 2)
+                if len(parts) >= 2:
+                    peer_id = int(parts[0])
+                    msg_id = int(parts[1])
+                    if (msg_id, peer_id) in transcribed_ids:
+                        doc.unlink(missing_ok=True)
+                        deleted += 1
+            except (ValueError, Exception):
+                pass
+
+    if deleted:
+        logger.info("Swept %d orphaned media files", deleted)
+    return deleted

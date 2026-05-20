@@ -294,6 +294,39 @@ class VectorStore:
             for p in raw
         ]
 
+    async def check_health_and_recover(self) -> bool:
+        """Проверяет целостность Qdrant и восстанавливает при повреждении.
+        Возвращает True если здоров, False если восстановился."""
+        try:
+            self._client.get_collections()
+            return True
+        except Exception:
+            logger.exception("Qdrant health check failed — attempting recovery")
+            try:
+                import shutil
+
+                qdrant_dir = settings.data_dir / "qdrant"
+                shutil.rmtree(str(qdrant_dir), ignore_errors=True)
+                qdrant_dir.mkdir(parents=True, exist_ok=True)
+                self._client = QdrantClient(path=str(qdrant_dir))
+                self._ensure_collection(1536)
+                logger.warning("Qdrant recovered — old data lost, re-index needed")
+                from src.core.notification_queue import notification_queue
+                from src.db.models import Notification
+
+                try:
+                    await notification_queue.enqueue(
+                        topic="qdrant_health",
+                        text="⚠️ Qdrant был повреждён и восстановлен. Нужен /index для переиндексации.",
+                        priority=Notification.PRIORITY_HIGH,
+                    )
+                except Exception:
+                    pass
+                return False
+            except Exception:
+                logger.exception("Qdrant recovery failed")
+                return False
+
     async def shutdown(self) -> None:
         """Graceful shutdown — закрывает Qdrant клиент."""
         try:

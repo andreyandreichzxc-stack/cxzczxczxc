@@ -163,6 +163,14 @@ class Settings(BaseSettings):
         "voxtral-mini-transcribe-latest", description="Mistral STT модель"
     )
 
+    disk_critical_mb: int = Field(
+        100, description="Критический порог свободного места (MB)"
+    )
+    disk_warning_mb: int = Field(
+        500, description="Предупредительный порог свободного места (MB)"
+    )
+    disk_monitor_interval_sec: int = Field(600, description="Интервал проверки диска")
+
     @property
     def data_dir(self) -> Path:
         path = PROJECT_ROOT / "data"
