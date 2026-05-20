@@ -4,7 +4,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from src.config import settings
-from src.core.tg_sender import send_with_retry
+from src.bot.tg_sender import send_with_retry
 
 
 if TYPE_CHECKING:

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from src.config import settings as app_settings
+from src.config import settings
 from src.core.notification_queue import notification_queue
 from src.db.models import Notification
 from src.core.timeutil import fmt_local
@@ -83,7 +83,7 @@ async def _check_once(owner_telegram_id: int) -> None:
 async def reminders_loop() -> None:
     while True:
         try:
-            await _check_once(app_settings.owner_telegram_id)
+            await _check_once(settings.owner_telegram_id)
         except Exception:
             logger.exception("reminders tick failed")
         await asyncio.sleep(REMINDER_TICK_SECONDS)

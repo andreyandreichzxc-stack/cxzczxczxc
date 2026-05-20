@@ -7,7 +7,7 @@ from telethon.tl.custom import Message as TgMessage
 
 from sqlalchemy import select
 
-from src.config import settings as app_settings
+from src.config import settings
 from src.core.documents import extract_text, is_supported
 from src.core.transcription import transcription_service
 from src.db.models import Message, User, UserSettings
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 def _media_dir(owner_telegram_id: int) -> Path:
-    path = app_settings.data_dir / "media" / str(owner_telegram_id)
+    path = settings.data_dir / "media" / str(owner_telegram_id)
     path.mkdir(parents=True, exist_ok=True)
     return path
 

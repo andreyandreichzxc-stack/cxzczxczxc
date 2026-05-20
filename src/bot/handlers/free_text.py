@@ -18,7 +18,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
-from src.config import settings as app_settings
+from src.config import settings
 from src.core.agent import route_intent
 from src.core.chat_service import load_chat
 from src.core.maestro import run_pipeline
@@ -1081,7 +1081,7 @@ async def free_voice(
         mistral_key = await get_api_key(session, owner, "mistral")
         api_provider = getattr(owner.settings, "transcription_api_provider", "openai")
 
-    media_dir = app_settings.data_dir / "media" / "control_bot"
+    media_dir = settings.data_dir / "media" / "control_bot"
     media_dir.mkdir(parents=True, exist_ok=True)
     target = media_dir / f"{message.message_id}_{media.file_unique_id}.ogg"
 

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from src.config import settings as app_settings
+from src.config import settings
 from src.core.notification_queue import notification_queue
 from src.core.text_sanitizer import sanitize_html
 from src.db.models import Notification
@@ -174,7 +174,7 @@ async def digest_scheduler_loop() -> None:
     last_sent: dict[int, str] = {}  # telegram_id -> "YYYY-MM-DD"
     while True:
         try:
-            owner_id = app_settings.owner_telegram_id
+            owner_id = settings.owner_telegram_id
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_id)
                 tz_name = owner.settings.timezone
@@ -192,4 +192,4 @@ async def digest_scheduler_loop() -> None:
                 last_sent[owner_id] = current_day
         except Exception:
             logger.exception("digest scheduler tick failed")
-        await asyncio.sleep(app_settings.digest_check_sec)
+        await asyncio.sleep(settings.digest_check_sec)

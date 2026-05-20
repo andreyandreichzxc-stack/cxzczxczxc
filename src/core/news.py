@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from telethon import TelegramClient
 
-from src.config import settings as app_settings
+from src.config import settings
 from src.core.notification_queue import notification_queue
 from src.db.models import Notification
 from src.core.text_sanitizer import sanitize_html
@@ -186,7 +186,7 @@ async def news_scheduler_loop() -> None:
     last_sent: dict[int, str] = {}
     while True:
         try:
-            owner_id = app_settings.owner_telegram_id
+            owner_id = settings.owner_telegram_id
             topics_to_run: list[tuple[str, int]] = []
             async with get_session() as session:
                 owner = await get_or_create_user(session, owner_id)
@@ -241,4 +241,4 @@ async def news_scheduler_loop() -> None:
                             logger.exception("news topic failed: %s", topic)
         except Exception:
             logger.exception("news scheduler tick failed")
-        await asyncio.sleep(app_settings.news_check_sec)
+        await asyncio.sleep(settings.news_check_sec)

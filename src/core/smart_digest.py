@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from src.config import settings as app_settings
+from src.config import settings
 from src.core.notification_queue import notification_queue
 from src.core.urgency_classifier import classify_message
 from src.db.models import Notification

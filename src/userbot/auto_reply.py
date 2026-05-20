@@ -18,7 +18,7 @@ from telethon.tl.types import (
     UserStatusOnline,
 )
 
-from src.config import settings as app_settings
+from src.config import settings
 from src.core.chat_service import load_chat, message_to_text
 from src.core.notification_queue import notification_queue
 from src.core.notifier import notifier
