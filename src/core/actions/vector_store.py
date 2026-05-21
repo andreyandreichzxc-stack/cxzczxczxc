@@ -172,6 +172,13 @@ class VectorStore:
                 self._memory_dim = info.config.params.vectors.size
             else:
                 return []
+        if len(embedding) != self._memory_dim:
+            logger.warning(
+                "Memory embedding dim %d != collection dim %d — re-index needed?",
+                len(embedding),
+                self._memory_dim,
+            )
+            return []
 
         flt = qmodels.Filter(
             must=[

@@ -78,6 +78,8 @@ def test_get_vector_store_lazy():
             vs_instance._client.close()
         except Exception:
             pass
+    # Reset singleton to prevent stale closed-client singleton from leaking
+    vs._vector_store = None
 
 
 # ---------------------------------------------------------------------------
