@@ -42,10 +42,10 @@ async def get_neighbors(owner_id: int, memory_id: int, limit: int = 3) -> list[d
             logger.debug("Failed to embed for neighbors (memory_id=%d)", memory_id)
             return []
 
-    from src.core.actions.vector_store import vector_store
+    from src.core.actions.vector_store import get_vector_store
 
     # Ищем похожие факты в Qdrant (+1 чтобы потом исключить сам факт)
-    neighbors = await vector_store.search_similar_memories(
+    neighbors = await get_vector_store().search_similar_memories(
         user_id=owner.id,
         embedding=embedding,
         threshold=0.65,
@@ -113,7 +113,7 @@ async def find_cross_contact_bridges(owner_id: int) -> list[dict]:
         if not provider:
             return []
 
-    from src.core.actions.vector_store import vector_store
+    from src.core.actions.vector_store import get_vector_store
 
     bridges: list[dict] = []
     seen_pairs: set[tuple[int, int]] = set()
@@ -124,7 +124,7 @@ async def find_cross_contact_bridges(owner_id: int) -> list[dict]:
         except Exception:
             continue
 
-        neighbors = await vector_store.search_similar_memories(
+        neighbors = await get_vector_store().search_similar_memories(
             user_id=owner.id,
             embedding=emb,
             threshold=0.75,

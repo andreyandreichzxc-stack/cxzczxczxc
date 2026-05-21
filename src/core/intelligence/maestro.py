@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 from src.core.infra.text_sanitizer import sanitize_html
-from src.core.actions.vector_store import vector_store
+from src.core.actions.vector_store import get_vector_store
 from src.db.repo import get_or_create_user, list_contacts, search_memories
 from src.db.session import get_session
 from src.llm.base import ChatMessage
@@ -134,7 +134,7 @@ async def process(
                 _owner_db_id = owner_db.id if owner_db else None
             if _owner_db_id is not None:
                 query_vec = await provider.embed(user_text)
-                hits = await vector_store.search(
+                hits = await get_vector_store().search(
                     user_id=_owner_db_id, embedding=query_vec, limit=5
                 )
             else:

@@ -2,6 +2,7 @@
 с актуальным размером embedding'а — это позволяет менять провайдера без миграций."""
 
 import asyncio
+import hashlib
 import logging
 from dataclasses import dataclass
 
@@ -165,7 +166,12 @@ class VectorStore:
         """
         await self._ensure_memory_collection(len(embedding))
         if self._memory_dim is None:
-            return []
+            existing = {c.name for c in self._client.get_collections().collections}
+            if MEMORY_COLLECTION in existing:
+                info = self._client.get_collection(MEMORY_COLLECTION)
+                self._memory_dim = info.config.params.vectors.size
+            else:
+                return []
 
         flt = qmodels.Filter(
             must=[
@@ -183,13 +189,14 @@ class VectorStore:
             ]
 
         def _do() -> list[qmodels.ScoredPoint]:
-            return self._client.search(
+            response = self._client.query_points(
                 collection_name=MEMORY_COLLECTION,
-                query_vector=embedding,
+                query=embedding,
                 limit=limit,
                 query_filter=flt,
                 score_threshold=threshold,
             )
+            return response.points
 
         raw = await asyncio.to_thread(_do)
         return [
@@ -207,11 +214,9 @@ class VectorStore:
 
     @staticmethod
     def _point_id(user_id: int, peer_id: int, message_id: int) -> int:
-        # 64-битный int = user(16) | peer(24) | msg(24)
-        return (
-            ((user_id & 0xFFFF) << 48)
-            | ((peer_id & 0xFFFFFF) << 24)
-            | (message_id & 0xFFFFFF)
+        return int(
+            hashlib.md5(f"{user_id}:{peer_id}:{message_id}".encode()).hexdigest()[:16],
+            16,
         )
 
     async def upsert(
@@ -257,7 +262,12 @@ class VectorStore:
         peer_id: int | None = None,
     ) -> list[VectorHit]:
         if self._dim is None:
-            return []
+            existing = {c.name for c in self._client.get_collections().collections}
+            if COLLECTION in existing:
+                info = self._client.get_collection(COLLECTION)
+                self._dim = info.config.params.vectors.size
+            else:
+                return []
         flt = qmodels.Filter(
             must=[
                 qmodels.FieldCondition(
@@ -273,12 +283,13 @@ class VectorStore:
             )
 
         def _do() -> list[qmodels.ScoredPoint]:
-            return self._client.search(
+            response = self._client.query_points(
                 collection_name=COLLECTION,
-                query_vector=embedding,
+                query=embedding,
                 limit=limit,
                 query_filter=flt,
             )
+            return response.points
 
         raw = await asyncio.to_thread(_do)
         return [
@@ -306,10 +317,11 @@ class VectorStore:
                 import shutil
 
                 qdrant_dir = settings.data_dir / "qdrant"
+                self._client.close()
                 shutil.rmtree(str(qdrant_dir), ignore_errors=True)
                 qdrant_dir.mkdir(parents=True, exist_ok=True)
                 self._client = QdrantClient(path=str(qdrant_dir))
-                self._ensure_collection(1536)
+                await self._ensure_collection(1536)
                 logger.warning("Qdrant recovered — old data lost, re-index needed")
                 from src.core.scheduling.notification_queue import notification_queue
                 from src.db.models import Notification
@@ -336,4 +348,11 @@ class VectorStore:
             logger.exception("vector_store shutdown failed")
 
 
-vector_store = VectorStore()
+_vector_store: VectorStore | None = None
+
+
+def get_vector_store() -> VectorStore:
+    global _vector_store
+    if _vector_store is None:
+        _vector_store = VectorStore()
+    return _vector_store

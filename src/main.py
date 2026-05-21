@@ -158,9 +158,9 @@ async def main() -> None:
 
     start_worker()
 
-    from src.core.actions.vector_store import vector_store
+    from src.core.actions.vector_store import get_vector_store
 
-    await vector_store.check_health_and_recover()
+    await get_vector_store().check_health_and_recover()
 
     userbot_manager = UserbotManager()
     await userbot_manager.restore_all()
@@ -177,9 +177,9 @@ async def main() -> None:
         await stop_worker()
         await notification_queue.stop()
 
-        from src.core.actions.vector_store import vector_store
+        from src.core.actions.vector_store import get_vector_store
 
-        await vector_store.shutdown()
+        await get_vector_store().shutdown()
 
 
 def run() -> None:

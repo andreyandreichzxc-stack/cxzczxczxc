@@ -165,7 +165,7 @@ async def recall(
         # --- 3. Hybrid search: Qdrant semantic + FTS5 keyword (RRF) ---
         if include_semantic:
             try:
-                from src.core.actions.vector_store import vector_store
+                from src.core.actions.vector_store import get_vector_store
                 from src.db.repo import search_memories_fts_with_scores
 
                 provider = await build_provider(session, owner)
@@ -173,7 +173,7 @@ async def recall(
                     embedding = await provider.embed(query[:300])
 
                     # Параллельный запуск: векторный + ключевой поиск
-                    vector_task = vector_store.search_similar_memories(
+                    vector_task = get_vector_store().search_similar_memories(
                         user_id=owner.id,
                         embedding=embedding,
                         threshold=semantic_threshold,

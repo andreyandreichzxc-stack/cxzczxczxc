@@ -73,7 +73,7 @@ async def _process_job(job: MemoryJob) -> None:
 async def _handle_save(session, owner, job: MemoryJob) -> None:
     """Сохранить готовые факты (job_type='save')."""
     from src.db.repo import add_memory, link_memories
-    from src.core.actions.vector_store import vector_store
+    from src.core.actions.vector_store import get_vector_store
 
     saved_memories: list = []
     for fact_data in job.facts or []:
@@ -88,7 +88,7 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
             decay_rate=fact_data.get("decay_rate", 0.07),
             memory_type=fact_data.get("memory_type"),
             embedding=fact_data.get("embedding"),
-            vector_store_obj=vector_store if fact_data.get("embedding") else None,
+            vector_store_obj=get_vector_store() if fact_data.get("embedding") else None,
         )
         if mem:
             saved_memories.append(mem)

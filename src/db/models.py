@@ -188,7 +188,9 @@ class LlmKeySlot(Base):
         Integer, default=0
     )  # чем выше, тем приоритетнее
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cooldown_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_error: Mapped[str | None] = mapped_column(String(256), nullable=True)
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     usage_count: Mapped[int] = mapped_column(Integer, default=0)

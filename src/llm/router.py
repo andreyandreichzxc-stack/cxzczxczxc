@@ -266,7 +266,9 @@ class ProviderFallback:
             try:
                 return await provider.chat(messages, heavy=heavy)
             except Exception as exc:
-                if not _is_retryable_llm_error(exc):
+                if not isinstance(exc, ExhaustedError) and not _is_retryable_llm_error(
+                    exc
+                ):
                     raise
                 last_error = exc
                 logger.warning(

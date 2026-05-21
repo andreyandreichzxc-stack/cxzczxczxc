@@ -10,7 +10,7 @@ from src.bot.filters import OwnerOnly
 from src.core.contacts.chat_service import load_chat
 from src.core.contacts.contact_resolver import resolve
 from src.core.actions.indexer import index_chat
-from src.core.actions.vector_store import vector_store
+from src.core.actions.vector_store import get_vector_store
 from src.db.models import Message as DBMessage
 from src.db.repo import (
     FtsHit,
@@ -149,7 +149,7 @@ async def cmd_search(
         # векторный fallback
         try:
             vec = await provider.embed(query)
-            vec_hits = await vector_store.search(
+            vec_hits = await get_vector_store().search(
                 user_id=owner.id, embedding=vec, limit=8
             )
             for h in vec_hits:

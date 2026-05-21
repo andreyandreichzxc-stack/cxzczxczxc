@@ -5,7 +5,7 @@ from datetime import datetime
 
 from sqlalchemy import select, update
 
-from src.core.actions.vector_store import vector_store
+from src.core.actions.vector_store import get_vector_store
 from src.db.models import Contact, Message, User
 from src.db.session import get_session
 from src.llm.base import LLMProvider
@@ -75,7 +75,7 @@ async def index_chat(
                 if vec is None:
                     continue
                 text = _msg_text_for_embed(m)
-                await vector_store.upsert(
+                await get_vector_store().upsert(
                     user_id=user.id,
                     peer_id=contact.peer_id,
                     peer_name=contact.display_name,

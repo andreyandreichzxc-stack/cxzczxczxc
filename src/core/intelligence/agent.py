@@ -9,7 +9,7 @@ import json
 import logging
 from typing import Any
 
-from src.core.actions.vector_store import vector_store
+from src.core.actions.vector_store import get_vector_store
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.llm.base import ChatMessage, LLMProvider
@@ -263,6 +263,26 @@ AGENT_SYSTEM = """\
 НИКОГДА не пиши текст вне JSON.
 - Если memory_context содержит релевантный факт — используй его в ответе естественно.
   «Кстати, ты говорил...», «Помню, ты упоминал...».
+
+## 🔄 Следование за контекстом диалога
+Если в истории диалога ты только что предлагал/спрашивал что-то конкретное
+(например, предложил отправить сообщение), а пользователь отвечает КОРОТКО
+(«да», «ок», «отправь», «нет», «добавь», «лучше так», «и ещё»),
+ОТНОСИСЬ ЭТО К ПРЕДЫДУЩЕМУ запросу, а не начинай новый intent.
+Используй историю диалога (history_block) чтобы понять контекст.
+
+## 🔗 Многосоставные запросы (intents array)
+Если пользователь в одном сообщении просит сделать НЕСКОЛЬКО действий
+(«напиши Васе привет и напомни завтра в 8 позвонить маме»),
+верни МАССИВ intents:
+{
+  "intents": [
+    {"intent": "send_message", "recipient": "Вася", "text": "привет"},
+    {"intent": "add_reminder", "text": "позвонить маме", "when": "..."}
+  ]
+}
+Используй "intents" ТОЛЬКО если действий действительно несколько.
+Для одного действия используй обычный {"intent": "..."}.
 """
 
 
@@ -280,7 +300,11 @@ def _safe_parse(raw: str) -> dict[str, Any]:
     raw = _strip_fence(raw)
     try:
         parsed = json.loads(raw)
-        if isinstance(parsed, dict) and isinstance(parsed.get("intent"), str):
+        # Support both single intent and intents array
+        if isinstance(parsed, dict) and (
+            isinstance(parsed.get("intent"), str)
+            or isinstance(parsed.get("intents"), list)
+        ):
             return parsed
     except Exception:
         logger.warning("agent: bad JSON: %r", raw[:200])
@@ -329,7 +353,7 @@ async def route_intent(
                     _owner_db_id = owner_db.id if owner_db else None
                 if _owner_db_id is not None:
                     query_vec = await provider.embed(user_text)
-                    hits = await vector_store.search(
+                    hits = await get_vector_store().search(
                         user_id=_owner_db_id, embedding=query_vec, limit=3
                     )
                 else:

@@ -1,1 +1,28 @@
-Generic single-database configuration.
+Alembic for TelegramHelper.
+
+## Schema management policy
+
+- **New databases:** Schema is created by `init_db()` (src/db/session.py) via
+  `Base.metadata.create_all` + FTS5 virtual tables + legacy ALTER TABLE blocks.
+  Run the app once and the database is ready.
+
+- **Existing databases:** Alembic is for INCREMENTAL schema changes added AFTER
+  the initial deployment. Use `alembic revision --autogenerate -m "..."` for
+  any new model fields or tables, then `alembic upgrade head`.
+
+- **Do NOT** expect `alembic upgrade head` to create a clean database from
+  scratch — the initial migration is empty because all tables already exist
+  in production databases via `init_db()`.
+
+## Usage
+
+```bash
+# Create a new migration for recent model changes:
+alembic revision --autogenerate -m "add_feature_x"
+
+# Apply pending migrations:
+alembic upgrade head
+
+# View current revision:
+alembic current
+```

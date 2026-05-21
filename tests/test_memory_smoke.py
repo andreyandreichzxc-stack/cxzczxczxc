@@ -240,7 +240,9 @@ async def test_decay_processes_all_expired_without_offset_skip():
     async with get_session() as session:
         owner = await get_or_create_user(session, OWNER_TG_ID)
         for idx in range(3):
-            await add_memory(session, owner, fact=f"Временный факт {idx}", source="chat")
+            await add_memory(
+                session, owner, fact=f"Временный факт {idx}", source="chat"
+            )
         mems = await list_memories(session, owner)
         for mem in mems:
             mem.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
@@ -313,3 +315,13 @@ async def test_conflict_predictor_uses_historical_outgoing_before_negative():
     assert trigger is not None
     assert trigger["silence_hours"] == 10
     assert trigger["current_hours"] == 8
+
+
+@pytest.mark.asyncio
+async def test_init_db_duplicate_radar_snoozed_until():
+    """Повторный init_db() не должен падать если radar_snoozed_until уже существует."""
+    # init_db уже вызван в setup_db fixture → вызываем повторно
+    # должно пройти без ошибок (ловит "duplicate column name" / "already exists")
+    from src.db.session import init_db as _init_db
+
+    await _init_db()

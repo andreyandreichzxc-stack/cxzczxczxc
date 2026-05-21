@@ -8,7 +8,7 @@ from src.core.contacts.chat_service import message_to_text
 logger = logging.getLogger(__name__)
 from src.core.contacts.style_profile import style_profile_as_prompt_hint
 from src.core.infra.text_sanitizer import sanitize_html
-from src.core.actions.vector_store import vector_store
+from src.core.actions.vector_store import get_vector_store
 from src.db.models import Contact, Message
 from src.llm.base import ChatMessage, LLMProvider
 
@@ -58,7 +58,7 @@ async def summarize_chat(
     if owner_id is not None:
         try:
             query_vec = await provider.embed(contact.display_name)
-            hits = await vector_store.search(
+            hits = await get_vector_store().search(
                 user_id=owner_id, embedding=query_vec, limit=3
             )
             if hits:
@@ -104,7 +104,7 @@ async def draft_reply(
     if owner_id is not None:
         try:
             query_vec = await provider.embed(contact.display_name)
-            hits = await vector_store.search(
+            hits = await get_vector_store().search(
                 user_id=owner_id, embedding=query_vec, limit=3
             )
             if hits:
@@ -158,7 +158,7 @@ async def catchup(
     if owner_id is not None:
         try:
             query_vec = await provider.embed(contact.display_name)
-            hits = await vector_store.search(
+            hits = await get_vector_store().search(
                 user_id=owner_id, embedding=query_vec, limit=3
             )
             if hits:

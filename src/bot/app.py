@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiohttp import ClientSession
+from aiogram.client.session.aiohttp import AiohttpSession
 
 from src.bot.handlers import (
     analyze_cmd,
@@ -41,10 +41,7 @@ logger = logging.getLogger(__name__)
 
 
 async def run_bot(userbot_manager: UserbotManager) -> None:
-    session_kwargs = {}
-    if settings.proxy_url:
-        session_kwargs["proxy"] = settings.proxy_url
-    session = ClientSession(**session_kwargs) if session_kwargs else None
+    session = AiohttpSession(proxy=settings.proxy_url) if settings.proxy_url else None
 
     bot = Bot(
         token=settings.bot_token,

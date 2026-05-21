@@ -88,6 +88,86 @@ router.message.filter(OwnerOnly())
 
 CHAT_LOAD_LIMIT = 50
 
+# Follow-up context: remembers last intent for 60 seconds to detect continuations
+_last_intent_ctx: dict[
+    int, dict
+] = {}  # telegram_id → {"intent": dict, "expires_at": float}
+_LAST_INTENT_TTL = 60.0  # seconds
+
+_APPEND_KEYWORDS = ("добавь", "и ещё", "также", "кстати", "плюс", "ещё", "а ещё")
+_REPLACE_KEYWORDS = ("нет", "лучше", "вместо", "точнее", "не так", "исправь", "поменяй")
+_MULTI_KEYWORDS = ("и не забудь", "заодно", "и ещё")
+
+
+def _save_intent_context(tg_id: int, intent: dict) -> None:
+    _last_intent_ctx[tg_id] = {
+        "intent": intent,
+        "expires_at": time.monotonic() + _LAST_INTENT_TTL,
+    }
+
+
+def _detect_followup(raw: str, tg_id: int) -> tuple[dict, str] | None:
+    """Если raw — продолжение предыдущего intent'а, вернуть (модифицированный intent, update_type).
+    update_type: "append", "replace", "multi_add". Возвращает None если не продолжение."""
+    entry = _last_intent_ctx.get(tg_id)
+    if not entry or time.monotonic() > entry["expires_at"]:
+        _last_intent_ctx.pop(tg_id, None)
+        return None
+    prev = entry["intent"]
+    stripped = raw.strip().lower()
+    # Проверяем первые 3 слова
+    words = stripped.split()[:3]
+    first3 = " ".join(words)
+
+    # REPLACE: "нет", "лучше", ...
+    for kw in _REPLACE_KEYWORDS:
+        if first3.startswith(kw):
+            new_text = raw.strip()
+            # Убираем ключевое слово из начала
+            for kw2 in _REPLACE_KEYWORDS:
+                if new_text.lower().startswith(kw2):
+                    new_text = new_text[len(kw2) :].strip(", ").strip()
+                    break
+            modified = dict(prev)
+            if "text" in modified:
+                modified["text"] = new_text
+            elif "query" in modified:
+                modified["query"] = new_text
+            return (modified, "replace")
+
+    # APPEND: "добавь", "и ещё", ...
+    for kw in _APPEND_KEYWORDS:
+        if first3.startswith(kw):
+            new_text = raw.strip()
+            for kw2 in _APPEND_KEYWORDS:
+                if new_text.lower().startswith(kw2):
+                    new_text = new_text[len(kw2) :].strip(", ").strip()
+                    break
+            modified = dict(prev)
+            if "text" in modified:
+                modified["text"] = modified.get("text", "") + " " + new_text
+            elif "query" in modified:
+                modified["query"] = modified.get("query", "") + " " + new_text
+            return (modified, "append")
+
+    # MULTI: "и не забудь", "заодно"
+    for kw in _MULTI_KEYWORDS:
+        if first3.startswith(kw):
+            new_text = raw.strip()
+            for kw2 in _MULTI_KEYWORDS:
+                if new_text.lower().startswith(kw2):
+                    new_text = new_text[len(kw2) :].strip(", ").strip()
+                    break
+            # Возвращаем intent с извлечённым текстом как новый intent
+            new_intent = {
+                "intent": prev.get("intent", "chat"),
+                "text": new_text,
+            }
+            return (new_intent, "multi_add")
+
+    # Если не нашли ключевых слов — не follow-up
+    return None
+
 
 async def _execute_intent(
     intent, message, state, userbot_manager, *, tz_name: str
@@ -518,6 +598,22 @@ async def _process_text(
     except Exception:
         logger.exception("adaptive persona check failed")
 
+    # Follow-up контекст: проверяем, не продолжение ли это предыдущего запроса
+    followup = _detect_followup(raw, owner_telegram_id)
+    if followup:
+        intent, update_type = followup
+        await _execute_intent(intent, message, state, userbot_manager, tz_name=tz_name)
+        _save_intent_context(owner_telegram_id, intent)
+        _fire_record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="followup",
+            intent_json=intent,
+            success=True,
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
+        return
+
     # Smart AutoRouter — оркестрация
     _last_purpose = None
     try:
@@ -756,8 +852,14 @@ async def _process_text(
             return
         for sub in actions:
             await _dispatch(sub, message, state, userbot_manager, tz_name=tz_name)
+    elif "intents" in intent:
+        # Multi-intent array: dispatch each sub-intent sequentially
+        for sub in intent["intents"]:
+            await _dispatch(sub, message, state, userbot_manager, tz_name=tz_name)
     else:
         await _dispatch(intent, message, state, userbot_manager, tz_name=tz_name)
+
+    _save_intent_context(owner_telegram_id, intent)
 
     _fire_record_trajectory(
         owner_telegram_id,

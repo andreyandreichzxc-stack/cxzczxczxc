@@ -194,7 +194,6 @@ async def init_db() -> None:
                         ),
                         {"sid": mid, "tid": related_id, "rel": rel_type},
                     )
-            await conn.commit()
         except Exception as e:
             if (
                 "duplicate column name" in str(e).lower()
@@ -213,8 +212,14 @@ async def init_db() -> None:
                     "ALTER TABLE conversation_states ADD COLUMN radar_snoozed_until DATETIME"
                 )
             )
-        except Exception:
-            logger.warning("Migration for radar_snoozed_until skipped", exc_info=True)
+        except Exception as e:
+            if (
+                "duplicate column name" in str(e).lower()
+                or "already exists" in str(e).lower()
+            ):
+                logger.debug("Migration for radar_snoozed_until: column already exists")
+            else:
+                raise
 
 
 @asynccontextmanager
