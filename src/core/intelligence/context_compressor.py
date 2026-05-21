@@ -1,80 +1,79 @@
-"""Lightweight context compression for the Maestro path only."""
+"""Adaptive 3-stage context compression using token-aware offload.
+
+Replaces the old lightweight compressor with the adaptive offload pipeline
+from ``src.core.context.context_offload``.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class CompressionResult:
-    compressed_context: str
-    dropped_sections: list[str] = field(default_factory=list)
-    source_counts: dict[str, int] = field(default_factory=dict)
-
-
-def _compact_lines(text: str, *, max_lines: int, max_chars: int) -> tuple[str, int]:
-    if not text:
-        return "", 0
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    original = len(lines)
-    if len(lines) > max_lines:
-        head = lines[: max_lines // 2]
-        tail = lines[-(max_lines - len(head)) :]
-        lines = head + ["[...]"] + tail
-    compact = "\n".join(lines)
-    if len(compact) > max_chars:
-        compact = compact[: max_chars - 1] + "…"
-    return compact, max(0, original - len(lines))
-
-
-def compress_maestro_context(
+async def compress_maestro_context(
+    history: list[dict],
+    system_prompt: str = "",
+    user_prompt: str = "",
     *,
-    history_block: str | None = None,
-    memory_context: str | None = None,
-    deep_memory: str | None = None,
-    agent_outputs: list[str] | None = None,
-    budget_chars: int = 9000,
-) -> CompressionResult:
-    """Compress noisy context while preserving safety/contact facts upstream."""
-    dropped: list[str] = []
-    counts: dict[str, int] = {}
-    parts: list[str] = []
+    owner_id: int | None = None,
+) -> tuple[str, str | None]:
+    """Adaptive 3-stage context compression using token-aware offload.
 
-    memory, dropped_memory = _compact_lines(memory_context or "", max_lines=24, max_chars=3000)
-    if memory:
-        parts.append(memory)
-    if dropped_memory:
-        dropped.append("memory_context")
-        counts["memory_lines_dropped"] = dropped_memory
+    Returns (compressed_context_text, mermaid_graph | None).
+    The mermaid graph can be injected as a lightweight alternative to raw history.
+    """
+    from src.core.context.context_offload import compress_context, CompressedContext
 
-    deep, dropped_deep = _compact_lines(deep_memory or "", max_lines=18, max_chars=2200)
-    if deep:
-        parts.append(deep)
-    if dropped_deep:
-        dropped.append("deep_memory")
-        counts["deep_lines_dropped"] = dropped_deep
+    if not history:
+        return "", None
 
-    history, dropped_history = _compact_lines(history_block or "", max_lines=18, max_chars=2200)
-    if history:
-        parts.append(history)
-    if dropped_history:
-        dropped.append("history_block")
-        counts["history_lines_dropped"] = dropped_history
-
-    outputs = agent_outputs or []
-    if outputs:
-        joined, dropped_outputs = _compact_lines(
-            "\n\n".join(outputs), max_lines=24, max_chars=3000
+    try:
+        compressed: CompressedContext = await compress_context(
+            messages=history,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
         )
-        if joined:
-            parts.append(joined)
-        if dropped_outputs:
-            dropped.append("agent_outputs")
-            counts["agent_output_lines_dropped"] = dropped_outputs
 
-    combined = "\n\n".join(parts)
-    if len(combined) > budget_chars:
-        combined = combined[: budget_chars - 1] + "…"
-        dropped.append("budget_tail")
-    return CompressionResult(combined, dropped, counts)
+        # Save checkpoint for reuse
+        if owner_id is not None:
+            from src.core.context.offload_checkpoint import save_offload_state
 
+            await save_offload_state(
+                user_id=owner_id,
+                messages=compressed.messages,
+                mermaid_graph=compressed.mermaid_graph,
+                drilldown_refs=compressed.drilldown_refs,
+                tokens_saved=compressed.tokens_before - compressed.tokens_after,
+            )
+
+        # Build compressed context string
+        parts: list[str] = []
+
+        if compressed.mermaid_graph:
+            parts.append("```mermaid")
+            parts.append(compressed.mermaid_graph)
+            parts.append("```")
+            parts.append("")  # blank line separator
+
+        # Remaining messages (critical facts + summary)
+        for msg in compressed.messages:
+            role = msg.get("role", "system")
+            content = msg.get("content", "")
+            if role == "system":
+                parts.append(content)
+            else:
+                parts.append(f"[{role}]: {content}")
+
+        context_text = "\n".join(parts)
+        return context_text, compressed.mermaid_graph
+
+    except Exception:
+        logger.debug("Context offload failed, using raw history", exc_info=True)
+        # Fallback: return raw history as text
+        raw = "\n".join(
+            f"[{m.get('role', '?')}]: {m.get('content', '')[:200]}"
+            for m in history[-20:]  # safety: at most 20 messages in fallback
+        )
+        return raw, None

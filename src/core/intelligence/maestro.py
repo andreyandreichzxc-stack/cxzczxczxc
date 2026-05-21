@@ -463,13 +463,21 @@ async def run_pipeline(
     try:
         from src.core.intelligence.context_compressor import compress_maestro_context
 
-        compressed = compress_maestro_context(
-            history_block=history_block,
-            memory_context=memory_context,
-        )
-        if compressed.compressed_context and (memory_context or history_block):
-            memory_context = compressed.compressed_context
-            history_block = None
+        # Build message history from string context blocks
+        history: list[dict] = []
+        if memory_context:
+            history.append({"role": "system", "content": memory_context})
+        if history_block:
+            history.append({"role": "system", "content": history_block})
+
+        if history:
+            context_text, _ = await compress_maestro_context(
+                history=history,
+                owner_id=owner_id,
+            )
+            if context_text:
+                memory_context = context_text
+                history_block = None
     except Exception:
         logger.debug("Context compression skipped", exc_info=True)
 
@@ -499,8 +507,9 @@ async def run_pipeline(
             "is_clarification": True,
         }
 
-    # Если Maestro ответил сам — всё
-    if plan.get("final_response"):
+    # Если Maestro ответил сам и агенты не нужны — возвращаем сразу
+    agents_to_call = plan.get("agents_to_call", [])
+    if plan.get("final_response") and not agents_to_call:
         return {
             "final_response": sanitize_html(plan["final_response"]),
             "plan": plan.get("plan", []),
@@ -509,7 +518,6 @@ async def run_pipeline(
         }
 
     # --- Шаг 2: Запустить агентов ---
-    agents_to_call = plan.get("agents_to_call", [])
     if not agents_to_call:
         # Нет агентов и нет ответа — показываем understood или clarification
         msg = (
@@ -612,7 +620,8 @@ async def run_pipeline(
             logger.exception("maestro fallback_request failed")
             return {
                 "final_response": sanitize_html(
-                    "Извини, что-то пошло не так. Попробуй ещё раз."
+                    plan.get("final_response")
+                    or "Извини, что-то пошло не так. Попробуй ещё раз."
                 ),
                 "plan": [],
                 "used_agents": [],

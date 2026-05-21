@@ -8,6 +8,7 @@ Tier 3 (VOLATILE): динамический контекст — memory, history
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -19,6 +20,24 @@ logger = logging.getLogger(__name__)
 
 # Максимальная длина промпта в символах (безопасный лимит для большинства LLM)
 MAX_PROMPT_CHARS = 32_000
+
+
+def _truncate_smart(text: str, max_chars: int) -> str:
+    """Truncate text at the last sentence-ending punctuation within limit."""
+    if len(text) <= max_chars:
+        return text
+    # Find last sentence boundary (., !, ?, newline + letter)
+    truncated = text[:max_chars]
+    matches = list(re.finditer(r"[.!?]\s", truncated))
+    if matches:
+        cut = matches[-1].end()
+        return truncated[:cut].rstrip()
+    # Fallback: last space
+    last_space = truncated.rfind(" ")
+    if last_space > max_chars // 2:
+        return truncated[:last_space].rstrip() + "…"
+    return truncated.rstrip() + "…"
+
 
 # Приоритет при усечении: что выкидывать в первую очередь
 TRUNCATION_PRIORITY = [
@@ -189,12 +208,11 @@ class PromptAssembler:
             MAX_PROMPT_CHARS,
         )
 
-        # Простое усечение с конца (менее критичные части в конце)
-        # Сохраняем tier-1 и tier-2 полностью, усекаем tier-3
-        truncated = prompt[:MAX_PROMPT_CHARS]
+        # Smart truncation: режем по границе предложения, не посередине слова
+        truncated = _truncate_smart(prompt, MAX_PROMPT_CHARS)
         # Добавляем предупреждение
         truncated = (
-            truncated[: MAX_PROMPT_CHARS - 100]
+            _truncate_smart(truncated, MAX_PROMPT_CHARS - 100)
             + "\n\n[Промпт усечён из-за ограничения длины. Часть контекста опущена.]"
         )
         return truncated
