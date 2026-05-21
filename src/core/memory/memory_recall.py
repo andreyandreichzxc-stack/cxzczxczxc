@@ -6,6 +6,7 @@ MemoryRecallService — единый «мозг» памяти.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from datetime import datetime, timezone
 from src.db.repo import get_or_create_user, get_contact
 from src.db.session import get_session
 from src.llm.router import build_provider
+from src.core.memory.hybrid_search import reciprocal_rank_fusion
 
 logger = logging.getLogger(__name__)
 
@@ -160,31 +162,60 @@ async def recall(
                         )
                         seen_ids.add(m.id)
 
-        # --- 3. Qdrant semantic ---
+        # --- 3. Hybrid search: Qdrant semantic + FTS5 keyword (RRF) ---
         if include_semantic:
             try:
                 from src.core.actions.vector_store import vector_store
+                from src.db.repo import search_memories_fts_with_scores
 
                 provider = await build_provider(session, owner)
                 if provider:
                     embedding = await provider.embed(query[:300])
-                    semantic_hits = await vector_store.search_similar_memories(
+
+                    # Параллельный запуск: векторный + ключевой поиск
+                    vector_task = vector_store.search_similar_memories(
                         user_id=owner.id,
                         embedding=embedding,
                         threshold=semantic_threshold,
-                        limit=5,
+                        limit=10,
                         contact_id=contact_id,
                     )
-                    for hit in semantic_hits:
-                        mid = hit.get("memory_id")
-                        if mid and mid not in seen_ids:
-                            m = next((f for f in all_facts if f.id == mid), None)
+                    keyword_task = search_memories_fts_with_scores(
+                        session,
+                        owner,
+                        query,
+                        contact_id=contact_id,
+                        limit=10,
+                    )
+
+                    vector_hits_raw, keyword_hits_raw = await asyncio.gather(
+                        vector_task,
+                        keyword_task,
+                    )
+
+                    # Преобразуем в (memory_id, score) для RRF
+                    vector_hits: list[tuple[int, float]] = [
+                        (h["memory_id"], h["score"])
+                        for h in vector_hits_raw
+                        if h.get("memory_id") is not None
+                    ]
+                    keyword_hits: list[tuple[int, float]] = keyword_hits_raw
+
+                    # Reciprocal Rank Fusion
+                    fused = reciprocal_rank_fusion(
+                        vector_results=vector_hits,
+                        keyword_results=keyword_hits,
+                    )
+
+                    for mem_id, fused_score in fused:
+                        if mem_id not in seen_ids:
+                            m = next((f for f in all_facts if f.id == mem_id), None)
                             if m:
                                 ranked.append(
                                     RecalledFact(
                                         fact=m.fact,
-                                        reason="🔍 похож на запрос",
-                                        confidence=m.confidence or 0.5,
+                                        reason="🔍 гибридный поиск",
+                                        confidence=round(fused_score, 3),
                                         memory_id=m.id,
                                         contact_id=m.contact_id,
                                         layer=m.temporal_layer or "recent",
@@ -192,7 +223,7 @@ async def recall(
                                 )
                                 seen_ids.add(m.id)
             except (ImportError, ValueError, ConnectionError, OSError):
-                logger.debug("Semantic recall failed, skipping", exc_info=True)
+                logger.debug("Hybrid recall failed, skipping", exc_info=True)
 
         # --- 4. Fresh (7 days, high confidence) ---
         cutoff_7d = UTC_NAIVE()
