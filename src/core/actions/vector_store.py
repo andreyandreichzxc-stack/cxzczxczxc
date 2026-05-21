@@ -268,6 +268,13 @@ class VectorStore:
                 self._dim = info.config.params.vectors.size
             else:
                 return []
+        if len(embedding) != self._dim:
+            logger.warning(
+                "Embedding dim %d != collection dim %d — re-index needed?",
+                len(embedding),
+                self._dim,
+            )
+            return []
         flt = qmodels.Filter(
             must=[
                 qmodels.FieldCondition(

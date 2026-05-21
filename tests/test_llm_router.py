@@ -123,3 +123,26 @@ async def test_provider_fallback_exhausted_error():
     assert ExhaustingProvider.calls == ["exhaust-key-1"]
     assert len(GoodProvider.calls) == 1
     assert GoodProvider.calls == ["good-key-1"]
+
+
+@pytest.mark.asyncio
+async def test_cooldown_until_handles_naive_datetime():
+    """_ensure_utc нормализует naive datetime как UTC-aware — без TypeError."""
+    from src.llm.router import _ensure_utc
+    from datetime import datetime, timezone, timedelta
+
+    # naive datetime (как из старых записей SQLite)
+    naive = datetime(2026, 5, 21, 12, 0, 0)
+    result = _ensure_utc(naive)
+    assert result is not None
+    assert result.tzinfo is not None
+    # Сравнение с aware не должно падать
+    assert result > datetime.now(timezone.utc) - timedelta(days=1)
+
+    # aware datetime (как из новых записей)
+    aware = datetime.now(timezone.utc)
+    result2 = _ensure_utc(aware)
+    assert result2 is aware  # возвращается без изменений
+
+    # None
+    assert _ensure_utc(None) is None

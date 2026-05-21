@@ -1,6 +1,8 @@
 import logging
 from datetime import datetime, timezone
 
+from src.llm.router import _ensure_utc
+
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
@@ -200,7 +202,7 @@ async def cmd_keys(message: Message) -> None:
             lines.append(f"Всего фейлов: {total_fail} ({fail_rate:.1f}%)")
             lines.append(f"Активных: {sum(1 for s in slots if s.enabled)}")
             lines.append(
-                f"В кулдауне: {sum(1 for s in slots if s.cooldown_until and s.cooldown_until > datetime.now(timezone.utc))}"
+                f"В кулдауне: {sum(1 for s in slots if (c := _ensure_utc(s.cooldown_until)) and c > datetime.now(timezone.utc))}"
             )
             lines.append("")
             for s in sorted(
@@ -233,7 +235,8 @@ async def cmd_keys(message: Message) -> None:
             status = "✅" if s.enabled else "🚫"
             cool = (
                 " 🔒"
-                if s.cooldown_until and s.cooldown_until > datetime.now(timezone.utc)
+                if (c := _ensure_utc(s.cooldown_until))
+                and c > datetime.now(timezone.utc)
                 else ""
             )
             lines.append(
@@ -251,6 +254,58 @@ async def cmd_keys(message: Message) -> None:
         lines.append("<i>/keys remove &lt;slot_id&gt; — удалить слот</i>")
         lines.append("<i>/keys toggle &lt;slot_id&gt; — вкл/выкл слот</i>")
         await message.answer("\n".join(lines))
+
+
+@router.callback_query(F.data.startswith("keys:remove:"))
+async def cb_keys_remove(callback: CallbackQuery) -> None:
+    """Удалить слот ключа по inline-кнопке."""
+    slot_id = int(callback.data.split(":")[2])
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        slot = await session.get(LlmKeySlot, slot_id)
+        if slot and slot.user_id == owner.id:
+            provider = slot.provider
+            purpose = slot.purpose
+            await session.delete(slot)
+            await session.commit()
+            text = f"✅ Слот #{slot_id} ({provider}/{purpose}) удалён."
+        else:
+            text = "❌ Слот не найден или не твой."
+    if callback.message:
+        await callback.message.edit_text(text)
+    await callback.answer()
+
+
+@router.message(Command("llm_status"))
+async def cmd_llm_status(message: Message) -> None:
+    """Показать статус LLM: семафоры, слоты, использование."""
+    from src.llm.router import _PURPOSE_SEMAPHORES
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        slots = await list_key_slots(session, owner)
+
+    lines = ["<b>📊 LLM Status</b>", ""]
+    total_used = sum(s.usage_count or 0 for s in slots)
+    total_fail = sum(s.failure_count or 0 for s in slots)
+    lines.append(f"Всего вызовов: {total_used} | фейлов: {total_fail}")
+    lines.append("")
+
+    for purpose, sem in _PURPOSE_SEMAPHORES.items():
+        active = sem._value
+        limit = sem._bound_value if hasattr(sem, "_bound_value") else "?"
+        lines.append(f"🔹 {purpose}: {active}/{limit} слотов свободно")
+    lines.append("")
+    for s in slots[:10]:
+        cooldown_active = (c := _ensure_utc(s.cooldown_until)) and c > datetime.now(
+            timezone.utc
+        )
+        status = "❌" if not s.enabled else "⏳" if cooldown_active else "✅"
+        lines.append(
+            f"{status} <b>{s.provider}</b> / {s.purpose} — {s.usage_count}× ({s.failure_count}× фейлов)"
+        )
+
+    await message.answer("\n".join(lines))
 
 
 @router.callback_query(F.data.startswith("keys:remove:"))

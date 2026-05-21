@@ -6,6 +6,20 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    """Приводит naive datetime к UTC-aware.
+
+    SQLite с DateTime(timezone=True) возвращает aware datetime для новых записей,
+    но старые записи без TZ в ISO-строке приходят как naive.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 from src.crypto import decrypt
 from src.db.models import User
 from src.db.repo import get_active_keys, get_api_keys, mark_key_failure, mark_key_used
@@ -383,18 +397,27 @@ async def build_provider(
             in_cooldown = [
                 s
                 for s in all_slots
-                if s.cooldown_until and s.cooldown_until > datetime.now(timezone.utc)
+                if (cooldown := _ensure_utc(s.cooldown_until))
+                and cooldown > datetime.now(timezone.utc)
             ]
             if in_cooldown:
                 min_cooldown = min(
-                    (s.cooldown_until for s in in_cooldown if s.cooldown_until),
+                    (
+                        _ensure_utc(s.cooldown_until)
+                        for s in in_cooldown
+                        if s.cooldown_until
+                    ),
                     default=None,
                 )
-                wait_sec = (
-                    int((min_cooldown - datetime.now(timezone.utc)).total_seconds())
-                    if min_cooldown
-                    else 60
-                )
+                if min_cooldown is not None:
+                    wait_sec = max(
+                        1,
+                        int(
+                            (min_cooldown - datetime.now(timezone.utc)).total_seconds()
+                        ),
+                    )
+                else:
+                    wait_sec = 60
                 return ExhaustedProvider(
                     f"Все ключи в кулдауне. Попробуй через {wait_sec} сек."
                 )

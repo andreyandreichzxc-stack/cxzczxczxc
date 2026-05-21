@@ -4,6 +4,7 @@ import time
 
 from src.config import settings
 from src.bot.app import run_bot
+from src.bot.handlers.free_text import start_voice_worker, stop_voice_worker
 from src.core.infra.auto_sync import auto_sync_loop
 from src.core.scheduling.digest import digest_scheduler_loop
 from src.core.scheduling.follow_up import follow_up_loop
@@ -157,6 +158,7 @@ async def main() -> None:
     await init_db()
 
     start_worker()
+    start_voice_worker()
 
     from src.core.actions.vector_store import get_vector_store
 
@@ -175,6 +177,7 @@ async def main() -> None:
     finally:
         await task_manager.stop_all()
         await stop_worker()
+        await stop_voice_worker()
         await notification_queue.stop()
 
         from src.core.actions.vector_store import get_vector_store

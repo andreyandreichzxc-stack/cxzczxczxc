@@ -123,4 +123,15 @@ async def cluster_loop(telegram_id: int) -> None:
                 logger.info("Clusters rebuilt: %d created", n)
         except Exception:
             logger.exception("Cluster loop error")
+
+        # --- L2 Scene extraction after cluster rebuild ---
+        try:
+            from src.core.memory.scene_extractor import extract_scenes_for_user
+
+            scenes = await extract_scenes_for_user(telegram_id)
+            if scenes:
+                logger.info("L2 scenes generated: %d", scenes)
+        except Exception:
+            logger.debug("Scene extraction skipped (non-critical)", exc_info=True)
+
         await asyncio.sleep(settings.memory_clusterer_interval_sec)

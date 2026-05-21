@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -13,6 +14,7 @@ from src.core.actions.vector_store import get_vector_store
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.llm.base import ChatMessage, LLMProvider
+from src.llm.router import ExhaustedError
 
 
 logger = logging.getLogger(__name__)
@@ -411,11 +413,38 @@ async def route_intent(
                 + rag_context
             )
 
-    raw = await provider.chat(
-        [
-            ChatMessage(role="system", content=system),
-            ChatMessage(role="user", content=user_text),
-        ],
-        heavy=heavy,
-    )
+    try:
+        raw = await provider.chat(
+            [
+                ChatMessage(role="system", content=system),
+                ChatMessage(role="user", content=user_text),
+            ],
+            heavy=heavy,
+        )
+    except ExhaustedError:
+        logger.warning("route_intent ExhaustedError")
+        return {
+            "intent": "chat",
+            "reply": "🔑 Все API-ключи исчерпаны. Добавь новые через /keys add ...",
+        }
+    except asyncio.TimeoutError:
+        logger.warning("route_intent TimeoutError")
+        return {
+            "intent": "chat",
+            "reply": "⏱️ Ответ занял слишком много времени. Попробуй короче.",
+        }
+    except Exception as e:
+        if "context_length" in str(e).lower() or "token" in str(e).lower():
+            logger.warning("route_intent context overflow: %s", e)
+            return {
+                "intent": "chat",
+                "reply": "📏 Контекст переполнен. Упрости запрос или уменьши историю.",
+            }
+        if "rate" in str(e).lower():
+            logger.warning("route_intent rate limit: %s", e)
+            return {
+                "intent": "chat",
+                "reply": "🚦 Превышен лимит запросов. Подожди минуту.",
+            }
+        raise
     return _safe_parse(raw)

@@ -48,7 +48,7 @@ from src.db.repo import (
     upsert_contact,
 )
 from src.db.session import get_session
-from src.llm.router import build_provider
+from src.llm.router import _ensure_utc, build_provider
 from src.core.actions.trajectory import actions_from_intent, record_trajectory
 from src.core.intelligence.skills import build_skill_index, record_skill_usages
 from src.userbot import get_active_telethon_client, get_userbot_manager
@@ -84,6 +84,116 @@ from .free_text_settings import (
 logger = logging.getLogger(__name__)
 router = Router(name="free_text")
 router.message.filter(OwnerOnly())
+
+
+# Voice transcription queue (non-blocking background processing)
+_voice_queue: asyncio.Queue = asyncio.Queue(maxsize=20)
+_voice_worker_task: asyncio.Task | None = None
+
+
+def start_voice_worker() -> asyncio.Task:
+    """Запустить фонового worker'а для транскрипции голоса (если ещё не запущен).
+
+    Вызывается при старте приложения (main.py).
+    """
+    global _voice_worker_task
+    if _voice_worker_task is None or _voice_worker_task.done():
+        _voice_worker_task = asyncio.create_task(
+            _voice_worker(), name="voice-transcription-worker"
+        )
+    return _voice_worker_task
+
+
+async def stop_voice_worker() -> None:
+    """Остановить voice worker (graceful shutdown)."""
+    global _voice_worker_task
+    if _voice_worker_task and not _voice_worker_task.done():
+        _voice_worker_task.cancel()
+        try:
+            await _voice_worker_task
+        except asyncio.CancelledError:
+            pass
+        _voice_worker_task = None
+        logger.info("Voice transcription worker stopped")
+
+
+async def _voice_worker() -> None:
+    """Фоновый обработчик очереди голосовой транскрипции.
+
+    Бесконечный цикл: забирает задание из очереди, транскрибирует,
+    чистит файл, отвечает пользователю и передаёт текст в _process_text.
+    При крахе одной задачи не падает — логирует и идёт дальше.
+    """
+    while True:
+        try:
+            job = await _voice_queue.get()
+            (
+                voice_path,
+                message,
+                state,
+                userbot_manager,
+                file_unique_id,
+                mode,
+                api_provider,
+                openai_key,
+                gemini_key,
+                mistral_key,
+            ) = job
+
+            try:
+                text = await transcription_service.transcribe(
+                    voice_path,
+                    file_id=file_unique_id,
+                    mode=mode,
+                    openai_key=openai_key,
+                    gemini_key=gemini_key,
+                    mistral_key=mistral_key,
+                    api_provider=api_provider,
+                )
+            except Exception:
+                logger.exception("voice transcription failed in worker")
+                try:
+                    await message.answer("❌ Не удалось распознать голосовое.")
+                except Exception:
+                    logger.exception("failed to send error message from worker")
+                finally:
+                    _cleanup_voice_file(voice_path)
+                continue
+
+            _cleanup_voice_file(voice_path)
+
+            text = (text or "").strip()
+            if not text:
+                try:
+                    await message.answer("🎙 Не услышал текста в этом сообщении.")
+                except Exception:
+                    logger.exception("failed to send empty transcription message")
+                continue
+
+            try:
+                await message.answer(f"🎙 <i>Услышал:</i> {text}")
+            except Exception:
+                logger.exception("failed to send transcription result")
+
+            try:
+                await _process_text(text, message, state, userbot_manager)
+            except Exception:
+                logger.exception("Failed to process transcribed text in worker")
+
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.exception("Voice worker error")
+        finally:
+            _voice_queue.task_done()
+
+
+def _cleanup_voice_file(voice_path: Path) -> None:
+    """Безопасно удалить временный файл голосового сообщения."""
+    try:
+        voice_path.unlink(missing_ok=True)
+    except Exception:
+        logger.debug("cleanup voice file failed: %s", voice_path, exc_info=True)
 
 
 CHAT_LOAD_LIMIT = 50
@@ -913,6 +1023,7 @@ async def free_voice(
     if media is None:
         return
 
+    # 1. Быстрая загрузка настроек пользователя из БД
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
         mode = owner.settings.transcription_mode
@@ -921,49 +1032,36 @@ async def free_voice(
         mistral_key = await get_api_key(session, owner, "mistral")
         api_provider = getattr(owner.settings, "transcription_api_provider", "openai")
 
+    # 2. Скачивание .ogg файла (быстрая сетевая операция)
     media_dir = settings.data_dir / "media" / "control_bot"
     media_dir.mkdir(parents=True, exist_ok=True)
     target = media_dir / f"{message.message_id}_{media.file_unique_id}.ogg"
 
-    notice = await message.answer("🎙 Слушаю… (транскрибирую)")
     try:
         await message.bot.download(media.file_id, destination=str(target))
-        text = await transcription_service.transcribe(
+    except Exception:
+        logger.exception("voice download failed")
+        await message.answer("❌ Не удалось скачать голосовое.")
+        return
+
+    # 3. Ставим в очередь фоновой обработки (транскрипция + process_text)
+    await _voice_queue.put(
+        (
             target,
-            file_id=media.file_unique_id,
-            mode=mode,
-            openai_key=openai_key,
-            gemini_key=gemini_key,
-            mistral_key=mistral_key,
-            api_provider=api_provider,
+            message,
+            state,
+            userbot_manager,
+            media.file_unique_id,
+            mode,
+            api_provider,
+            openai_key,
+            gemini_key,
+            mistral_key,
         )
-    except Exception:
-        logger.exception("voice transcription failed")
-        try:
-            await notice.edit_text("❌ Не удалось распознать голосовое.")
-        except Exception:
-            logger.exception("failed to edit error notice after transcription")
-        return
-    finally:
-        try:
-            target.unlink(missing_ok=True)
-        except Exception:
-            logger.debug("cleanup voice file failed: %s", target, exc_info=True)
+    )
 
-    text = (text or "").strip()
-    if not text:
-        try:
-            await notice.edit_text("Не услышал текста в этом сообщении.")
-        except Exception:
-            logger.exception("failed to edit empty transcription notice")
-        return
-
-    try:
-        await notice.edit_text(f"🎙 <i>Услышал:</i> {text}")
-    except Exception:
-        logger.exception("failed to edit transcription result notice")
-
-    await _process_text(text, message, state, userbot_manager)
+    # 4. Мгновенный ответ — пользователь не ждёт транскрипцию
+    await message.answer("🎙 Принял, расшифровываю…")
 
 
 async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) -> None:
@@ -1669,7 +1767,8 @@ async def _exec_list_keys(intent: dict, message: Message) -> None:
         status = "✅" if s.enabled else "🚫"
         cool = (
             " 🔒"
-            if s.cooldown_until and s.cooldown_until > datetime.now(timezone.utc)
+            if (cooldown := _ensure_utc(s.cooldown_until))
+            and cooldown > datetime.now(timezone.utc)
             else ""
         )
         lines.append(

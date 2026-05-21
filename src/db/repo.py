@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import logging
@@ -9,7 +11,10 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.crypto import decrypt, encrypt
-from src.core.actions.vector_store import VectorStore
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.core.actions.vector_store import VectorStore
 from src.db.models import (
     AdaptivePersona,
     ApiKey,
@@ -907,7 +912,7 @@ async def add_memory(
     cluster_topic: str | None = None,
     deduplicate: bool = True,
     embedding: list[float] | None = None,
-    vector_store_obj: VectorStore | None = None,
+    vector_store_obj: "VectorStore | None" = None,
     importance: float | None = None,
     decay_rate: float | None = None,
     memory_tier: int = 1,

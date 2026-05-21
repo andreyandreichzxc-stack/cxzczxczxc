@@ -42,8 +42,8 @@ class Notifier:
                 parse_mode=parse_mode,
                 reply_markup=reply_markup,
             )
-        except Exception as e:
-            logger.error("Failed to notify owner after retries: %s", e)
+        except Exception:
+            logger.exception("Failed to notify owner after retries")
 
 
 notifier = Notifier()

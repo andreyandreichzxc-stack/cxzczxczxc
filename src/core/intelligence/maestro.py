@@ -13,6 +13,7 @@ from src.core.actions.vector_store import get_vector_store
 from src.db.repo import get_or_create_user, list_contacts, search_memories
 from src.db.session import get_session
 from src.llm.base import ChatMessage
+from src.llm.router import ExhaustedError
 
 
 logger = logging.getLogger(__name__)
@@ -271,7 +272,39 @@ async def process(
             "agents_to_call": [],
             "final_response": raw,
         }
-    except Exception:
+    except ExhaustedError:
+        logger.warning("Maestro ExhaustedError during process")
+        return {
+            "understood": "нет ключей",
+            "plan": [],
+            "agents_to_call": [],
+            "final_response": "🔑 Все API-ключи исчерпаны. Добавь новые через /keys add ...",
+        }
+    except asyncio.TimeoutError:
+        logger.warning("Maestro TimeoutError during process")
+        return {
+            "understood": "таймаут",
+            "plan": [],
+            "agents_to_call": [],
+            "final_response": "⏱️ Ответ занял слишком много времени. Попробуй короче.",
+        }
+    except Exception as e:
+        if "context_length" in str(e).lower() or "token" in str(e).lower():
+            logger.warning("Maestro context overflow: %s", e)
+            return {
+                "understood": "контекст переполнен",
+                "plan": [],
+                "agents_to_call": [],
+                "final_response": "📏 Контекст переполнен. Упрости запрос или уменьши историю.",
+            }
+        if "rate" in str(e).lower():
+            logger.warning("Maestro rate limit: %s", e)
+            return {
+                "understood": "лимит",
+                "plan": [],
+                "agents_to_call": [],
+                "final_response": "🚦 Превышен лимит запросов. Подожди минуту.",
+            }
         logger.exception("Maestro failed")
         return {
             "understood": "не понял",
@@ -535,7 +568,47 @@ async def run_pipeline(
                 "used_agents": [],
                 "agent_errors": agent_errors,
             }
-        except Exception:
+        except ExhaustedError:
+            logger.warning("maestro fallback_request ExhaustedError")
+            return {
+                "final_response": sanitize_html(
+                    "🔑 Все API-ключи исчерпаны. Добавь новые через /keys add ..."
+                ),
+                "plan": [],
+                "used_agents": [],
+                "agent_errors": agent_errors,
+            }
+        except asyncio.TimeoutError:
+            logger.warning("maestro fallback_request TimeoutError")
+            return {
+                "final_response": sanitize_html(
+                    "⏱️ Ответ занял слишком много времени. Попробуй короче."
+                ),
+                "plan": [],
+                "used_agents": [],
+                "agent_errors": agent_errors,
+            }
+        except Exception as e:
+            if "context_length" in str(e).lower() or "token" in str(e).lower():
+                logger.warning("maestro fallback_request context overflow: %s", e)
+                return {
+                    "final_response": sanitize_html(
+                        "📏 Контекст переполнен. Упрости запрос или уменьши историю."
+                    ),
+                    "plan": [],
+                    "used_agents": [],
+                    "agent_errors": agent_errors,
+                }
+            if "rate" in str(e).lower():
+                logger.warning("maestro fallback_request rate limit: %s", e)
+                return {
+                    "final_response": sanitize_html(
+                        "🚦 Превышен лимит запросов. Подожди минуту."
+                    ),
+                    "plan": [],
+                    "used_agents": [],
+                    "agent_errors": agent_errors,
+                }
             logger.exception("maestro fallback_request failed")
             return {
                 "final_response": sanitize_html(

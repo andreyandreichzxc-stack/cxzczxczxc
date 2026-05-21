@@ -202,6 +202,37 @@ class DeepMemoryRetrieval:
                     )
                 )
 
+        # --- L2 Scene narratives (LLM-generated cluster summaries) ---
+        try:
+            from sqlalchemy import func
+            from src.db.models import MemoryCluster
+
+            scene_result = await session.execute(
+                select(MemoryCluster.summary, MemoryCluster.topic)
+                .where(
+                    MemoryCluster.user_id == owner_id,
+                    MemoryCluster.summary.isnot(None),
+                    MemoryCluster.summary != "",
+                    func.length(MemoryCluster.summary) > 20,
+                )
+                .order_by(MemoryCluster.updated_at.desc())
+                .limit(3)
+            )
+            scene_rows = scene_result.all()
+            for summary, topic in scene_rows:
+                if summary:
+                    facts.append(
+                        DeepFact(
+                            memory_id=0,
+                            fact=f"[Сцена: {topic}] {summary}",
+                            tier=2,
+                            confidence=0.75,
+                            reason="scene_narrative",
+                        )
+                    )
+        except Exception:
+            logger.debug("Scene narratives not available", exc_info=True)
+
         return facts
 
     async def bfs_expand(
@@ -333,6 +364,14 @@ class DeepMemoryRetrieval:
                 for f in distilled:
                     parts.append(f"- {f.fact}")
                 parts.append("</distilled_knowledge>")
+
+            # Scene narratives
+            scene_facts = [f for f in facts if f.reason == "scene_narrative"]
+            if scene_facts:
+                parts.append("<scene_narratives>")
+                for f in scene_facts:
+                    parts.append(f"  <scene>{f.fact}</scene>")
+                parts.append("</scene_narratives>")
 
         if graph:
             parts.append("<memory_links>")

@@ -1,8 +1,10 @@
+import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.session.aiohttp import AiohttpSession
 
@@ -40,6 +42,45 @@ from src.userbot.manager import UserbotManager
 logger = logging.getLogger(__name__)
 
 
+def _retry_wrapper(send_fn):
+    """Wrap bot.send_message with exponential backoff on 429 / network errors.
+
+    This covers ALL callers (message.answer(), notifier, safe_send, etc.)
+    with zero changes to handler code.
+    """
+
+    async def wrapper(chat_id, text, **kwargs):
+        max_retries = 3
+        base_delay = 2.0
+        for attempt in range(max_retries):
+            try:
+                return await send_fn(chat_id, text, **kwargs)
+            except TelegramRetryAfter as e:
+                delay = max(e.retry_after, base_delay * (2**attempt))
+                logger.warning(
+                    "Telegram 429: waiting %.1fs (attempt %d/%d)",
+                    delay,
+                    attempt + 1,
+                    max_retries,
+                )
+                await asyncio.sleep(delay)
+            except TelegramNetworkError:
+                if attempt == max_retries - 1:
+                    logger.exception("Telegram network error, max retries reached")
+                    raise
+                delay = base_delay * (2**attempt)
+                logger.warning(
+                    "Telegram network error, retrying in %.1fs (attempt %d/%d)",
+                    delay,
+                    attempt + 1,
+                    max_retries,
+                )
+                await asyncio.sleep(delay)
+        raise RuntimeError(f"send_message failed after {max_retries} retries")
+
+    return wrapper
+
+
 async def run_bot(userbot_manager: UserbotManager) -> None:
     session = AiohttpSession(proxy=settings.proxy_url) if settings.proxy_url else None
 
@@ -49,6 +90,10 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
         session=session,
     )
     notifier.attach(bot)
+
+    # Patch bot.send_message so ALL outbound messages (message.answer, etc.)
+    # automatically get retry with exponential backoff.
+    bot.send_message = _retry_wrapper(bot.send_message)
 
     dp = Dispatcher(storage=MemoryStorage())
 

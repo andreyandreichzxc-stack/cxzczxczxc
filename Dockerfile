@@ -29,4 +29,7 @@ COPY main.py ./
 # data — монтируется томом снаружи (БД, сессии, qdrant, media, кэш моделей)
 RUN mkdir -p /app/data
 
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD python -c "import sys; sys.exit(0)" || exit 1
+
 CMD ["python", "main.py"]
