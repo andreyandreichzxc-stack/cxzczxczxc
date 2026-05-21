@@ -1259,6 +1259,48 @@ async def search_memories_fts(
     return [mem_map[mid] for mid in ids if mid in mem_map]
 
 
+async def search_memories_fts_with_scores(
+    session: AsyncSession,
+    user: User,
+    query: str,
+    *,
+    contact_id: int | None = None,
+    limit: int = 20,
+) -> list[tuple[int, float]]:
+    """FTS5 keyword search on memories_fts returning (memory_id, bm25_score).
+
+    Returns results sorted by BM25 rank (ascending — lower is better).
+    This is the keyword counterpart to vector_store.search_similar_memories()
+    for use in reciprocal rank fusion (RRF).
+    """
+    fts_query = _fts_query_for(query)
+    if not fts_query:
+        return []
+
+    sql_parts = [
+        "SELECT m.id, bm25(memories_fts) AS score",
+        "FROM memories_fts",
+        "JOIN memories m ON m.id = memories_fts.rowid",
+        "WHERE memories_fts MATCH :q AND m.user_id = :uid",
+    ]
+    params: dict = {"q": fts_query, "uid": user.id}
+
+    if contact_id is not None:
+        sql_parts.append("AND m.contact_id = :cid")
+        params["cid"] = contact_id
+
+    sql_parts.append("ORDER BY score")
+    sql_parts.append("LIMIT :lim")
+    params["lim"] = limit
+
+    sql = "\n".join(sql_parts)
+    result = await session.execute(sql_text(sql), params)
+    rows = result.all()
+
+    # Return (memory_id, bm25_score) — lower BM25 = better match
+    return [(int(r[0]), float(r[1])) for r in rows if r[1] is not None]
+
+
 async def find_similar_memories(
     session: AsyncSession, user: User, fact: str, threshold: float = 0.7
 ) -> list[Memory]:
