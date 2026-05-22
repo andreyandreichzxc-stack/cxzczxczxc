@@ -6,6 +6,7 @@ from src.bot.handlers.free_text import start_voice_worker, stop_voice_worker
 from src.core.memory.memory_queue import start_worker, stop_worker
 from src.core.scheduling.notification_queue import notification_queue
 from src.core.infra.task_manager import task_manager, stop_ff_tasks
+from src.core.infra.update_notifier import check_and_notify_update
 from src.db.session import init_db
 from src.userbot.manager import UserbotManager
 
@@ -50,6 +51,9 @@ async def main() -> None:
     await start_worker()
     start_voice_worker()
     notification_queue.start()
+
+    # Уведомить владельца об обновлении (фоном, ждёт 10с чтобы бот стартовал)
+    asyncio.create_task(check_and_notify_update())
 
     from src.core.actions.vector_store import get_vector_store
 
