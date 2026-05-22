@@ -93,6 +93,21 @@
 - `news-scheduler` — авто-дайджест по темам-фаворитам
 - `reminders-loop` — пинги о приближении/просрочке дедлайнов
 - `auto-sync` — раз в час обновляет контакты и архивный статус
+- `character-evolution` — бот саморазвивается на основе диалогов
+- `skill-creator` — автономно предлагает новые навыки
+- `memory-checker` — decay фактов, чистка устаревших
+
+## Новые возможности (v2.0)
+
+- 🎭 **Humanizer** — `/humanize` команда + анти-шаблонный блок в промптах. Бот говорит живо.
+- 🧠 **Style matcher** — динамически подстраивается под стиль общения владельца.
+- 🔮 **Skill Creator** — агент сам предлагает новые навыки на основе диалогов.
+- 🔗 **Pattern cache** — частые intent→action без LLM (экономия API).
+- 🧬 **Character Evolution** — бот развивает характер, запоминает что работает.
+- 💾 **Persistent embedding cache** — эмбеддинги живут в SQLite, не теряются.
+- 📦 **SmartCache** — 3-уровневый кэш: L0 memory → L1 SQLite → L2 Memory.fact.
+- 🛡️ **XSS protection** — `sanitize_html()` на всех пользовательских данных.
+- ⚡ **Оптимизации** — batch embeddings, batch Qdrant, N+1→2 SQL, MMR diversity.
 
 **Real-time mirror.** Каждое входящее и исходящее сообщение в любом чате тут же пишется в `messages` таблицу. SQLite FTS5-индекс синхронизируется триггерами — поиск работает локально за миллисекунды (не через Telegram API).
 
@@ -104,7 +119,7 @@
 
 ## Стек
 
-- Python 3.12
+- Python 3.13
 - **aiogram 3.x** — control bot
 - **Telethon 1.36+** — userbot (MTProto)
 - **SQLAlchemy 2** + **aiosqlite** + **SQLite FTS5** — БД и полнотекстовый поиск
@@ -114,6 +129,8 @@
 - **pypdf**, **python-docx** — документы
 - **rapidfuzz** — fuzzy-резолвер контактов
 - **cryptography (Fernet)** — шифрование секретов
+- **pyyaml** — YAML frontmatter для метаданных навыков
+- **alembic** — миграции схемы БД
 
 Имена моделей вынесены в `src/config.py:LLMDefaults` — заменить при выходе новых.
 
@@ -281,7 +298,7 @@ src/
 - **Telegram ToS**: userbot с авто-ответом — серая зона. По умолчанию авто-ответ выключен и шлёт нейтральный заготовленный текст с кулдауном между ответами.
 - **Один инстанс**: Qdrant embedded держит lock на `data/qdrant/` — параллельно бот не запустишь.
 - **Single-tenant**: фильтр `OwnerOnly` рассчитан на одного владельца.
-- **Миграций нет**: при изменении моделей удали `data/app.db` (или подключи Alembic).
+- **Alembic миграции** встроены: `alembic upgrade head` при старте.
 
 ---
 
