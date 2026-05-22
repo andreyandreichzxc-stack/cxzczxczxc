@@ -21,57 +21,80 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema — adds ChatGPT-style personality fields to adaptive_personas."""
-    op.add_column(
-        "adaptive_personas",
-        sa.Column(
-            "base_tone", sa.String(length=32), nullable=False, server_default="default"
-        ),
-    )
-    op.add_column(
-        "adaptive_personas",
-        sa.Column(
-            "warmth", sa.String(length=16), nullable=False, server_default="normal"
-        ),
-    )
-    op.add_column(
-        "adaptive_personas",
-        sa.Column(
-            "enthusiasm", sa.String(length=16), nullable=False, server_default="normal"
-        ),
-    )
-    op.add_column(
-        "adaptive_personas",
-        sa.Column(
-            "headings_lists",
-            sa.String(length=16),
-            nullable=False,
-            server_default="normal",
-        ),
-    )
-    op.add_column(
-        "adaptive_personas",
-        sa.Column(
-            "emoji_level", sa.String(length=16), nullable=False, server_default="normal"
-        ),
-    )
-    op.add_column(
-        "adaptive_personas", sa.Column("custom_instructions", sa.Text(), nullable=True)
-    )
-    op.add_column(
-        "adaptive_personas", sa.Column("alias", sa.String(length=64), nullable=True)
-    )
-    op.add_column(
-        "adaptive_personas",
-        sa.Column(
-            "adaptive_mode_enabled",
-            sa.Boolean(),
-            nullable=False,
-            server_default=sa.text("0"),
-        ),
-    )
-    op.add_column(
-        "adaptive_personas", sa.Column("base_snapshot_json", sa.Text(), nullable=True)
-    )
+    conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    cols = {c["name"] for c in inspector.get_columns("adaptive_personas")}
+    if "base_tone" not in cols:
+        op.add_column(
+            "adaptive_personas",
+            sa.Column(
+                "base_tone",
+                sa.String(length=32),
+                nullable=False,
+                server_default="default",
+            ),
+        )
+    if "warmth" not in cols:
+        op.add_column(
+            "adaptive_personas",
+            sa.Column(
+                "warmth", sa.String(length=16), nullable=False, server_default="normal"
+            ),
+        )
+    if "enthusiasm" not in cols:
+        op.add_column(
+            "adaptive_personas",
+            sa.Column(
+                "enthusiasm",
+                sa.String(length=16),
+                nullable=False,
+                server_default="normal",
+            ),
+        )
+    if "headings_lists" not in cols:
+        op.add_column(
+            "adaptive_personas",
+            sa.Column(
+                "headings_lists",
+                sa.String(length=16),
+                nullable=False,
+                server_default="normal",
+            ),
+        )
+    if "emoji_level" not in cols:
+        op.add_column(
+            "adaptive_personas",
+            sa.Column(
+                "emoji_level",
+                sa.String(length=16),
+                nullable=False,
+                server_default="normal",
+            ),
+        )
+    if "custom_instructions" not in cols:
+        op.add_column(
+            "adaptive_personas",
+            sa.Column("custom_instructions", sa.Text(), nullable=True),
+        )
+    if "alias" not in cols:
+        op.add_column(
+            "adaptive_personas", sa.Column("alias", sa.String(length=64), nullable=True)
+        )
+    if "adaptive_mode_enabled" not in cols:
+        op.add_column(
+            "adaptive_personas",
+            sa.Column(
+                "adaptive_mode_enabled",
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.text("0"),
+            ),
+        )
+    if "base_snapshot_json" not in cols:
+        op.add_column(
+            "adaptive_personas",
+            sa.Column("base_snapshot_json", sa.Text(), nullable=True),
+        )
 
 
 def downgrade() -> None:

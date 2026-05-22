@@ -21,12 +21,19 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema — add pattern_caching_enabled to user_settings."""
-    op.add_column(
-        "user_settings",
-        sa.Column(
-            "pattern_caching_enabled", sa.Boolean(), nullable=False, server_default="0"
-        ),
-    )
+    conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    cols = {c["name"] for c in inspector.get_columns("user_settings")}
+    if "pattern_caching_enabled" not in cols:
+        op.add_column(
+            "user_settings",
+            sa.Column(
+                "pattern_caching_enabled",
+                sa.Boolean(),
+                nullable=False,
+                server_default="0",
+            ),
+        )
 
 
 def downgrade() -> None:

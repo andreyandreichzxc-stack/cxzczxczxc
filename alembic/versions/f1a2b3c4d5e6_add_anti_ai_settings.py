@@ -15,16 +15,26 @@ import sqlalchemy as sa
 
 
 def upgrade() -> None:
-    op.add_column(
-        "user_settings",
-        sa.Column(
-            "anti_ai_enabled", sa.Boolean(), nullable=False, server_default=sa.text("1")
-        ),
-    )
-    op.add_column(
-        "user_settings",
-        sa.Column("anti_ai_mode", sa.String(16), nullable=False, server_default="off"),
-    )
+    conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    cols = {c["name"] for c in inspector.get_columns("user_settings")}
+    if "anti_ai_enabled" not in cols:
+        op.add_column(
+            "user_settings",
+            sa.Column(
+                "anti_ai_enabled",
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.text("1"),
+            ),
+        )
+    if "anti_ai_mode" not in cols:
+        op.add_column(
+            "user_settings",
+            sa.Column(
+                "anti_ai_mode", sa.String(16), nullable=False, server_default="off"
+            ),
+        )
 
 
 def downgrade() -> None:

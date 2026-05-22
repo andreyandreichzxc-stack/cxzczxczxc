@@ -21,7 +21,13 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    op.add_column("user_settings", sa.Column("watched_peers", sa.Text(), nullable=True))
+    conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    cols = {c["name"] for c in inspector.get_columns("user_settings")}
+    if "watched_peers" not in cols:
+        op.add_column(
+            "user_settings", sa.Column("watched_peers", sa.Text(), nullable=True)
+        )
 
 
 def downgrade() -> None:

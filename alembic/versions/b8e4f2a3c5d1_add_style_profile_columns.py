@@ -21,18 +21,23 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema — add style_profile columns to adaptive_personas."""
-    op.add_column(
-        "adaptive_personas",
-        sa.Column("style_profile", sa.Text(), nullable=True),
-    )
-    op.add_column(
-        "adaptive_personas",
-        sa.Column(
-            "style_profile_updated_at",
-            sa.DateTime(timezone=True),
-            nullable=True,
-        ),
-    )
+    conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    cols = {c["name"] for c in inspector.get_columns("adaptive_personas")}
+    if "style_profile" not in cols:
+        op.add_column(
+            "adaptive_personas",
+            sa.Column("style_profile", sa.Text(), nullable=True),
+        )
+    if "style_profile_updated_at" not in cols:
+        op.add_column(
+            "adaptive_personas",
+            sa.Column(
+                "style_profile_updated_at",
+                sa.DateTime(timezone=True),
+                nullable=True,
+            ),
+        )
 
 
 def downgrade() -> None:
