@@ -23,36 +23,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
-    op.alter_column(
-        "commitments",
-        "deadline_at",
-        existing_type=sa.DateTime(),
-        type_=sa.DateTime(timezone=True),
-        existing_nullable=True,
-    )
-    op.alter_column(
-        "commitments",
-        "created_at",
-        existing_type=sa.DateTime(),
-        type_=sa.DateTime(timezone=True),
-        existing_nullable=False,
-    )
+    """Upgrade schema.
+
+    SQLite does not support ALTER COLUMN natively, and create_all() in the
+    initial migration already creates these columns with DateTime(timezone=True).
+    On SQLite there is no behavioural difference between DateTime and
+    DateTime(timezone=True) — both store ISO-8601 strings.
+    """
+    pass
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
-    op.alter_column(
-        "commitments",
-        "created_at",
-        existing_type=sa.DateTime(timezone=True),
-        type_=sa.DateTime(),
-        existing_nullable=False,
-    )
-    op.alter_column(
-        "commitments",
-        "deadline_at",
-        existing_type=sa.DateTime(timezone=True),
-        type_=sa.DateTime(),
-        existing_nullable=True,
-    )
+    """Downgrade schema. No-op on SQLite — see upgrade() comment."""
+    pass
