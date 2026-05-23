@@ -180,6 +180,17 @@ class NotificationQueue:
             Notification.PRIORITY_LOW: "Инфо",
         }
 
+        _topic_ru: dict[str, str] = {
+            "system": "система",
+            "digest": "дайджест",
+            "news": "новости",
+            "reminder": "напоминания",
+            "task_manager": "задачи",
+            "skills": "навыки",
+            "memory": "память",
+            "contacts": "контакты",
+        }
+
         # Определяем доминирующий приоритет для заголовка
         _dominant = min(by_priority.keys())
 
@@ -194,7 +205,9 @@ class NotificationQueue:
         for prio in sorted(by_priority.keys()):
             items = by_priority[prio]
             emoji = priority_emoji.get(prio, "⚪")
-            sub_topic = items[0].category or items[0].topic
+            sub_topic = _topic_ru.get(
+                items[0].category or items[0].topic, items[0].category or items[0].topic
+            )
             lines.append(f"{emoji} <b>{sub_topic}</b> ({len(items)})")
             for item in items:
                 # Обрезаем длинный текст

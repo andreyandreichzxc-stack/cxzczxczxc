@@ -28,6 +28,7 @@ from src.core.intelligence.agent import route_intent
 from src.core.intelligence.guardrails import evaluate as guardrail_evaluate
 from src.core.intelligence.maestro import run_pipeline
 from src.core.memory import conversation_context as ctx_store
+from src.core.memory.memory_recall import recall
 from src.db.repo import add_memory, get_or_create_user
 from src.db.session import get_session
 from src.userbot.manager import UserbotManager
@@ -844,26 +845,22 @@ async def execute_instant(
         await hooks.emit("on_message_received", user_id=owner_telegram_id, text=raw)
     except Exception:
         pass  # hooks are optional, never break core flow
-    response = plan.final_response
-    # Персонализация: добавляем имя + время суток в приветствия
-    user_name = message.from_user.first_name
-    if user_name and response:
-        greeting_markers = (
-            "Привет",
-            "Здаров",
-            "Хай",
-            "Ку",
-            "Hello",
-            "Hi",
+    # Динамическое приветствие с учётом наличия памяти
+    async with get_session() as session:
+        owner = await get_or_create_user(session, owner_telegram_id)
+        memories = await recall(telegram_id=owner_telegram_id, limit=1, mode="normal")
+        has_memory = bool(memories and memories.facts)
+
+    name = getattr(owner, "alias", None) or ""
+
+    if not has_memory:
+        response = (
+            "Привет! Я твой AI-ассистент. "
+            "Я тебя пока не знаю — расскажи о себе или дай доступ к чатам через /sync, и я запомню."
         )
-        for marker in greeting_markers:
-            if response.startswith(marker):
-                tod = _time_of_day_greeting(tz_name=tz_name)
-                if tod not in response:
-                    response = f"{tod}, {user_name}! {response}"
-                else:
-                    response = f"{response}, {user_name}"
-                break
+    else:
+        response = f"{_time_of_day_greeting(tz_name=tz_name)}{', ' + name if name else ''}! Чем займёмся?"
+
     await safe_answer(message, sanitize_html(response))
     ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
     _fire_record_trajectory(
