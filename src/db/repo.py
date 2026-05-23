@@ -120,6 +120,7 @@ async def delete_telegram_session(session: AsyncSession, user: User) -> None:
     row = await session.get(TelegramSession, user.id)
     if row is not None:
         await session.delete(row)
+        await session.flush()
 
 
 async def upsert_api_key(
@@ -545,6 +546,7 @@ async def upsert_contact(
         contact.phone = phone
         if folder_names is not None:
             contact.folder_names = folder_names
+        await session.flush()
     return contact
 
 
@@ -584,6 +586,7 @@ async def set_news_source(
     if contact is None:
         return False
     contact.is_news_source = value
+    await session.flush()
     return True
 
 
@@ -946,6 +949,7 @@ async def cache_transcript(
     else:
         existing.text = text
         existing.duration_seconds = duration_seconds
+    await session.flush()
 
 
 async def add_commitment(
@@ -1042,6 +1046,7 @@ async def add_auto_reply_log(
             reply_text=reply_text,
         )
     )
+    await session.flush()
 
 
 async def list_recent_auto_replies(
@@ -1089,6 +1094,7 @@ async def delete_pending_action(
     pa = await session.get(PendingAction, action_id)
     if pa is not None and pa.user_id == user.id:
         await session.delete(pa)
+        await session.flush()
 
 
 async def list_news_topics(
@@ -1126,6 +1132,7 @@ async def delete_news_topic(session: AsyncSession, user: User, topic_id: int) ->
     if nt is None or nt.user_id != user.id:
         return False
     await session.delete(nt)
+    await session.flush()
     return True
 
 
@@ -1136,6 +1143,7 @@ async def toggle_news_topic(
     if nt is None or nt.user_id != user.id:
         return None
     nt.enabled = not nt.enabled
+    await session.flush()
     return nt.enabled
 
 
@@ -1332,6 +1340,7 @@ async def delete_memory(session: AsyncSession, user: User, memory_id: int) -> bo
         return False
     await session.delete(m)
     await invalidate("mem_")
+    await session.flush()
     return True
 
 

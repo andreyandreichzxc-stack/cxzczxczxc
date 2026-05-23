@@ -850,8 +850,7 @@ async def execute_instant(
         owner = await get_or_create_user(session, owner_telegram_id)
         memories = await recall(telegram_id=owner_telegram_id, limit=1, mode="normal")
         has_memory = bool(memories and memories.facts)
-
-    name = getattr(owner, "alias", None) or ""
+        name = getattr(owner, "alias", None) or ""
 
     if not has_memory:
         response = (
@@ -862,7 +861,7 @@ async def execute_instant(
         response = f"{_time_of_day_greeting(tz_name=tz_name)}{', ' + name if name else ''}! Чем займёмся?"
 
     await safe_answer(message, sanitize_html(response))
-    ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
+    await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
     _fire_record_trajectory(
         owner_telegram_id,
         request_text=raw,
@@ -973,10 +972,10 @@ async def execute_fast_route(
     )
 
     summary = _summarize_intent_for_memory(intent)
-    ctx_store.add_turn(message.from_user.id, raw, summary)
+    await ctx_store.add_turn(message.from_user.id, raw, summary)
     try:
         if plan and plan.tasks:
-            ctx_store.set_last_purpose(
+            await ctx_store.set_last_purpose(
                 message.from_user.id, plan.tasks[0].purpose.value
             )
     except Exception:
@@ -1041,7 +1040,7 @@ async def execute_maestro(
                 error=None,
                 latency_ms=int((time.monotonic() - turn_started) * 1000),
             )
-            ctx_store.add_turn(
+            await ctx_store.add_turn(
                 message.from_user.id,
                 raw[:200],
                 f"[tool confirmation: {tool_name}]",
@@ -1092,7 +1091,9 @@ async def execute_maestro(
                 error="; ".join(errors) if errors else None,
                 latency_ms=int((time.monotonic() - turn_started) * 1000),
             )
-            ctx_store.add_turn(message.from_user.id, raw[:200], response_text[:400])
+            await ctx_store.add_turn(
+                message.from_user.id, raw[:200], response_text[:400]
+            )
             await _post_turn_optimize(owner_telegram_id, raw, response_text)
             try:
                 from src.core.infra.hooks import hooks

@@ -57,7 +57,11 @@ async def cmd_todos(message: Message) -> None:
 
 @router.callback_query(F.data.startswith("todo:done:"))
 async def cb_done(callback: CallbackQuery) -> None:
-    cid = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    cid = int(parts[2])
     async with get_session() as session:
         c = await session.get(Commitment, cid)
         if c:
@@ -78,7 +82,11 @@ async def cb_done(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("todo:cancel:"))
 async def cb_cancel(callback: CallbackQuery) -> None:
-    cid = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    cid = int(parts[2])
     async with get_session() as session:
         await update_commitment_status(session, cid, "cancelled")
     if callback.message:

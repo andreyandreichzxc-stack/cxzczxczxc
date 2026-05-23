@@ -476,7 +476,11 @@ async def cmd_keys(message: Message) -> None:
 @router.callback_query(F.data.startswith("keys:remove:"))
 async def cb_keys_remove(callback: CallbackQuery) -> None:
     """Удалить слот ключа по inline-кнопке."""
-    slot_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    slot_id = int(parts[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         slot = await session.get(LlmKeySlot, slot_id)
@@ -641,16 +645,16 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
         contact_name = args.strip()
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-        client = (
-            userbot_manager.get_client(message.from_user.id)
-            if userbot_manager
-            else None
-        )
-        if client is not None:
-            candidates = await resolve(client, owner, contact_name)
-            if candidates:
-                contact_id = candidates[0].peer_id
-                label = f" — {candidates[0].label()}"
+            client = (
+                userbot_manager.get_client(message.from_user.id)
+                if userbot_manager
+                else None
+            )
+            if client is not None:
+                candidates = await resolve(client, owner, contact_name)
+                if candidates:
+                    contact_id = candidates[0].peer_id
+                    label = f" — {candidates[0].label()}"
 
     if story_mode:
         if contact_id:

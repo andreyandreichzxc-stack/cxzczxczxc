@@ -213,7 +213,11 @@ async def cb_cancel(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("chat:pick:"))
 async def cb_pick(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
-    peer_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    peer_id = int(parts[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         contact = await get_contact(session, owner, peer_id)
@@ -228,7 +232,11 @@ async def cb_pick(callback: CallbackQuery, userbot_manager: UserbotManager) -> N
 
 @router.callback_query(F.data.startswith("chat:watch:"))
 async def cb_watch(callback: CallbackQuery) -> None:
-    peer_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    peer_id = int(parts[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         contact = await get_contact(session, owner, peer_id)
@@ -243,7 +251,11 @@ async def cb_watch(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("chat:unwatch:"))
 async def cb_unwatch(callback: CallbackQuery) -> None:
-    peer_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    peer_id = int(parts[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         contact = await get_contact(session, owner, peer_id)
@@ -327,7 +339,11 @@ async def cb_catchup(callback: CallbackQuery, userbot_manager: UserbotManager) -
 @router.callback_query(F.data.startswith("chat:limit:"))
 async def cb_limit(callback: CallbackQuery) -> None:
     """Показывает меню выбора лимита сообщений."""
-    peer_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    peer_id = int(parts[2])
 
     # Проверяем количество сообщений
     try:
@@ -395,7 +411,8 @@ async def cmd_sync(message: Message, userbot_manager: UserbotManager) -> None:
         f"  🤖 Боты: {stats['bots']}\n"
         f"  👥 Группы: {stats['chats']}\n"
         f"  📰 Каналы: {stats['channels']}\n"
-        f"  🗂 Архивных: {stats['archived']} (по умолчанию исключаются)\n\n"
+        f"  🗂 Архивных: {stats['archived']}"
+        f"{' (удалено ' + str(stats.get('removed', 0)) + ' неактуальных) ' if stats.get('removed') else ''}\n\n"
         f"⏳ Фоном: подгружаю последние сообщения из топ-30 активных чатов "
         f"для мгновенного локального поиска. Это разово, дальше всё пишется в реальном времени."
     )
@@ -472,7 +489,11 @@ async def _offer_memory_extraction(message: Message) -> None:
 async def cb_extract_memories(
     callback: CallbackQuery, userbot_manager: UserbotManager
 ) -> None:
-    _, _, target, caller_id = callback.data.split(":")
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    _, _, target, caller_id = parts[:4]
     if int(caller_id) != callback.from_user.id:
         await callback.answer("Не твоя кнопка", show_alert=True)
         return
@@ -681,7 +702,11 @@ async def cb_watchlist_add(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("chat:story:"))
 async def cb_story(callback: CallbackQuery) -> None:
     """Показать историю отношений с контактом."""
-    peer_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    peer_id = int(parts[2])
     from src.core.memory.memory_chain import build_chain_narrative
 
     narrative = await build_chain_narrative(peer_id, callback.from_user.id)
@@ -702,7 +727,11 @@ async def cb_story(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("chat:profile:"))
 async def cb_profile(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
     """Показать профиль контакта."""
-    peer_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    peer_id = int(parts[2])
     client = userbot_manager.get_client(callback.from_user.id)
     if client is None:
         await callback.answer("Сначала /login", show_alert=True)
@@ -723,17 +752,23 @@ async def cb_profile(callback: CallbackQuery, userbot_manager: UserbotManager) -
     )
 
     contact_name = contact.display_name if contact else str(peer_id)
-    await callback.message.answer(
-        f"👤 Используй /profile {contact_name} для просмотра профиля"
-    )
+    if callback.message:
+        await callback.message.answer(
+            f"👤 Используй /profile {contact_name} для просмотра профиля"
+        )
+    else:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("chat:analyze:"))
 async def cb_analyze(callback: CallbackQuery) -> None:
     """Показать инструкцию по /analyze."""
     await callback.answer()
-    await callback.message.answer(
-        "🧠 <b>Полный анализ</b>\n\n"
-        "Используй команду /analyze для полного анализа всех чатов.\n"
-        "Или <code>/analyze Работа Семья</code> — только для указанных папок."
-    )
+    if callback.message:
+        await callback.message.answer(
+            "🧠 <b>Полный анализ</b>\n\n"
+            "Используй команду /analyze для полного анализа всех чатов.\n"
+            "Или <code>/analyze Работа Семья</code> — только для указанных папок."
+        )
+    else:
+        await callback.answer("Сообщение недоступно.", show_alert=True)

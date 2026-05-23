@@ -209,7 +209,11 @@ async def _create_and_confirm(
 
 @router.callback_query(F.data.startswith("send:pick:"))
 async def cb_pick(callback: CallbackQuery, state: FSMContext) -> None:
-    peer_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    peer_id = int(parts[2])
     data = await state.get_data()
     text = data.get("send_text")
     if not text:
@@ -265,7 +269,11 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("send:edit:"))
 async def cb_edit(callback: CallbackQuery, state: FSMContext) -> None:
-    action_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    action_id = int(parts[2])
     await state.set_state(SendStates.waiting_edit)
     await state.set_data({"action_id": action_id})
     await callback.message.answer("Введи новый текст сообщения. /cancel — отмена.")
@@ -317,7 +325,11 @@ async def step_edit(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("send:confirm:"))
 async def cb_confirm(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
-    action_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    action_id = int(parts[2])
     client = userbot_manager.get_client(callback.from_user.id)
     if client is None:
         await callback.answer("Сначала /login", show_alert=True)

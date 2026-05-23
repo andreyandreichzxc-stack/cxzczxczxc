@@ -2,6 +2,7 @@
 
 import logging
 
+from sqlalchemy import select as sa_select
 from telethon import TelegramClient
 from telethon.tl.types import Channel, Chat, User as TgUser
 
@@ -33,15 +34,24 @@ def _entity_display_name(entity: object) -> str:
         name = " ".join(p for p in parts if p).strip()
         if name:
             return name
-        return entity.username or str(entity.id)
+        if getattr(entity, "username", None):
+            return f"@{entity.username}"
+        return f"User {entity.id}"
     title = getattr(entity, "title", None)
-    return title or str(getattr(entity, "id", ""))
+    return title or f"Chat {getattr(entity, 'id', '')}"
 
 
 async def sync_dialogs(
     client: TelegramClient, owner: User, *, limit: int = 200
 ) -> dict[str, int]:
-    stats = {"users": 0, "bots": 0, "chats": 0, "channels": 0, "archived": 0}
+    stats = {
+        "users": 0,
+        "bots": 0,
+        "chats": 0,
+        "channels": 0,
+        "archived": 0,
+        "removed": 0,
+    }
     # Получить папки пользователя Telegram
     from telethon.tl.functions.messages import GetDialogFiltersRequest
 
@@ -86,6 +96,8 @@ async def sync_dialogs(
         peer_to_folder = {}
     async with get_session() as session:
         owner = await session.merge(owner)
+        # Собираем peer_id всех актуальных диалогов
+        active_peers: set[int] = set()
         # archived=True — это отдельная архивная папка, делаем два прохода
         for archived_pass in (False, True):
             async for dialog in client.iter_dialogs(
@@ -99,10 +111,12 @@ async def sync_dialogs(
                     else False
                 )
                 is_archived = bool(getattr(dialog, "archived", archived_pass))
+                peer_id = entity.id
+                active_peers.add(peer_id)
                 await upsert_contact(
                     session,
                     owner,
-                    peer_id=entity.id,
+                    peer_id=peer_id,
                     peer_kind=kind,
                     is_bot=is_bot,
                     is_archived=is_archived,
@@ -122,6 +136,28 @@ async def sync_dialogs(
                     stats["chats"] += 1
                 else:
                     stats["channels"] += 1
+        # Очистка: удалить контакты, которых больше нет в диалогах Telegram
+        # (юзер удалил чат, покинул группу, контакт удалил аккаунт)
+        if active_peers and limit >= 500:  # только при полном синке
+            from sqlalchemy import delete as sa_delete
+            from src.db.models import Contact
+
+            result = await session.execute(
+                sa_select(Contact).where(Contact.user_id == owner.id)
+            )
+            all_contacts = result.scalars().all()
+            stale = [c.peer_id for c in all_contacts if c.peer_id not in active_peers]
+            if stale:
+                await session.execute(
+                    sa_delete(Contact).where(
+                        Contact.user_id == owner.id,
+                        Contact.peer_id.in_(stale),
+                    )
+                )
+                stats["removed"] = len(stale)
+                logger.info(
+                    "Removed %d stale contacts not in Telegram dialogs", len(stale)
+                )
     return stats
 
 

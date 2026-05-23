@@ -41,7 +41,7 @@ async def auto_sync_loop() -> None:
                     owner = await get_or_create_user(
                         session, settings.owner_telegram_id
                     )
-                stats = await sync_dialogs(client, owner, limit=200)
+                stats = await sync_dialogs(client, owner, limit=500)
                 logger.info("auto-sync done: %s", stats)
 
             await asyncio.sleep(interval_sec)

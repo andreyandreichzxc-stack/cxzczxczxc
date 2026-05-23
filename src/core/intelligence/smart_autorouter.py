@@ -212,7 +212,7 @@ async def make_plan(
     try:
         from src.core.memory.conversation_depth import decide_context_depth
 
-        depth_decision = decide_context_depth(telegram_id, user_text)
+        depth_decision = await decide_context_depth(telegram_id, user_text)
         plan.recall_mode = depth_decision.recall_mode
         plan.metrics["dialog_depth"] = depth_decision.depth
         plan.metrics["message_weight"] = round(depth_decision.message_weight, 2)

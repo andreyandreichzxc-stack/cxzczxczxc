@@ -290,10 +290,10 @@ async def _process_text_fallback(
     )
 
     summary = _summarize_intent_for_memory(intent)
-    ctx_store.add_turn(message.from_user.id, raw, summary)
+    await ctx_store.add_turn(message.from_user.id, raw, summary)
     try:
         if plan and plan.tasks:
-            ctx_store.set_last_purpose(
+            await ctx_store.set_last_purpose(
                 message.from_user.id, plan.tasks[0].purpose.value
             )
     except Exception:
@@ -320,7 +320,7 @@ async def _process_text(
     use_heavy = bool(ctx["use_heavy"])
 
     now_local_str = now_in_tz(tz_name).strftime("%Y-%m-%d %H:%M")
-    history_block = ctx_store.render_history_block(message.from_user.id)
+    history_block = await ctx_store.render_history_block(message.from_user.id)
 
     # Stage 1: Adaptive instructions
     if await check_instructions(raw, owner_telegram_id, message):
@@ -343,7 +343,7 @@ async def _process_text(
     # Stage 4: Smart AutoRouter
     _last_purpose = None
     try:
-        _last_purpose = ctx_store.get_last_purpose(message.from_user.id)
+        _last_purpose = await ctx_store.get_last_purpose(message.from_user.id)
     except Exception:
         logger.exception("failed to get last purpose")
     plan = await make_plan(

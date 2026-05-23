@@ -75,7 +75,10 @@ async def collect_recent_messages(
                 user.settings.monitor_only_selected_folders
                 and user.settings.monitored_folders
             ):
-                monitored = json.loads(user.settings.monitored_folders)
+                try:
+                    monitored = json.loads(user.settings.monitored_folders)
+                except json.JSONDecodeError:
+                    monitored = []
                 if monitored:
                     contact = await get_contact(session, user, m.peer_id)
                     contact_folders = (

@@ -137,7 +137,11 @@ async def cb_thread_refresh(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("thread:open:"))
 async def cb_thread_open(callback: CallbackQuery) -> None:
     """Показать последние сообщения из треда."""
-    peer_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    peer_id = int(parts[2])
     await callback.answer(f"Открыть чат {peer_id} — открой в Telegram")
 
     async with get_session() as session:
@@ -214,7 +218,11 @@ async def cb_thread_open(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("thread:reply:"))
 async def cb_thread_reply(callback: CallbackQuery, userbot_manager=None) -> None:
     """Сгенерировать черновик ответа для треда."""
-    peer_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    peer_id = int(parts[2])
     from src.core.intelligence.summarizer import draft_reply
     from src.core.infra.text_sanitizer import sanitize_html
     from src.llm.router import build_provider

@@ -131,7 +131,11 @@ async def step_topic(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("nt:tog:"))
 async def cb_toggle(callback: CallbackQuery) -> None:
-    topic_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    topic_id = int(parts[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         new_state = await toggle_news_topic(session, owner, topic_id)
@@ -144,7 +148,11 @@ async def cb_toggle(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("nt:del:"))
 async def cb_delete(callback: CallbackQuery) -> None:
-    topic_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    topic_id = int(parts[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         ok = await delete_news_topic(session, owner, topic_id)

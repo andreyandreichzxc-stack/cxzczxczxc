@@ -36,7 +36,7 @@ async def cmd_inbox(message: Message) -> None:
 
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
-        tz_name = owner.settings.timezone
+        tz_name = owner.settings.timezone if owner.settings else "UTC"
 
         # ── 1. Ждут ответа ─────────────────────────────────────────
         radar = await collect_reply_radar(telegram_id, limit=20)

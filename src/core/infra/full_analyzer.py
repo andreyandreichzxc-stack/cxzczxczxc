@@ -46,8 +46,10 @@ async def run_full_analysis(
     owner_id: int,
     provider,
     *,
+    client=None,
     message_limit: int = 500,
     folder_names: list[str] | None = None,
+    contact_ids: list[int] | None = None,
     progress_callback=None,
 ) -> AnalysisResult:
     """
@@ -58,6 +60,7 @@ async def run_full_analysis(
         provider: LLMProvider для извлечения фактов
         message_limit: сколько последних сообщений анализировать на контакт
         folder_names: список папок для анализа (None = все)
+        contact_ids: список peer_id для анализа (если задан, folder_names игнорируется)
         progress_callback: async callable(AnalysisProgress) для UI-обновлений
     """
     result = AnalysisResult()
@@ -80,8 +83,16 @@ async def run_full_analysis(
             include_bots=False,
         )
 
+    # Фильтр по ID контактов (приоритетнее folder_names)
+    if contact_ids:
+        id_set = set(contact_ids)
+        contacts = [c for c in contacts if c.peer_id in id_set]
+        if not contacts:
+            result.details.append("Ни один из указанных контактов не найден.")
+            return result
+
     # Фильтр по папкам (fuzzy matching, ~25% tolerance)
-    if folder_names:
+    if folder_names and not contact_ids:
         from rapidfuzz import fuzz
 
         FUZZY_THRESHOLD = 70  # ~25% допустимых ошибок
@@ -129,17 +140,29 @@ async def run_full_analysis(
             )
 
         try:
-            # Загрузить сообщения
-            async with get_session() as session:
-                from src.db.repo import fetch_chat_messages
+            # Загрузить сообщения — через Telegram API если есть клиент, иначе из БД
+            if client:
+                from src.core.contacts.chat_service import load_chat
 
-                owner_synced = await session.merge(owner) if session else owner
-                messages = await fetch_chat_messages(
-                    session,
-                    owner_synced,
+                messages = await load_chat(
+                    client,
+                    owner_id,
                     contact.peer_id,
                     limit=message_limit,
+                    transcribe=False,
+                    incremental=False,
                 )
+            else:
+                async with get_session() as session:
+                    from src.db.repo import fetch_chat_messages
+
+                    owner_synced = await session.merge(owner) if session else owner
+                    messages = await fetch_chat_messages(
+                        session,
+                        owner_synced,
+                        contact.peer_id,
+                        limit=message_limit,
+                    )
 
             if not messages:
                 result.details.append(f"{contact_name}: нет сообщений")

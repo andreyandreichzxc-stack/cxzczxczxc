@@ -460,7 +460,15 @@ async def process(
                 "final_response": raw,
             }
 
-        parsed = json.loads(m.group(0))
+        try:
+            parsed = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return {
+                "understood": m.group(0),
+                "plan": [],
+                "agents_to_call": [],
+                "final_response": m.group(0),
+            }
 
         # ── Tool call? ──
         if (

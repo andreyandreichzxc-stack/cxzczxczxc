@@ -179,7 +179,7 @@ async def compile_experience(
             pass
 
     # 3. Берём последние диалоги из conversation_context
-    turns = ctx_store.get_recent_turns(telegram_id)
+    turns = await ctx_store.get_recent_turns(telegram_id)
     if not turns:
         logger.debug("compile_experience: no recent dialogs")
         return None

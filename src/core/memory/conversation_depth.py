@@ -50,8 +50,8 @@ class DepthDecision:
     include_deep: bool
 
 
-def get_depth(telegram_id: int) -> int:
-    return ctx_store.get_recent_turn_count(telegram_id, max_age_seconds=3600)
+async def get_depth(telegram_id: int) -> int:
+    return await ctx_store.get_recent_turn_count(telegram_id, max_age_seconds=3600)
 
 
 def message_weight(text: str) -> float:
@@ -82,8 +82,8 @@ def get_recall_mode(depth: int, weight: float, text: str = "") -> RecallMode:
     return "light"
 
 
-def decide_context_depth(telegram_id: int, text: str) -> DepthDecision:
-    depth = get_depth(telegram_id)
+async def decide_context_depth(telegram_id: int, text: str) -> DepthDecision:
+    depth = await get_depth(telegram_id)
     weight = message_weight(text)
     mode = get_recall_mode(depth, weight, text)
     if mode == "light":

@@ -91,6 +91,9 @@ def draft_keyboard(peer_id: int, draft_hash: str) -> InlineKeyboardMarkup:
 @router.callback_query(F.data.startswith("draft:send:"))
 async def cb_draft_send(callback: CallbackQuery) -> None:
     parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     peer_id = int(parts[2])
     draft_hash = parts[3]
 
@@ -139,6 +142,9 @@ async def cb_draft_send(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("draft:ignore:"))
 async def cb_draft_ignore(callback: CallbackQuery) -> None:
     parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
     draft_hash = parts[3]
     _draft_texts.pop(draft_hash, None)
     if callback.message:

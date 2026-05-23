@@ -109,11 +109,15 @@ async def weekly_summary_loop(owner_id: int) -> None:
                         continue
 
                     # Получить папки для фильтра
-                    monitored = (
-                        json.loads(owner_safe.settings.monitored_folders)
-                        if owner_safe.settings.monitored_folders
-                        else []
-                    )
+                    if owner_safe.settings.monitored_folders:
+                        try:
+                            monitored = json.loads(
+                                owner_safe.settings.monitored_folders
+                            )
+                        except json.JSONDecodeError:
+                            monitored = []
+                    else:
+                        monitored = []
                     contacts = await list_contacts(
                         session, owner_safe, kinds=("user",), include_bots=False
                     )

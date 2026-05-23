@@ -47,7 +47,7 @@ async def cmd_news(
     # парсим --hours
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        default_hours = owner.settings.news_window_hours
+        default_hours = owner.settings.news_window_hours if owner.settings else 0
 
     hours = default_hours
     m = HOURS_RE.search(raw)
@@ -108,7 +108,11 @@ async def cmd_news_channels(message: Message, userbot_manager: UserbotManager) -
 
 @router.callback_query(F.data.startswith("news:tog:"))
 async def cb_toggle(callback: CallbackQuery) -> None:
-    peer_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    peer_id = int(parts[2])
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         # инвертируем

@@ -19,7 +19,8 @@ async def cmd_humanize(message: Message) -> None:
     /humanize <текст>
     /humanize fix <текст> — с авто-исправлением
     """
-    args = message.text.split(maxsplit=1)
+    text = message.text or ""
+    args = text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer(
             "🎯 <b>Humanizer</b>\n"

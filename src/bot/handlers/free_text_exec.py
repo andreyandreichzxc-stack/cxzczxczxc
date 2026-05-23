@@ -125,7 +125,9 @@ async def classic_resolve_contact(
         )
         return None
     target = candidates[0]
-    ctx_store.set_last_peer(message.from_user.id, target.peer_id, target.display_name)
+    await ctx_store.set_last_peer(
+        message.from_user.id, target.peer_id, target.display_name
+    )
     return target.peer_id
 
 
@@ -604,7 +606,7 @@ async def exec_show_today(intent: dict, message: Message) -> None:
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        interval = owner.settings.smart_digest_interval_min
+        interval = owner.settings.smart_digest_interval_min if owner.settings else 0
         messages = await collect_recent_messages(session, owner, since_minutes=interval)
         text = build_smart_digest(messages, interval)
     await message.answer(sanitize_html(text) if text else "На сегодня ничего.")
@@ -909,7 +911,7 @@ async def exec_classic_send_message(
         return
     if len(candidates) == 1 or candidates[0].score >= 90:
         target = candidates[0]
-        ctx_store.set_last_peer(
+        await ctx_store.set_last_peer(
             message.from_user.id, target.peer_id, target.display_name
         )
         payload = json.dumps(

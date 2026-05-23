@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-import threading
+import asyncio
 from collections import deque
 from dataclasses import dataclass, field
 from time import time
@@ -26,7 +26,7 @@ class _Ctx:
 
 
 _STORE: dict[int, _Ctx] = {}
-_ctx_lock = threading.Lock()
+_ctx_lock = asyncio.Lock()
 
 
 def _cleanup_stale_contexts() -> None:
@@ -41,8 +41,8 @@ def _cleanup_stale_contexts() -> None:
         del _STORE[uid]
 
 
-def _get(user_id: int) -> _Ctx:
-    with _ctx_lock:
+async def _get(user_id: int) -> _Ctx:
+    async with _ctx_lock:
         _cleanup_stale_contexts()
         ctx = _STORE.get(user_id)
         if ctx is None:
@@ -51,26 +51,26 @@ def _get(user_id: int) -> _Ctx:
         return ctx
 
 
-def add_turn(user_id: int, user_text: str, assistant_summary: str) -> None:
-    ctx = _get(user_id)
+async def add_turn(user_id: int, user_text: str, assistant_summary: str) -> None:
+    ctx = await _get(user_id)
     user_text = (user_text or "").strip()
     assistant_summary = (assistant_summary or "").strip()
     if not user_text and not assistant_summary:
         return
-    with _ctx_lock:
+    async with _ctx_lock:
         ctx.turns.append((time(), user_text[:400], assistant_summary[:400]))
 
 
-def set_last_peer(user_id: int, peer_id: int, peer_name: str | None) -> None:
-    ctx = _get(user_id)
-    with _ctx_lock:
+async def set_last_peer(user_id: int, peer_id: int, peer_name: str | None) -> None:
+    ctx = await _get(user_id)
+    async with _ctx_lock:
         ctx.last_peer_id = peer_id
         ctx.last_peer_name = peer_name
         ctx.last_peer_at = time()
 
 
-def get_last_peer(user_id: int) -> tuple[int, str | None] | None:
-    ctx = _get(user_id)
+async def get_last_peer(user_id: int) -> tuple[int, str | None] | None:
+    ctx = await _get(user_id)
     if ctx.last_peer_id is None:
         return None
     if (time() - ctx.last_peer_at) > LAST_PEER_TTL_SECONDS:
@@ -78,8 +78,8 @@ def get_last_peer(user_id: int) -> tuple[int, str | None] | None:
     return ctx.last_peer_id, ctx.last_peer_name
 
 
-def get_recent_turns(user_id: int) -> list[tuple[str, str]]:
-    ctx = _get(user_id)
+async def get_recent_turns(user_id: int) -> list[tuple[str, str]]:
+    ctx = await _get(user_id)
     rows = []
     for item in ctx.turns:
         if len(item) == 3:
@@ -90,10 +90,10 @@ def get_recent_turns(user_id: int) -> list[tuple[str, str]]:
     return rows
 
 
-def get_recent_turn_count(user_id: int, max_age_seconds: int = 3600) -> int:
+async def get_recent_turn_count(user_id: int, max_age_seconds: int = 3600) -> int:
     now = time()
     count = 0
-    for item in _get(user_id).turns:
+    for item in (await _get(user_id)).turns:
         if len(item) == 3:
             ts = item[0]
             if now - ts <= max_age_seconds:
@@ -103,22 +103,22 @@ def get_recent_turn_count(user_id: int, max_age_seconds: int = 3600) -> int:
     return count
 
 
-def set_last_purpose(user_id: int, purpose: str) -> None:
+async def set_last_purpose(user_id: int, purpose: str) -> None:
     """Запоминает последний purpose для context chaining."""
-    ctx = _get(user_id)
-    with _ctx_lock:
+    ctx = await _get(user_id)
+    async with _ctx_lock:
         ctx.last_purpose = purpose
 
 
-def get_last_purpose(user_id: int) -> str | None:
+async def get_last_purpose(user_id: int) -> str | None:
     """Возвращает последний purpose для context chaining."""
-    ctx = _get(user_id)
+    ctx = await _get(user_id)
     return ctx.last_purpose
 
 
-def render_history_block(user_id: int) -> str:
+async def render_history_block(user_id: int) -> str:
     parts: list[str] = []
-    last = get_last_peer(user_id)
+    last = await get_last_peer(user_id)
     if last is not None:
         peer_id, name = last
         label = name or str(peer_id)
@@ -128,7 +128,7 @@ def render_history_block(user_id: int) -> str:
             f"подставляй именно его."
         )
 
-    turns = get_recent_turns(user_id)
+    turns = await get_recent_turns(user_id)
     if turns:
         lines = ["Недавний диалог с владельцем (для понимания «то/там/ему»):"]
         for u, a in turns[-MAX_TURNS:]:

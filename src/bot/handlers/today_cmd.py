@@ -166,7 +166,11 @@ async def cmd_radar(message: Message):
 # Callback: radar:why
 @router.callback_query(F.data.startswith("radar:why:"))
 async def cb_radar_why(callback: CallbackQuery):
-    peer_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    peer_id = int(parts[2])
     telegram_id = callback.from_user.id
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
@@ -202,7 +206,11 @@ async def cb_radar_why(callback: CallbackQuery):
 # Callback: radar:snooze
 @router.callback_query(F.data.startswith("radar:snooze:"))
 async def cb_radar_snooze(callback: CallbackQuery):
-    peer_id = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+    peer_id = int(parts[2])
     async with get_session() as session:
         from sqlalchemy import select
         from src.db.models import ConversationState
