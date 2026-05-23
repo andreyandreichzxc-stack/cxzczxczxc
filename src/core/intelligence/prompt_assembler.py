@@ -11,6 +11,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Optional
+from pathlib import Path
 
 from src.core.intelligence.soul_blocks import ANTI_AI_BLOCK, _load_blocks
 from src.db.repo import get_or_create_user, get_self_profile
@@ -20,6 +21,20 @@ logger = logging.getLogger(__name__)
 
 # Максимальная длина промпта в символах (безопасный лимит для большинства LLM)
 MAX_PROMPT_CHARS = 32_000
+
+# ---------------------------------------------------------------------------
+# SOUL.md — внешний файл личности бота (заменяет hardcoded soul_blocks)
+# ---------------------------------------------------------------------------
+
+_SOUL_MD: str | None = None
+
+_soul_md_path = Path(__file__).resolve().parent.parent.parent.parent / "SOUL.md"
+if _soul_md_path.exists():
+    _SOUL_MD = _soul_md_path.read_text(encoding="utf-8").strip()
+    if _SOUL_MD:
+        logger.info("SOUL.md loaded (%d chars)", len(_SOUL_MD))
+    else:
+        _SOUL_MD = None
 
 
 def _truncate_smart(text: str, max_chars: int) -> str:
@@ -67,6 +82,8 @@ class AssemblyContext:
     skill_index: str = ""
     # Anti-AI humanizer
     anti_ai: bool = True
+    # Сырой текст сообщения пользователя (для поиска имён контактов)
+    user_message: str = ""
     # Дополнительные поля для agent target
     now_local: str = ""
     tz_name: str = ""
@@ -90,6 +107,9 @@ class PromptAssembler:
     def _tier1_stable(self, target: str) -> str:
         """Tier 1 — неизменяемый якорь."""
         if target == "maestro":
+            # SOUL.md загружен → используем его вместо hardcoded блоков
+            if _SOUL_MD is not None:
+                return _SOUL_MD
             return (
                 self._blocks["stable_maestro_core"]
                 + "\n\n"
@@ -126,6 +146,17 @@ class PromptAssembler:
         # Style‑match block (динамический анализ стиля пользователя)
         if ctx.style_match_block:
             parts.append(ctx.style_match_block)
+
+        # Contact-specific context files (data/contexts/{name}.md)
+        if ctx.user_message:
+            try:
+                from src.core.memory.context_files import find_relevant_contexts
+
+                matched = find_relevant_contexts(ctx.user_message)
+                for cname, ccontent in matched.items():
+                    parts.append(f"[Контекст: {cname}]\n{ccontent}")
+            except Exception:
+                logger.debug("find_relevant_contexts failed", exc_info=True)
 
         # Confirmed rules (из adaptive_instructions)
         if ctx.confirmed_rules:

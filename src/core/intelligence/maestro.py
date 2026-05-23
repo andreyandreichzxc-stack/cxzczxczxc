@@ -294,6 +294,7 @@ async def process(
         ctx = AssemblyContext(
             target="maestro",
             user_id=owner_id or 0,
+            user_message=user_text,
             memory_context=memory_recall_context,
             rag_context=rag_context,
             persona_block=persona_block,
