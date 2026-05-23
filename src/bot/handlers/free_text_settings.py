@@ -21,6 +21,9 @@ router = Router(name="free_text_settings")
 
 
 # Поля UserSettings, которые агент может менять через set_setting (имя → тип значения)
+# Решения auto-reply принимаются через src.core.contacts.auto_reply_decision.decide().
+# При добавлении новых настроек, связанных с auto-reply (стиль, спам-порог и т.п.),
+# обновляй SETTING_FIELDS здесь и соответствующую логику в auto_reply_decision.py.
 SETTING_FIELDS: dict[str, str] = {
     "auto_reply_enabled": "bool",
     "auto_reply_mode": "choice:static,smart",

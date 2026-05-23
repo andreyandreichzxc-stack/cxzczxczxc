@@ -140,6 +140,33 @@ async def upsert_api_key(
     else:
         existing.key_enc = enc
 
+    # Унификация: также сохраняем в LlmKeySlot (новое хранилище)
+    # Каждый ключ из списка — отдельный слот
+    existing_slots = await list_key_slots(session, user, provider=provider)
+    existing_keys: set[str] = set()
+    for s in existing_slots:
+        try:
+            existing_keys.add(decrypt(s.key_enc))
+        except Exception:
+            continue
+
+    for i, single_key in enumerate(parts):
+        if single_key not in existing_keys:
+            slot = LlmKeySlot(
+                user_id=user.id,
+                provider=provider,
+                purpose="main",
+                label=f"{provider}/main",
+                key_enc=encrypt(single_key),
+                priority=i,
+            )
+            session.add(slot)
+        else:
+            # Ключ уже есть в LlmKeySlot — не дублируем
+            pass
+
+    await session.flush()
+
 
 async def get_api_key(session: AsyncSession, user: User, provider: str) -> str | None:
     """Возвращает сохранённый ключ(и). Если ключей несколько — через запятую."""
@@ -170,8 +197,26 @@ async def add_key_slot(
     purpose: str = "main",
     label: str | None = None,
     priority: int = 0,
-) -> LlmKeySlot:
-    """Добавляет слот ключа."""
+) -> tuple[LlmKeySlot, bool]:
+    """Добавляет слот ключа.
+
+    Возвращает (LlmKeySlot, is_new):
+      - is_new=True  — слот создан впервые
+      - is_new=False — ключ с таким же значением уже существует (слот #N)
+    """
+    # Проверка дубликатов: расшифровываем все существующие слоты пользователя
+    # и сравниваем с новым ключом
+    existing_slots = await list_key_slots(
+        session, user, provider=provider, purpose=purpose
+    )
+    for existing in existing_slots:
+        try:
+            existing_key = decrypt(existing.key_enc)
+            if existing_key == key:
+                return existing, False
+        except Exception:
+            continue
+
     slot = LlmKeySlot(
         user_id=user.id,
         provider=provider,
@@ -182,7 +227,7 @@ async def add_key_slot(
     )
     session.add(slot)
     await session.flush()
-    return slot
+    return slot, True
 
 
 # ─── Learning loop: trajectories and skills ────────────────────────

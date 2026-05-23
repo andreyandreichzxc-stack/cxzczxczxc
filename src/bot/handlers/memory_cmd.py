@@ -146,7 +146,7 @@ async def _do_import_keys(
 
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-            slot = await add_key_slot(
+            slot, is_new = await add_key_slot(
                 session,
                 owner,
                 detected,
@@ -156,7 +156,14 @@ async def _do_import_keys(
                 priority=i,
             )
 
-        # Валидируем
+        if not is_new:
+            results.append(
+                f"  #{slot.id} {detected}/{purpose} — Этот ключ уже добавлен (слот #{slot.id})"
+            )
+            total_found += 1
+            continue
+
+        # Валидируем (только для новых слотов)
         try:
             key = decrypt(slot.key_enc)
             prov_class = _provider_class_for(detected)
@@ -234,7 +241,7 @@ async def cmd_keys(message: Message) -> None:
             priority = i if auto_inc else 0
             async with get_session() as session:
                 owner = await get_or_create_user(session, message.from_user.id)
-                slot = await add_key_slot(
+                slot, is_new = await add_key_slot(
                     session,
                     owner,
                     provider,
@@ -243,7 +250,13 @@ async def cmd_keys(message: Message) -> None:
                     label=f"{provider}/{purpose}",
                     priority=priority,
                 )
-            # Валидируем ключ
+            if not is_new:
+                results.append(
+                    f"  #{slot.id} {provider}/{purpose} — Этот ключ уже добавлен (слот #{slot.id})"
+                )
+                success += 1
+                continue
+            # Валидируем ключ (только для новых слотов)
             try:
                 key = decrypt(slot.key_enc)
                 prov_class = _provider_class_for(provider)
@@ -268,9 +281,14 @@ async def cmd_keys(message: Message) -> None:
                 success += 1
 
         if len(keys) == 1 and success == 1:
-            await message.answer(
-                f"✅ Ключ {provider}/{purpose} добавлен и проверен! (слот #{slot.id})"
-            )
+            if not is_new:
+                await message.answer(
+                    f"ℹ️ Ключ {provider}/{purpose} уже был добавлен ранее (слот #{slot.id})."
+                )
+            else:
+                await message.answer(
+                    f"✅ Ключ {provider}/{purpose} добавлен и проверен! (слот #{slot.id})"
+                )
         elif len(keys) == 1 and failed == 1:
             await message.answer(
                 f"❌ Ключ {provider}/{purpose} не прошёл валидацию. Проверь ключ."

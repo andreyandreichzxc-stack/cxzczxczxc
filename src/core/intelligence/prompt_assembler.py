@@ -106,9 +106,10 @@ class PromptAssembler:
         """Tier 2 — полу-стабильный контекст."""
         parts = []
 
-        # Agent list / format для maestro
+        # Agent list / intents / format для maestro
         if target == "maestro":
             parts.append(self._blocks["context_maestro_agents"])
+            parts.append(self._blocks["context_maestro_intents"])
             parts.append(self._blocks["context_maestro_format"])
         elif target == "agent":
             parts.append(self._blocks["context_agent_intents"])

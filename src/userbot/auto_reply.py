@@ -8,7 +8,6 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import TelegramClient, events
 from telethon.tl.custom import Message as TgMessage
@@ -18,11 +17,15 @@ from telethon.tl.types import (
     UserStatusOnline,
 )
 
+from src.core.contacts.auto_reply_decision import (
+    AutoReplyVerdict,
+    decide,
+)
 from src.core.contacts.chat_service import load_chat, message_to_text
 from src.core.scheduling.notification_queue import notification_queue
 from src.core.contacts.style_profile import style_profile_as_prompt_hint
 from src.core.infra.timeutil import get_user_tz, now_in_tz
-from src.db.models import AutoReplyLog, User
+from src.db.models import User
 from src.core.memory.memory_recall import recall, format_recall_for_prompt
 from src.db.repo import (
     add_auto_reply_log,
@@ -110,32 +113,12 @@ async def _check_and_track_offline(
         return False
 
 
-async def _recently_replied(owner_telegram_id: int, peer_id: int) -> bool:
-    async with get_session() as session:
-        owner = await get_or_create_user(session, owner_telegram_id)
-        if owner.settings is None:
-            return True
-        cooldown = getattr(owner.settings, "auto_reply_cooldown_min", None) or 30
-        threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
-            minutes=cooldown
-        )
-        result = await session.execute(
-            select(AutoReplyLog)
-            .where(
-                AutoReplyLog.user_id == owner.id,
-                AutoReplyLog.peer_id == peer_id,
-                AutoReplyLog.created_at >= threshold,
-            )
-            .limit(1)
-        )
-        return result.scalar_one_or_none() is not None
-
-
 async def _build_reply_text(
     owner_telegram_id: int,
     peer_id: int,
     sender_name: str,
     incoming_text: str,
+    style: str = "default",
 ) -> str | None:
     memory_context = ""
     profile_prompt = ""
@@ -298,24 +281,17 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
             if msg.out:
                 return
             sender = await event.get_sender()
-            if not isinstance(sender, TgUser) or sender.bot:
-                return  # только ЛС от человеков
-            if not event.is_private:
-                return
+            if not isinstance(sender, TgUser):
+                return  # только от User-объектов
+            is_bot = bool(getattr(sender, "bot", False))
+            is_private = bool(event.is_private)
 
             async with get_session() as session:
                 owner: User = await get_or_create_user(session, owner_telegram_id)
                 if owner.settings is None or not owner.settings.auto_reply_enabled:
                     return
-                # игнорируем архив, если опция включена
-                existing = await get_contact(session, owner, sender.id)
-                if (
-                    owner.settings.ignore_archived
-                    and existing is not None
-                    and existing.is_archived
-                ):
-                    return
-                # запомним контакт
+
+                # запомним / обновим контакт до принятия решения
                 parts = [
                     getattr(sender, "first_name", None),
                     getattr(sender, "last_name", None),
@@ -323,18 +299,20 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                 display = " ".join(p for p in parts if p).strip() or (
                     sender.username or str(sender.id)
                 )
+                existing = await get_contact(session, owner, sender.id)
                 await upsert_contact(
                     session,
                     owner,
                     peer_id=sender.id,
                     peer_kind="user",
-                    is_bot=bool(getattr(sender, "bot", False)),
+                    is_bot=is_bot,
                     display_name=display,
                     username=getattr(sender, "username", None),
                     phone=getattr(sender, "phone", None),
                 )
 
-                # Folder filter: если monitor_only_selected_folders и контакт не в выбранных папках — не отвечаем
+                # Folder filter (остаётся отдельно — это не про auto-reply решение,
+                # а про то, какие чаты вообще мониторим)
                 if (
                     owner.settings.monitor_only_selected_folders
                     and owner.settings.monitored_folders
@@ -343,9 +321,8 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
 
                     monitored = _ar_json.loads(owner.settings.monitored_folders)
                     if monitored:
-                        contact = existing  # уже загружен через get_contact выше
                         contact_folders = (
-                            (contact.folder_names or "").split(",") if contact else []
+                            (existing.folder_names or "").split(",") if existing else []
                         )
                         contact_folders = [
                             f.strip() for f in contact_folders if f.strip()
@@ -353,24 +330,45 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                         if not any(f in monitored for f in contact_folders):
                             return
 
-                if not await _check_and_track_offline(client, session, owner):
+                # Определяем онлайн-статус владельца (и трекаем сон/absence)
+                owner_offline = await _check_and_track_offline(client, session, owner)
+
+                # ── Единый вызов decision layer ────────────────────────────
+                choice = await decide(
+                    session=session,
+                    owner=owner,
+                    peer_id=sender.id,
+                    is_private=is_private,
+                    is_bot=is_bot,
+                    contact=existing,
+                    is_online=not owner_offline,
+                    msg_text=msg.text or msg.message or "",
+                )
+
+                if choice.verdict != AutoReplyVerdict.SEND:
+                    logger.debug(
+                        "auto-reply skip: %s (style=%s) — %s",
+                        choice.verdict.value,
+                        choice.style,
+                        choice.reason,
+                    )
                     return
-            if await _recently_replied(owner_telegram_id, sender.id):
-                return
 
-            incoming_text = msg.text or msg.message or ""
-            if not incoming_text.strip():
-                return  # медиа без текста — не отвечаем автоматически
+                incoming_text = msg.text or msg.message or ""
+                if not incoming_text.strip():
+                    return  # медиа без текста — не отвечаем автоматически
 
-            # перечитаем настройки для режима/текста
-            async with get_session() as session:
-                owner = await get_or_create_user(session, owner_telegram_id)
                 mode = owner.settings.auto_reply_mode
                 static_text = owner.settings.auto_reply_text or ""
 
+            # ── Генерация ответа (вне сессии, может быть долгой) ──────────
             if mode == "smart":
                 reply = await _build_reply_text(
-                    owner_telegram_id, sender.id, display, incoming_text
+                    owner_telegram_id,
+                    sender.id,
+                    display,
+                    incoming_text,
+                    style=choice.style,
                 )
                 if not reply:
                     return
@@ -426,6 +424,7 @@ async def generate_smart_reply(
     peer_id: int,
     sender_name: str,
     incoming_text: str,
+    style: str = "default",
 ) -> str | None:
     """Публичная обёртка для генерации умного авто-ответа.
 
@@ -437,6 +436,7 @@ async def generate_smart_reply(
             peer_id=peer_id,
             sender_name=sender_name,
             incoming_text=incoming_text,
+            style=style,
         )
     except Exception:
         logger.exception("generate_smart_reply failed")

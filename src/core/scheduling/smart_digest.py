@@ -2,6 +2,7 @@
 и отправляет единую нотификацию, сгруппированную по срочности."""
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,9 @@ from src.db.session import get_session
 
 
 logger = logging.getLogger(__name__)
+
+# module-level cache: owner_id -> sha256 of last sent digest text
+_last_digest_hash: dict[int, str] = {}
 
 
 async def collect_recent_messages(
@@ -181,12 +185,24 @@ async def smart_digest_loop(owner_telegram_id: int) -> None:
                 )
                 text = build_smart_digest(messages, interval)
 
+                # — duplicate suppression —
+                current_hash = hashlib.sha256(text.encode()).hexdigest()
+                prev_hash = _last_digest_hash.get(owner.id)
+                if prev_hash == current_hash:
+                    logger.info("duplicate digest skipped for owner %s", owner.id)
+                    # still update last_sent so the interval clock resets
+                    settings.smart_digest_last_sent = now
+                    await session.commit()
+                    await asyncio.sleep(60)
+                    continue
+
                 await notification_queue.enqueue(
                     topic="smart_digest",
                     text=text,
                     priority=Notification.PRIORITY_MEDIUM,
                 )
 
+                _last_digest_hash[owner.id] = current_hash
                 settings.smart_digest_last_sent = now
                 await session.commit()
         except Exception:

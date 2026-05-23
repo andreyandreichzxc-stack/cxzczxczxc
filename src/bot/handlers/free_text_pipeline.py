@@ -632,6 +632,7 @@ async def execute_instant(
                     response = f"{response}, {user_name}"
                 break
     await safe_answer(message, sanitize_html(response))
+    ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
     _fire_record_trajectory(
         owner_telegram_id,
         request_text=raw,
@@ -811,6 +812,7 @@ async def execute_maestro(
                 error="; ".join(errors) if errors else None,
                 latency_ms=int((time.monotonic() - turn_started) * 1000),
             )
+            ctx_store.add_turn(message.from_user.id, raw[:200], response_text[:400])
             await _post_turn_optimize(owner_telegram_id, raw, response_text)
             return True
         return False

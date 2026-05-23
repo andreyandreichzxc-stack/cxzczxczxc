@@ -498,7 +498,7 @@ async def exec_add_api_key(intent: dict, message: Message) -> None:
     for i, api_key in enumerate(keys):
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-            slot = await add_key_slot(
+            slot, is_new = await add_key_slot(
                 session,
                 owner,
                 provider,
@@ -508,7 +508,13 @@ async def exec_add_api_key(intent: dict, message: Message) -> None:
                 priority=i,
             )
             last_slot_id = slot.id
-        # Validate key
+            if not is_new:
+                results.append(
+                    f"  #{slot.id} {provider}/{purpose} — Этот ключ уже добавлен (слот #{slot.id})"
+                )
+                success += 1
+                continue
+        # Validate key (только для новых слотов)
         try:
             raw_key = decrypt(slot.key_enc)
             prov_class = _provider_class_for(provider)
@@ -531,9 +537,14 @@ async def exec_add_api_key(intent: dict, message: Message) -> None:
             failed += 1
 
     if len(keys) == 1 and success == 1:
-        await message.answer(
-            f"✅ Ключ {provider}/{purpose} добавлен и проверен! (слот #{last_slot_id})"
-        )
+        if not is_new:
+            await message.answer(
+                f"ℹ️ Ключ {provider}/{purpose} уже был добавлен ранее (слот #{last_slot_id})."
+            )
+        else:
+            await message.answer(
+                f"✅ Ключ {provider}/{purpose} добавлен и проверен! (слот #{last_slot_id})"
+            )
         return
     elif len(keys) == 1 and failed == 1:
         await message.answer(
