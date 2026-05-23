@@ -797,17 +797,104 @@ async def cross_chat_search(
     session: AsyncSession,
     user: User,
     query: str,
-    limit: int = 30,
-) -> dict[int, list[FtsHit]]:
+    limit: int = 5,
+) -> list[dict]:
+    """Cross-chat FTS5 search — searches ALL messages and returns top conversations.
+
+    For each matching conversation returns:
+      - peer_id, display_name (from Contact)
+      - top 2-3 snippets with highlighted matches (via FTS5 snippet())
+      - total matching messages count
+
+    Results are ordered by total matches DESC.
+
+    Args:
+        session: DB session.
+        user: Bot user.
+        query: Free-text search query (each word becomes a prefix OR-match).
+        limit: Max number of conversations to return.
+
+    Returns:
+        List of dicts with keys:
+          peer_id, display_name, total_matches, snippets
+        Each snippet is a dict: {"sender_name": str | None, "text": str}
     """
-    Поиск по всем чатам, группировка по peer_id.
-    Возвращает {peer_id: [FtsHit, ...]}.
+    fts_q = _fts_query_for(query)
+    if not fts_q:
+        return []
+
+    # ── Step 1: find top peer_ids by match count ──────────────────────
+    count_sql = """
+        SELECT m.peer_id, c.display_name, COUNT(*) AS total_matches
+        FROM messages_fts
+        JOIN messages m ON m.id = messages_fts.rowid
+        LEFT JOIN contacts c ON c.user_id = m.user_id AND c.peer_id = m.peer_id
+        WHERE messages_fts MATCH :q AND m.user_id = :uid
+        GROUP BY m.peer_id
+        ORDER BY total_matches DESC
+        LIMIT :lim
     """
-    hits = await fts_search(session, user.id, query, limit=limit)
-    result: dict[int, list[FtsHit]] = {}
-    for hit in hits:
-        result.setdefault(hit.peer_id, []).append(hit)
-    return result
+    result = await session.execute(
+        sql_text(count_sql),
+        {"q": fts_q, "uid": user.id, "lim": limit},
+    )
+    rows = result.mappings().all()
+    if not rows:
+        return []
+
+    peer_ids: list[int] = []
+    peer_info: dict[int, tuple[str | None, int]] = {}
+    for r in rows:
+        pid = int(r["peer_id"])
+        peer_ids.append(pid)
+        peer_info[pid] = (r["display_name"], int(r["total_matches"]))
+
+    # ── Step 2: fetch top-3 snippets per peer_id ────────────────────
+    # Build a dynamic IN clause for the selected peer_ids
+    placeholders = ", ".join(f":pid_{i}" for i in range(len(peer_ids)))
+    params: dict[str, object] = {"q": fts_q, "uid": user.id}
+    for i, pid in enumerate(peer_ids):
+        params[f"pid_{i}"] = pid
+
+    snippet_sql = f"""
+        SELECT m.peer_id, m.sender_name,
+               snippet(messages_fts, -1, '<b>', '</b>', '…', 64) AS snippet
+        FROM messages_fts
+        JOIN messages m ON m.id = messages_fts.rowid
+        WHERE messages_fts MATCH :q AND m.user_id = :uid
+          AND m.peer_id IN ({placeholders})
+        ORDER BY m.peer_id, bm25(messages_fts)
+    """
+    result = await session.execute(sql_text(snippet_sql), params)
+    snippet_rows = result.mappings().all()
+
+    snippets_by_peer: dict[int, list[dict]] = {}
+    for r in snippet_rows:
+        pid = int(r["peer_id"])
+        if pid not in snippets_by_peer:
+            snippets_by_peer[pid] = []
+        if len(snippets_by_peer[pid]) < 3:
+            snippets_by_peer[pid].append(
+                {
+                    "sender_name": r["sender_name"],
+                    "text": r["snippet"] or "",
+                }
+            )
+
+    # ── Step 3: build result preserving peer order ──────────────────
+    output: list[dict] = []
+    for pid in peer_ids:
+        display_name, total = peer_info[pid]
+        output.append(
+            {
+                "peer_id": pid,
+                "display_name": display_name,
+                "total_matches": total,
+                "snippets": snippets_by_peer.get(pid, []),
+            }
+        )
+
+    return output
 
 
 async def fetch_my_messages_in_chat(

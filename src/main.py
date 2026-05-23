@@ -66,6 +66,10 @@ async def main() -> None:
     _register_background_tasks()
     task_manager.start_all()
 
+    # Phase 2: регистрация MCP-инструментов в tool_registry
+    import src.core.actions.mcp_tools  # noqa: F401
+    import src.core.actions.cross_search_tool  # noqa: F401
+
     try:
         await run_bot(userbot_manager)
     finally:
