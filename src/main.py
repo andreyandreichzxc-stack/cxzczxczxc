@@ -37,6 +37,7 @@ def _register_background_tasks() -> None:
     import src.core.scheduling.habit_tracker  # noqa: F401
     import src.core.memory.memory_clusterer  # noqa: F401
     import src.core.intelligence.skills  # noqa: F401
+    import src.core.intelligence.skills_curator  # noqa: F401
 
 
 async def main() -> None:
