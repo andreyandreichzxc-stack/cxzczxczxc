@@ -36,5 +36,9 @@ rapidfuzz==3.12.2
 # YAML frontmatter для метаданных навыков
 PyYAML==6.0.2
 
+# MCP tools
+requests==2.32.5
+beautifulsoup4==4.13.5
+
 # Миграции схемы БД
 alembic>=1.13
