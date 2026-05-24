@@ -23,6 +23,20 @@ logger = logging.getLogger(__name__)
 MAX_PROMPT_CHARS = 32_000
 
 # ---------------------------------------------------------------------------
+# Owner self-reference patterns
+# ---------------------------------------------------------------------------
+
+_OWNER_PATTERNS = re.compile(
+    r"\b(я\b|мой|моя|моё|мои|мне|меня|обо мне|про меня|себя|сам\b)",
+    re.IGNORECASE,
+)
+
+
+def _user_refers_to_self(msg: str) -> bool:
+    return bool(_OWNER_PATTERNS.search(msg or ""))
+
+
+# ---------------------------------------------------------------------------
 # SOUL.md — внешний файл личности бота (заменяет hardcoded soul_blocks)
 # ---------------------------------------------------------------------------
 
@@ -159,6 +173,17 @@ class PromptAssembler:
                     parts.append(f"[Контекст: {cname}]\n{ccontent}")
             except Exception:
                 logger.debug("find_relevant_contexts failed", exc_info=True)
+
+        # Inject owner context on self-reference
+        if ctx.user_message:
+            try:
+                from src.core.memory.context_files import get_context, OWNER_KEY
+
+                owner_context = get_context(OWNER_KEY)
+                if owner_context and _user_refers_to_self(ctx.user_message):
+                    parts.append(f"[Знания о тебе]\n{owner_context[:1500]}")
+            except Exception:
+                logger.debug("owner_context injection failed", exc_info=True)
 
         # Confirmed rules (из adaptive_instructions)
         if ctx.confirmed_rules:

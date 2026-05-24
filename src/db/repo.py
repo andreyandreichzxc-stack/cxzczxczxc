@@ -1322,11 +1322,28 @@ async def add_memory(
     try:
         from src.core.infra.hooks import hooks
 
+        # Look up contact_name for hook callback
+        contact_name: str | None = None
+        if contact_id is not None:
+            try:
+                contact_result = await session.execute(
+                    select(Contact.display_name).where(
+                        Contact.user_id == user.id,
+                        Contact.peer_id == contact_id,
+                    )
+                )
+                contact_name = contact_result.scalar_one_or_none()
+            except Exception:
+                contact_name = None
+
         await hooks.emit(
             "on_memory_saved",
             memory_id=mem.id,
             fact=fact,
             user_id=user.telegram_id,
+            contact_id=contact_id,
+            contact_name=contact_name,
+            confidence=confidence,
         )
     except Exception:
         pass  # hooks are optional, never break core flow
