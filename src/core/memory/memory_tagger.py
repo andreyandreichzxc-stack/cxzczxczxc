@@ -164,7 +164,7 @@ async def tag_all_untagged(owner_id: int) -> int:
         provider = await build_provider(session, owner)
         if not provider:
             return 0
-        memories = await list_memories(session, owner)
+        memories = await list_memories(session, owner, limit=200)
         untagged = [
             m
             for m in memories

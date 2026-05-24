@@ -29,7 +29,11 @@ COPY alembic.ini .
 COPY alembic/ alembic/
 
 # data — монтируется томом снаружи (БД, сессии, qdrant, media, кэш моделей)
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data \
+    && useradd -m appuser \
+    && chown -R appuser:appuser /app
+
+USER appuser
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
   CMD python healthcheck.py || exit 1

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _recall_cache: dict[str, tuple[float, RecallResult]] = {}
 _recall_lock: asyncio.Lock = asyncio.Lock()
+_RECALL_CACHE_MAX = 1000
 
 
 def _utc_now() -> datetime:
@@ -475,9 +476,15 @@ async def recall(
             "reasons_used": list(set(f.reason for f in result.facts)),
         }
 
-        # Cache result BEFORE modifying use_count — so cache never goes stale
-        async with _recall_lock:
-            _recall_cache[_cache_key] = (_cache_now, result)
+        # Cache result ONLY when no facts were returned (read-only query).
+        # If facts were returned, use_count is about to be incremented
+        # and caching would serve stale counts on the next call.
+        if not result.facts:
+            async with _recall_lock:
+                if len(_recall_cache) >= _RECALL_CACHE_MAX:
+                    oldest = min(_recall_cache.items(), key=lambda x: x[1][0])
+                    del _recall_cache[oldest[0]]
+                _recall_cache[_cache_key] = (_cache_now, result)
 
         # Инкрементируем use_count для возвращённых фактов
         for f in result.facts:

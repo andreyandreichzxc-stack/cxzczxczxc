@@ -49,7 +49,35 @@ logger = logging.getLogger(__name__)
 
 # Фоновые таски (digest, news, reminders, auto_sync) одновременно тыкаются в
 # get_or_create_user на пустой БД → UNIQUE race. Сериализуем процесс-локом.
-_user_lock = asyncio.Lock()
+# Используем per-user/per-telegram-id локи вместо глобального, чтобы разные
+# пользователи не блокировали друг друга.
+_user_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_user_lock(user_id: int) -> asyncio.Lock:
+    """Возвращает per-user Lock, создаёт при первом обращении."""
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
+
+
+async def _cleanup_user_locks() -> None:
+    """Периодическая чистка неиспользуемых локов (нет waiters)."""
+    while True:
+        await asyncio.sleep(300)
+        stale = [uid for uid, lock in list(_user_locks.items()) if not lock.locked()]
+        for uid in stale:
+            try:
+                del _user_locks[uid]
+            except KeyError:
+                pass
+
+
+# Пытаемся запустить cleanup; если event loop ещё не запущен — пропускаем.
+try:
+    asyncio.create_task(_cleanup_user_locks())
+except RuntimeError:
+    pass
 
 
 async def get_or_create_user(
@@ -64,7 +92,10 @@ async def get_or_create_user(
             user = await session.get(User, cached)
             if user is not None:
                 return user
-    async with _user_lock:
+    lock = _get_user_lock(
+        -telegram_id
+    )  # отрицательный, чтобы не пересекаться с user.id
+    async with lock:
         result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
@@ -708,7 +739,8 @@ async def is_peer_watched(session: AsyncSession, user: User, peer_id: int) -> bo
 
 async def add_watched_peer(session: AsyncSession, user: User, peer_id: int) -> None:
     """Добавляет peer_id в список отслеживаемых."""
-    async with _user_lock:
+    lock = _get_user_lock(user.id)
+    async with lock:
         watched = await get_watched_peers(session, user)
         watched.add(peer_id)
         user.settings.watched_peers = json.dumps(sorted(watched))
@@ -717,7 +749,8 @@ async def add_watched_peer(session: AsyncSession, user: User, peer_id: int) -> N
 
 async def remove_watched_peer(session: AsyncSession, user: User, peer_id: int) -> None:
     """Удаляет peer_id из списка отслеживаемых."""
-    async with _user_lock:
+    lock = _get_user_lock(user.id)
+    async with lock:
         watched = await get_watched_peers(session, user)
         watched.discard(peer_id)
         user.settings.watched_peers = json.dumps(sorted(watched)) if watched else None
@@ -1320,6 +1353,7 @@ async def list_memories(
     user: User,
     *,
     contact_id: int | None = None,
+    limit: int | None = None,
 ) -> list[Memory]:
     query = (
         select(Memory)
@@ -1328,6 +1362,8 @@ async def list_memories(
     )
     if contact_id is not None:
         query = query.where(Memory.contact_id == contact_id)
+    if limit is not None:
+        query = query.limit(limit)
     result = await session.execute(query)
     return list(result.scalars().all())
 
@@ -1739,7 +1775,8 @@ async def upsert_folders(
     session: AsyncSession, user: User, folders_data: list[dict]
 ) -> int:
     """Сохраняет/обновляет папки. folders_data: [{'telegram_folder_id': int, 'title': str, 'emoji': str|None}]."""
-    async with _user_lock:
+    lock = _get_user_lock(user.id)
+    async with lock:
         # Удалить старые папки этого пользователя
         await session.execute(delete(Folder).where(Folder.user_id == user.id))
         # Вставить новые

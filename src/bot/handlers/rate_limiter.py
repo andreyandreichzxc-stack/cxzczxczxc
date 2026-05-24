@@ -20,6 +20,7 @@ _last_request: dict[int, tuple[float, asyncio.Lock]] = {}
 # Скользящее окно: {telegram_id: [timestamp, ...]}
 _request_history: dict[int, list[float]] = {}
 _locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+_counter_lock: asyncio.Lock = asyncio.Lock()
 _MIN_INTERVAL: float = 3.0  # секунд между запросами одного пользователя
 _CLEANUP_TTL: float = 60.0  # удаляем записи старше 1 минуты
 _HARD_TTL: float = 3600.0  # жёсткий лимит — удаляем записи старше 1 часа
@@ -62,16 +63,17 @@ async def check_rate_limit(
 
         # Sliding-window режим
         if window is not None and max_requests is not None:
-            history = _request_history.get(telegram_id, [])
-            cutoff = now - window
-            # Отсекаем устаревшие
-            history = [t for t in history if t > cutoff]
-            if len(history) >= max_requests:
+            async with _counter_lock:
+                history = _request_history.get(telegram_id, [])
+                cutoff = now - window
+                # Отсекаем устаревшие
+                history = [t for t in history if t > cutoff]
+                if len(history) >= max_requests:
+                    _request_history[telegram_id] = history
+                    return False
+                history.append(now)
                 _request_history[telegram_id] = history
-                return False
-            history.append(now)
-            _request_history[telegram_id] = history
-            return True
+                return True
 
         # Классический режим (1 запрос в 3 секунды)
         if telegram_id in _last_request:
