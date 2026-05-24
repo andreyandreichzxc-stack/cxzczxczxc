@@ -33,3 +33,11 @@ class NewsTopicStates(StatesGroup):
 
 class DraftStates(StatesGroup):
     waiting_edit = State()
+
+
+class OnboardingStates(StatesGroup):
+    waiting_start = State()
+    waiting_login = State()
+    waiting_llm_key = State()
+    waiting_timezone = State()
+    waiting_sync_choice = State()

@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from time import time
 
 
-MAX_TURNS = 8
+MAX_TURNS = 50  # порог сжатия: при превышении старые ходы сворачиваются в summary
+_DEQUE_SAFETY_CAP = MAX_TURNS * 2  # запас для deque, чтобы не терять ходы до сжатия
 LAST_PEER_TTL_SECONDS = 30 * 60  # 30 минут
 
 _STALE_CTX_TTL = 3600  # 1 час — контексты с last_peer_at == 0 или старше удаляются
@@ -18,7 +19,8 @@ _STALE_CTX_TTL = 3600  # 1 час — контексты с last_peer_at == 0 и
 
 @dataclass
 class _Ctx:
-    turns: deque = field(default_factory=lambda: deque(maxlen=MAX_TURNS))
+    turns: deque = field(default_factory=lambda: deque(maxlen=_DEQUE_SAFETY_CAP))
+    compressed: str | None = None  # сжатая сводка старых ходов
     last_peer_id: int | None = None
     last_peer_name: str | None = None
     last_peer_at: float = 0.0
@@ -51,6 +53,21 @@ async def _get(user_id: int) -> _Ctx:
         return ctx
 
 
+def _quick_summarize(
+    turns: list[tuple[float, str, str]],
+) -> str:
+    """Свернуть старые ходы в компактную текстовую сводку."""
+    lines: list[str] = []
+    for _ts, user_text, assistant_summary in turns:
+        if user_text:
+            lines.append(f"Владелец: {user_text[:200]}")
+        if assistant_summary:
+            lines.append(f"Я ответил: {assistant_summary[:200]}")
+    if len(lines) > 30:
+        lines = lines[:30] + ["…[и ещё]"]
+    return "\n".join(lines)
+
+
 async def add_turn(user_id: int, user_text: str, assistant_summary: str) -> None:
     ctx = await _get(user_id)
     user_text = (user_text or "").strip()
@@ -59,6 +76,13 @@ async def add_turn(user_id: int, user_text: str, assistant_summary: str) -> None
         return
     async with _ctx_lock:
         ctx.turns.append((time(), user_text[:400], assistant_summary[:400]))
+
+        # Авто-сжатие: если ходов стало больше порога — сворачиваем старые
+        if len(ctx.turns) > MAX_TURNS:
+            turns_list = list(ctx.turns)
+            old_turns = turns_list[:-10]  # все, кроме последних 10
+            ctx.turns = deque(turns_list[-10:], maxlen=_DEQUE_SAFETY_CAP)
+            ctx.compressed = f"[Предыдущий диалог]: {_quick_summarize(old_turns)}"
 
 
 async def set_last_peer(user_id: int, peer_id: int, peer_name: str | None) -> None:
@@ -78,9 +102,17 @@ async def get_last_peer(user_id: int) -> tuple[int, str | None] | None:
     return ctx.last_peer_id, ctx.last_peer_name
 
 
-async def get_recent_turns(user_id: int) -> list[tuple[str, str]]:
+async def get_recent_turns(
+    user_id: int,
+) -> list[tuple[str, str]]:
+    """Returns recent turns (user_text, assistant_summary).
+
+    Does **not** include the ``compressed`` summary — callers that need it
+    should read ``ctx.compressed`` separately via ``_get()`` or use
+    ``render_history_block()``.
+    """
     ctx = await _get(user_id)
-    rows = []
+    rows: list[tuple[str, str]] = []
     for item in ctx.turns:
         if len(item) == 3:
             _, user_text, assistant_summary = item
@@ -128,13 +160,30 @@ async def render_history_block(user_id: int) -> str:
             f"подставляй именно его."
         )
 
-    turns = await get_recent_turns(user_id)
-    if turns:
-        lines = ["Недавний диалог с владельцем (для понимания «то/там/ему»):"]
-        for u, a in turns[-MAX_TURNS:]:
+    ctx = await _get(user_id)
+
+    # Сжатая сводка старых ходов
+    history_lines: list[str] = []
+    if ctx.compressed:
+        history_lines.append(ctx.compressed)
+
+    # Последние 10 ходов (детально)
+    recent = list(ctx.turns)[-10:]
+    if recent:
+        history_lines.append(
+            "Недавний диалог с владельцем (для понимания «то/там/ему»):"
+        )
+        for item in recent:
+            if len(item) == 3:
+                _, u, a = item
+            else:
+                u, a = item
             if u:
-                lines.append(f"  Владелец: {u}")
+                history_lines.append(f"  Владелец: {u}")
             if a:
-                lines.append(f"  Я ответил: {a}")
-        parts.append("\n".join(lines))
+                history_lines.append(f"  Я ответил: {a}")
+
+    if history_lines:
+        parts.append("\n".join(history_lines))
+
     return "\n\n".join(parts)

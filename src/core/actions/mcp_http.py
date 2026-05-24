@@ -174,7 +174,7 @@ async def _do_request(
                 headers=request_headers,
                 data=body,
                 timeout=_HTTP_TIMEOUT,
-                allow_redirects=True,
+                allow_redirects=False,
             )
         except requests.ConnectionError as exc:
             logger.warning("Connection error for %s %s: %s", method, url, exc)

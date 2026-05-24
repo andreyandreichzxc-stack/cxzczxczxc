@@ -196,6 +196,7 @@ async def habit_tracker_loop(owner_id: int) -> None:
             now = now_in_tz(tz_name)
             # Воскресенье 18:00, не чаще раза в день
             if now.weekday() == 6 and now.hour == 18:
+                habits = None
                 async with get_session() as session:
                     owner = await get_or_create_user(session, owner_id)
                     if (

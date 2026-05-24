@@ -51,6 +51,7 @@ async def run_full_analysis(
     folder_names: list[str] | None = None,
     contact_ids: list[int] | None = None,
     progress_callback=None,
+    progress_message=None,
 ) -> AnalysisResult:
     """
     Полный анализ всех контактов из выбранных папок.
@@ -62,6 +63,7 @@ async def run_full_analysis(
         folder_names: список папок для анализа (None = все)
         contact_ids: список peer_id для анализа (если задан, folder_names игнорируется)
         progress_callback: async callable(AnalysisProgress) для UI-обновлений
+        progress_message: aiogram Message для progress_tracker (per‑contact)
     """
     result = AnalysisResult()
 
@@ -124,15 +126,38 @@ async def run_full_analysis(
             ),
         )
 
+    # Вспомогательный async‑генератор для единообразного async‑for
+    async def _contact_iter():
+        for c in contacts:
+            yield c
+
+    # Выбираем источник контактов: с прогрессом или без
+    if progress_message and total > 0:
+        from src.core.infra.progress import progress_tracker
+
+        contact_iter = progress_tracker(
+            progress_message,
+            total,
+            contacts,
+            item_name_fn=lambda c: c.display_name or str(c.peer_id),
+            prefix="🧠 Анализ контактов",
+        )
+    else:
+        contact_iter = _contact_iter()
+
     # Обработка каждого контакта
-    for idx, contact in enumerate(contacts):
+    _contact_idx = 0
+    async for contact in contact_iter:
+        _contact_idx += 1
         contact_name = contact.display_name or str(contact.peer_id)
 
-        if progress_callback:
+        if progress_callback and not progress_message:
+            # Если нет progress_message — всё ещё используем callback
+            # для per‑contact обновлений
             await progress_callback(
                 AnalysisProgress(
                     phase="processing",
-                    current=idx + 1,
+                    current=_contact_idx,
                     total=total,
                     contact_name=contact_name,
                     message=f"Анализ {contact_name}...",

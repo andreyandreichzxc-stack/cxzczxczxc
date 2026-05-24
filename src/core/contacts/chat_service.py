@@ -180,6 +180,7 @@ async def load_chat(
     transcribe: bool = True,
     parse_docs: bool = False,
     incremental: bool = True,
+    progress_message=None,
 ) -> list[Message]:
     # incremental: если в БД достаточно сообщений, тянем только новее последнего
     async with get_session() as session:
@@ -194,6 +195,7 @@ async def load_chat(
     media_root = _media_dir(owner_telegram_id)
     entity = await client.get_entity(peer_id)
 
+    cached_total = 0
     iter_kwargs = {"limit": limit}
     if incremental:
         cached_total = await _cached_count(owner.id, peer_id)
@@ -202,7 +204,25 @@ async def load_chat(
             if last_id:
                 iter_kwargs = {"min_id": last_id, "limit": None}
 
-    async for msg in client.iter_messages(entity, **iter_kwargs):
+    # Wrap message iteration with progress_tracker when requested
+    msg_iter = client.iter_messages(entity, **iter_kwargs)
+    if progress_message:
+        from src.core.infra.progress import progress_tracker
+
+        # Use the limit param as the upper bound for progress display
+        total_bound = limit
+        if iter_kwargs.get("limit") is None:
+            total_bound = max(limit, cached_total or 0)
+
+        msg_iter = progress_tracker(
+            progress_message,
+            total_bound,
+            msg_iter,
+            item_name_fn=lambda m: f"#{m.id}",
+            prefix="💬 Загрузка сообщений",
+        )
+
+    async for msg in msg_iter:
         await _process_one(
             client,
             owner,

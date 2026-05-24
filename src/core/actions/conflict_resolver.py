@@ -231,6 +231,9 @@ async def conflict_check_loop(owner_id: int):
 from functools import partial
 from src.core.infra.task_manager import task_manager
 
-task_manager.register(
-    "conflict-check", partial(conflict_check_loop, settings.owner_telegram_id)
-)
+try:
+    task_manager.register(
+        "conflict-check", partial(conflict_check_loop, settings.owner_telegram_id)
+    )
+except Exception:
+    logger.warning("Failed to register conflict-check task (import ok)", exc_info=True)

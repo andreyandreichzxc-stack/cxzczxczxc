@@ -150,7 +150,6 @@ async def recall(
     """
     _cache_key = f"{telegram_id}:{query}:{contact_id}:{mode}"
     _cache_now = time.monotonic()
-    _state_modified = False
     async with _recall_lock:
         if _cache_key in _recall_cache:
             _ts, _cached = _recall_cache[_cache_key]
@@ -476,6 +475,10 @@ async def recall(
             "reasons_used": list(set(f.reason for f in result.facts)),
         }
 
+        # Cache result BEFORE modifying use_count — so cache never goes stale
+        async with _recall_lock:
+            _recall_cache[_cache_key] = (_cache_now, result)
+
         # Инкрементируем use_count для возвращённых фактов
         for f in result.facts:
             if f.memory_id:
@@ -483,17 +486,11 @@ async def recall(
                 if m:
                     m.use_count = (m.use_count or 0) + 1
                     m.last_used_at = now
-                    _state_modified = True
         await session.flush()
     finally:
         if _close_session and _session_cm is not None:
             await _session_cm.__aexit__(*sys.exc_info())
 
-    # Only cache if no state was modified (use_count incrementation).
-    # If use_count was updated, caching would serve stale counts on next call.
-    if not _state_modified:
-        async with _recall_lock:
-            _recall_cache[_cache_key] = (_cache_now, result)
     return result
 
 

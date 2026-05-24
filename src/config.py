@@ -211,6 +211,15 @@ class Settings(BaseSettings):
         description="Trigger persona rebuild every N new personal facts",
     )
 
+    # --- Telegram API credentials (дефолт — официальные TelegramHelper) ---
+    api_id: int = Field(
+        2040, description="Telegram API ID (default: 2040 — TelegramHelper official)"
+    )
+    api_hash: str = Field(
+        "b18441a1ff607e10a989891a5462e627",
+        description="Telegram API hash (default — TelegramHelper official)",
+    )
+
     disk_critical_mb: int = Field(
         100, description="Критический порог свободного места (MB)"
     )

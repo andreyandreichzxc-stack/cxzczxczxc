@@ -46,8 +46,7 @@ def reciprocal_rank_fusion(
         if not ranking:
             continue
         for rank_i, (mem_id, score) in enumerate(ranking, start=1):
-            weight = score if score else 1.0
-            rrf_contrib = weight / (k + rank_i)
+            rrf_contrib = 1.0 / (k + rank_i)
             scores[mem_id] = scores.get(mem_id, 0.0) + rrf_contrib
 
     # Sort by fused score descending

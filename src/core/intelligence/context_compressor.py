@@ -76,3 +76,27 @@ async def compress_maestro_context(
             for m in history[-20:]  # safety: at most 20 messages in fallback
         )
         return raw, None
+
+
+async def compress_context(history: list[dict], max_tokens: int = 4000) -> str:
+    """Compress conversation turns into a single summary string.
+
+    A lightweight compressor for conversation_context turns (list of
+    ``{"role": …, "content": …}`` dicts).  Truncates to *max_tokens*
+    approximate tokens (4 chars ≈ 1 token).
+    """
+    if not history:
+        return ""
+    # Simple approach: concatenate with labels, truncate to max_tokens
+    lines: list[str] = []
+    for turn in history[-20:]:  # last 20 turns
+        role = turn.get("role", "?")
+        content = turn.get("content", "")
+        if content:
+            lines.append(f"[{role}]: {content[:200]}")
+    summary = "\n".join(lines)
+    # Truncate to approximate token count (4 chars ≈ 1 token)
+    max_chars = max_tokens * 4
+    if len(summary) > max_chars:
+        summary = summary[:max_chars] + "\n...[сжато]"
+    return summary

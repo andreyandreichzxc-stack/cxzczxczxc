@@ -23,6 +23,7 @@ from src.core.services.chat_actions import (
 )
 from src.core.contacts.chat_service import load_chat
 from src.core.memory.memory_extractor import extract_and_save_memories
+from src.core.memory.smart_memory import smart_extract_after_sync
 from src.core.contacts.contact_resolver import ContactCandidate, resolve
 from src.db.repo import (
     add_watched_peer,
@@ -393,55 +394,249 @@ async def cb_limit(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+# ──────────────────────────────────────────────
+# /sync — умные настройки синхронизации
+# ──────────────────────────────────────────────
+
+
+async def _fetch_folder_titles(client) -> list[str]:
+    """Получить названия папок пользователя Telegram."""
+    try:
+        from telethon.tl.functions.messages import GetDialogFiltersRequest
+
+        filters_result = await client(GetDialogFiltersRequest())
+        titles: list[str] = []
+        for f in filters_result.filters:
+            if hasattr(f, "title") and f.title and f.title not in ("All", "Archive"):
+                titles.append(f.title)
+        return titles
+    except Exception:
+        logger.debug("sync: failed to fetch folder titles", exc_info=True)
+        return []
+
+
+def _build_sync_keyboard(
+    state_str: str, folder_titles: list[str]
+) -> InlineKeyboardMarkup:
+    """Построить клавиатуру выбора опций синхронизации.
+
+    state_str — строка вида "1,0,0,1,0", где первая цифра — include_private,
+    вторая — include_groups, третья — include_archived, остальные — папки.
+    """
+    parts = state_str.split(",")
+    private = parts[0] == "1"
+    groups = parts[1] == "1"
+    archived = parts[2] == "1"
+    folder_states = [p == "1" for p in parts[3:]]
+
+    kb = InlineKeyboardBuilder()
+
+    kb.row(
+        InlineKeyboardButton(
+            text=f"{'✅' if private else '▫️'} Личные чаты",
+            callback_data=f"sync:opt:0:{state_str}",
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text=f"{'✅' if groups else '▫️'} Группы и каналы",
+            callback_data=f"sync:opt:1:{state_str}",
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text=f"{'✅' if archived else '▫️'} Архивные чаты",
+            callback_data=f"sync:opt:2:{state_str}",
+        )
+    )
+
+    for i, title in enumerate(folder_titles):
+        sel = folder_states[i] if i < len(folder_states) else False
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{'✅' if sel else '▫️'} 📁 {title}",
+                callback_data=f"sync:opt:{3 + i}:{state_str}",
+            )
+        )
+
+    kb.row(
+        InlineKeyboardButton(
+            text="🚀 Начать синхронизацию",
+            callback_data=f"sync:start:{state_str}",
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="sync:cancel"),
+    )
+    return kb.as_markup()
+
+
 @router.message(Command("sync"))
 async def cmd_sync(message: Message, userbot_manager: UserbotManager) -> None:
-    """Sync метаданные диалогов + фоновый prefetch последних сообщений."""
+    """Sync с умными настройками: выбор личных/групп/архива/папок."""
     client = await _ensure_client(message, userbot_manager)
     if client is None:
         return
-    from src.userbot.dialogs import prefetch_recent_messages, sync_dialogs
 
-    async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-    stats = await sync_dialogs(client, owner, limit=500)
-    total = sum(stats.values())
+    folder_titles = await _fetch_folder_titles(client)
+
+    # Начальное состояние: личные = да, группы = нет, архив = нет, папки = нет
+    state_parts = ["1", "0", "0"] + ["0"] * len(folder_titles)
+    state_str = ",".join(state_parts)
+
     await message.answer(
-        f"✅ Синхронизировано {total} диалогов:\n"
-        f"  👤 Люди: {stats['users']}\n"
-        f"  🤖 Боты: {stats['bots']}\n"
-        f"  👥 Группы: {stats['chats']}\n"
-        f"  📰 Каналы: {stats['channels']}\n"
-        f"  🗂 Архивных: {stats['archived']}"
-        f"{' (удалено ' + str(stats.get('removed', 0)) + ' неактуальных) ' if stats.get('removed') else ''}\n\n"
-        f"⏳ Фоном: подгружаю последние сообщения из топ-30 активных чатов "
-        f"для мгновенного локального поиска. Это разово, дальше всё пишется в реальном времени."
+        "⚙️ <b>Настройки синхронизации</b>\n\nВыбери, что синхронизировать:",
+        reply_markup=_build_sync_keyboard(state_str, folder_titles),
     )
 
-    async def _bg_prefetch() -> None:
+
+@router.callback_query(F.data.startswith("sync:opt:"))
+async def cb_sync_opt(callback: CallbackQuery, userbot_manager: UserbotManager) -> None:
+    """Переключить опцию синхронизации."""
+    parts = callback.data.split(":", 3)
+    if len(parts) < 4:
+        await callback.answer("Ошибка данных", show_alert=True)
+        return
+
+    index = int(parts[2])
+    state_str = parts[3]
+    state_parts = state_str.split(",")
+
+    # Переключить бит
+    if index < len(state_parts):
+        state_parts[index] = "1" if state_parts[index] == "0" else "0"
+    new_state = ",".join(state_parts)
+
+    # Получить список папок для перестроения клавиатуры
+    client = userbot_manager.get_client(callback.from_user.id)
+    folder_titles = await _fetch_folder_titles(client) if client else []
+
+    if callback.message:
+        await callback.message.edit_text(
+            "⚙️ <b>Настройки синхронизации</b>\n\nВыбери, что синхронизировать:",
+            reply_markup=_build_sync_keyboard(new_state, folder_titles),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("sync:start:"))
+async def cb_sync_start(
+    callback: CallbackQuery, userbot_manager: UserbotManager
+) -> None:
+    """Запустить синхронизацию с выбранными опциями."""
+    parts = callback.data.split(":", 2)
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных", show_alert=True)
+        return
+
+    state_str = parts[2]
+    state_parts = state_str.split(",")
+    private = state_parts[0] == "1" if len(state_parts) > 0 else True
+    groups = state_parts[1] == "1" if len(state_parts) > 1 else False
+    archived = state_parts[2] == "1" if len(state_parts) > 2 else False
+
+    # Собрать выбранные папки
+    client = userbot_manager.get_client(callback.from_user.id)
+    if client is None:
+        await callback.answer("Сначала /login", show_alert=True)
+        return
+
+    folder_titles = await _fetch_folder_titles(client)
+    selected_folders: list[str] = []
+    for i, title in enumerate(folder_titles):
+        idx = 3 + i
+        if idx < len(state_parts) and state_parts[idx] == "1":
+            selected_folders.append(title)
+
+    # Немедленно ответить на callback (снять загрузку)
+    await callback.answer()
+
+    progress_msg = callback.message
+    if not progress_msg:
+        return
+
+    await progress_msg.edit_text("🔄 Синхронизация запущена...")
+
+    from src.userbot.dialogs import prefetch_recent_messages, sync_dialogs_with_options
+    from src.db.repo import get_or_create_user
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+
+    # Прогресс (каждый 5-й контакт + последний)
+    last_pct = [0]
+
+    async def _progress(current: int, total: int, peer_name: str) -> None:
+        pct = (current * 100) // total if total else 100
+        if pct - last_pct[0] >= 5 or current == total:
+            last_pct[0] = pct
+            try:
+                await progress_msg.edit_text(
+                    f"🔄 Синхронизация: {current}/{total} … {peer_name}"
+                )
+            except Exception:
+                pass
+
+    try:
+        stats = await sync_dialogs_with_options(
+            client,
+            owner,
+            include_private=private,
+            include_groups=groups,
+            include_archived=archived,
+            folder_names=selected_folders if selected_folders else None,
+            limit=500,
+            progress_callback=_progress,
+        )
+
+        await progress_msg.edit_text(
+            f"✅ Синхронизация завершена!\n"
+            f"  👤 Контактов: {stats['contacts']}\n"
+            f"  ✅ Синхронизировано: {stats['synced']}\n"
+            f"  ⏭ Пропущено: {stats['skipped']}"
+            f"{'  🗑 Удалено устаревших' if stats.get('removed') else ''}\n\n"
+            f"⏳ Фоном: подгружаю последние сообщения из топ-30 "
+            f"для мгновенного локального поиска…"
+        )
+
+        # Prefetch
+        ps = await prefetch_recent_messages(
+            client,
+            callback.from_user.id,
+            top_n=30,
+            per_chat=50,
+            skip_channels=False,
+        )
+        stats["messages"] = ps["messages"]
+
+        await progress_msg.edit_text(
+            f"✅ Синхронизация завершена!\n"
+            f"  👤 Контактов: {stats['contacts']}\n"
+            f"  ✅ Синхронизировано: {stats['synced']}\n"
+            f"  ⏭ Пропущено: {stats['skipped']}\n"
+            f"  📥 Загружено сообщений: {stats['messages']}"
+            f"{'  🗑 Удалено устаревших' if stats.get('removed') else ''}"
+        )
+
+        # Предложение извлечь память (smart memory)
+        await _offer_smart_memory_extraction(progress_msg, owner, private)
+
+    except Exception:
+        logger.exception("sync failed")
         try:
-            ps = await prefetch_recent_messages(
-                client,
-                message.from_user.id,
-                top_n=30,
-                per_chat=50,
-                skip_channels=False,
+            await progress_msg.edit_text(
+                "⚠ Синхронизация завершилась с ошибкой — см. логи."
             )
-            await message.answer(
-                f"📥 Prefetch готов: {ps['chats']} чатов, {ps['messages']} сообщений в БД."
-            )
-            # после prefetch — предложить извлечь память из топ-чатов
-            auto_mem = getattr(owner.settings, "auto_extract_memories", False)
-            if auto_mem:
-                # авто-режим: дёргаем без вопроса
-                await _auto_extract_memories(message, client, owner)
-            else:
-                await _offer_memory_extraction(message)
-
         except Exception:
-            logger.exception("prefetch failed")
-            await message.answer("⚠ Prefetch завершился с ошибкой — см. логи.")
+            pass
 
-    asyncio.create_task(_bg_prefetch())
+
+@router.callback_query(F.data == "sync:cancel")
+async def cb_sync_cancel(callback: CallbackQuery) -> None:
+    """Отменить синхронизацию."""
+    if callback.message:
+        await callback.message.edit_text("❌ Отменено.")
+    await callback.answer()
 
 
 async def _offer_memory_extraction(message: Message) -> None:
@@ -608,6 +803,197 @@ async def _auto_extract_memories(message: Message, client, owner) -> None:
         await message.answer(
             f"{mode_label} Авто-память: +{total} фактов из {len(targets)} контактов."
         )
+
+
+# ──────────────────────────────────────────────
+# Smart memory после синхронизации
+# ──────────────────────────────────────────────
+
+
+async def _offer_smart_memory_extraction(
+    message: Message, owner, has_private: bool
+) -> None:
+    """Предлагает запустить smart-анализ диалогов после синхронизации."""
+    if not has_private:
+        # Если нет личных чатов — смысла в анализе нет
+        return
+
+    from src.db.repo import list_contacts
+
+    async with get_session() as session:
+        contacts = await list_contacts(
+            session, owner, kinds=("user",), include_archived=False
+        )
+
+    people = [c for c in contacts if not c.is_bot]
+    if not people:
+        await message.answer(
+            "Нет контактов для анализа.\n\n"
+            "Но если хочешь — я готов к диалогу. Просто напиши мне."
+        )
+        return
+
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(
+            text="🧠 Анализировать",
+            callback_data=f"sync:smartmem:{message.from_user.id}",
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="❌ Пропустить",
+            callback_data=f"sync:smartmem:skip:{message.from_user.id}",
+        )
+    )
+
+    await message.answer(
+        "🧠 <b>Хочешь чтобы я проанализировал диалоги и запомнил важное?</b>\n\n"
+        "Я извлеку факты о тебе и твоих собеседниках из последних сообщений:\n"
+        "• что ты рассказывал о себе\n"
+        "• предпочтения и договорённости\n"
+        "• важные детали о каждом контакте\n\n"
+        f"Будут проанализированы диалоги с <b>{len(people)} контактами</b>.",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("sync:smartmem:"))
+async def cb_smart_memories(
+    callback: CallbackQuery, userbot_manager: UserbotManager
+) -> None:
+    """Запускает smart-извлечение памяти после синхронизации с прогрессом."""
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("Ошибка данных.", show_alert=True)
+        return
+
+    _, _, caller_id = parts[:3]
+    if caller_id == "skip":
+        if callback.message:
+            await callback.message.edit_text("Ок, пропустил.")
+        await callback.answer()
+        return
+
+    if int(caller_id) != callback.from_user.id:
+        await callback.answer("Не твоя кнопка", show_alert=True)
+        return
+
+    if callback.message:
+        await callback.message.edit_text("🧠 Анализирую диалоги...")
+
+    client = userbot_manager.get_client(callback.from_user.id)
+    if client is None:
+        await callback.answer("Сначала /login", show_alert=True)
+        return
+
+    # Получаем контакты и провайдер
+    from src.db.repo import list_contacts, get_or_create_user as _gcu
+
+    async with get_session() as session:
+        owner = await _gcu(session, callback.from_user.id)
+        provider = await build_provider(session, owner)
+        if provider is None:
+            if callback.message:
+                await callback.message.edit_text("Не задан LLM-ключ.")
+            return
+
+        contacts = await list_contacts(
+            session, owner, kinds=("user",), include_archived=False
+        )
+        targets = [c for c in contacts if not c.is_bot]
+
+    if not targets:
+        if callback.message:
+            await callback.message.edit_text("Нет подходящих контактов для анализа.")
+        await callback.answer()
+        return
+
+    contact_ids = [c.peer_id for c in targets]
+    contact_names = {c.peer_id: c.display_name for c in targets}
+
+    # --- Прогресс: поддерживаем массив статусов ---
+    statuses: list[dict] = [
+        {"name": c.display_name, "status": "pending", "extra": ""} for c in targets
+    ]
+
+    progress_msg = callback.message
+    if not progress_msg:
+        await callback.answer()
+        return
+
+    async def _build_progress_text() -> str:
+        """Собирает текст прогресса из статусов."""
+        lines = ["🧠 <b>Анализ диалогов:</b>", ""]
+        icons = {
+            "done": "✅",
+            "processing": "🔄",
+            "pending": "⏳",
+            "skip": "⏭️",
+        }
+        for s in statuses:
+            icon = icons.get(s["status"], "⏳")
+            pct = (
+                "100%"
+                if s["status"] == "done"
+                else "60%"
+                if s["status"] == "processing"
+                else "0%"
+            )
+            extra = f" — {s['extra']}" if s["extra"] else ""
+            lines.append(f"{icon} {s['name']} ({pct}){extra}")
+        return "\n".join(lines)
+
+    async def _progress_callback(
+        idx: int, total: int, name: str, status: str, extra: str
+    ) -> None:
+        if idx < len(statuses):
+            statuses[idx]["status"] = status
+            statuses[idx]["extra"] = extra
+        try:
+            text = await _build_progress_text()
+            await progress_msg.edit_text(text)
+        except Exception:
+            pass  # игнорируем ошибки редактирования
+
+    # Запускаем smart extraction
+    try:
+        result = await smart_extract_after_sync(
+            owner_id=callback.from_user.id,
+            provider=provider,
+            contact_ids=contact_ids,
+            progress_callback=_progress_callback,
+        )
+    except Exception:
+        logger.exception("Smart memory extraction failed")
+        try:
+            await progress_msg.edit_text("⚠️ Ошибка при анализе диалогов. Смотри логи.")
+        except Exception:
+            pass
+        await callback.answer()
+        return
+
+    # Финальный результат
+    total_facts = result["owner_facts"] + result["contact_facts"]
+    skipped = result["skipped_stale"]
+
+    summary_parts = []
+    if result["owner_facts"]:
+        summary_parts.append(f"{result['owner_facts']} о себе")
+    if result["contact_facts"]:
+        summary_parts.append(f"{result['contact_facts']} о контактах")
+    summary = ", ".join(summary_parts) if summary_parts else "0"
+
+    await progress_msg.edit_text(
+        f"✅ <b>Анализ завершён!</b>\n\n"
+        f"🧩 Всего фактов: <b>{total_facts}</b>\n"
+        f"  {summary}\n"
+        f"⏭ Пропущено (даты/дубли): <b>{skipped}</b>\n"
+        f"👥 Проанализировано: <b>{len(targets)}</b> контактов\n\n"
+        f"Теперь я лучше понимаю тебя и твои отношения с людьми 🤝"
+    )
+
+    await callback.answer()
 
 
 @router.message(Command("recent"))

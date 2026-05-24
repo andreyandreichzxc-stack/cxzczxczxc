@@ -5,8 +5,10 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter
+from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.types import Message
 
 from src.bot.handlers import (
     analyze_cmd,
@@ -107,6 +109,48 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp = Dispatcher(storage=MemoryStorage())
 
     dp["userbot_manager"] = userbot_manager
+
+    # ─── Онбординг-гард: блокирует другие команды, пока юзер не прошёл /start ───
+    @dp.message.outer_middleware()
+    async def onboarding_guard_middleware(
+        handler, message: Message, data: dict
+    ) -> None:
+        """Перенаправляет не-онбордингнутых пользователей на /start.
+
+        Пропускает:
+          - /start, /login, /cancel — всегда
+          - активные FSM-состояния (LoginStates, SettingsStates, OnboardingStates)
+          - пользователей, прошедших полный онбординг
+        """
+        tg_id = message.from_user.id
+        if tg_id != settings.owner_telegram_id:
+            return await handler(message, data)
+
+        # Всегда пропускаем команды онбординга
+        text = message.text or ""
+        if text.startswith(("/start", "/login", "/cancel")):
+            return await handler(message, data)
+
+        # Если пользователь в любом FSM — не вмешиваемся
+        state: FSMContext | None = data.get("state")
+        if state is not None:
+            current = await state.get_state()
+            if current is not None:
+                return await handler(message, data)
+
+        # Проверяем онбординг (с кэшированием на 30 сек через FSM data)
+        from src.bot.filters import is_onboarded
+
+        if await is_onboarded(tg_id):
+            return await handler(message, data)
+
+        # Не прошёл онбординг — перенаправляем
+        logger.info("onboarding_guard: redirecting user %d to /start", tg_id)
+        await message.answer(
+            "👋 <b>Сначала заверши настройку!</b>\n\n"
+            "Напиши /start чтобы пройти быстрый онбординг (5 шагов) "
+            "и я смогу полноценно работать 🤖"
+        )
 
     dp.include_router(help_cmd.router)
     dp.include_router(inbox_cmd.router)

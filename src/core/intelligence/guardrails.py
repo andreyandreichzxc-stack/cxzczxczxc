@@ -159,9 +159,7 @@ def needs_approval(intent: str, context: dict[str, Any] | None = None) -> bool:
     if risk == ActionRisk.HIGH:
         return True
 
-    # CRITICAL
-    if ctx.get("bypass_reason") == "explicit_intent":
-        return False
+    # CRITICAL — never bypass, always require approval
     return True
 
 
@@ -449,12 +447,6 @@ def evaluate(
     else:
         confirm_msg = ""
         reason_parts.append("needs_approval=False")
-
-    # Safety net: CRITICAL actions without explicit intent bypass
-    if risk == ActionRisk.CRITICAL and not need_confirm:
-        bypass = (context or {}).get("bypass_reason")
-        if bypass == "explicit_intent":
-            reason_parts.append("bypassed_by_explicit_intent")
 
     return GuardrailResult(
         allowed=True,

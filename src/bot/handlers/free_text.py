@@ -322,6 +322,23 @@ async def _process_text(
     now_local_str = now_in_tz(tz_name).strftime("%Y-%m-%d %H:%M")
     history_block = await ctx_store.render_history_block(message.from_user.id)
 
+    # ── Stage 0: Smart emoji/sticker replies ─────────────────────────
+    from src.core.contacts.smart_reply import get_simple_reply
+
+    emoji_reply = get_simple_reply(raw)
+    if emoji_reply:
+        await message.answer(emoji_reply)
+        _fire_record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="smart_reply",
+            intent_json={"intent": "smart_reply"},
+            response_text=emoji_reply,
+            success=True,
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
+        return
+
     # Stage 1: Adaptive instructions
     if await check_instructions(raw, owner_telegram_id, message):
         return

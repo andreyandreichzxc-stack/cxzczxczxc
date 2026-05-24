@@ -1,7 +1,7 @@
 """Humanizer — anti-AI детекция и очеловечивание текста."""
 
 from .scorer import analyze_ai_score
-from .humanizer import humanize_text
+from .humanizer import humanize_text, humanize_response
 from .vocabulary import (
     AI_MARKERS,
     REPEAT_PENALTY,
@@ -14,6 +14,7 @@ from .stats import record_check, get_stats
 __all__ = [
     "analyze_ai_score",
     "humanize_text",
+    "humanize_response",
     "AI_MARKERS",
     "REPEAT_PENALTY",
     "REPEAT_THRESHOLD",

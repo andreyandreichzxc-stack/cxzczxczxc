@@ -133,6 +133,14 @@ async def _web_search(query: str, max_results: int = 5) -> dict[str, Any]:
                 timeout=_FETCH_TIMEOUT,
             )
             resp.raise_for_status()
+            # Validate final URL after redirects — must stay on DuckDuckGo
+            if not resp.url.startswith("https://html.duckduckgo.com/"):
+                logger.warning(
+                    "DDG search redirected to unexpected domain: %s", resp.url
+                )
+                raise requests.RequestException(
+                    f"Redirected to untrusted domain: {resp.url}"
+                )
         except requests.RequestException as exc:
             logger.warning("DuckDuckGo search request failed: %s", exc)
             raise  # re-raised in the async wrapper below
@@ -211,6 +219,7 @@ async def _web_fetch(url: str) -> dict[str, Any]:
                 url,
                 headers=_REQUEST_HEADERS,
                 timeout=_FETCH_TIMEOUT,
+                allow_redirects=False,
             )
             resp.raise_for_status()
         except requests.RequestException as exc:

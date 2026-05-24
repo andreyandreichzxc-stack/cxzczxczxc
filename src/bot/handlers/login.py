@@ -14,6 +14,7 @@ from telethon.errors import (
     SessionPasswordNeededError,
 )
 
+from src.config import settings
 from src.bot.filters import OwnerOnly
 from src.bot.states import LoginStates
 from src.db.repo import (
@@ -74,12 +75,17 @@ async def cmd_login(
         )
         return
 
+    # Предзаполняем дефолтные значения из конфига
+    await state.update_data(api_id=settings.api_id, api_hash=settings.api_hash)
+
     await state.set_state(LoginStates.api_id)
     await message.answer(
         "🔐 <b>Подключение Telegram-аккаунта</b>\n\n"
         "Получи <code>api_id</code> и <code>api_hash</code> на https://my.telegram.org → API development tools.\n"
         "Никому их не отправляй, кроме этого бота. Я храню их в зашифрованном виде.\n\n"
-        f"Введи <b>api_id</b> (число).\n{CANCEL_HINT}"
+        f"Введи <b>api_id</b> (по умолчанию <code>{settings.api_id}</code>).\n"
+        f"Если подходит — просто отправь его или введи свой.\n"
+        f"{CANCEL_HINT}"
     )
 
 
@@ -91,7 +97,11 @@ async def step_api_id(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(api_id=int(text))
     await state.set_state(LoginStates.api_hash)
-    await message.answer("Отлично. Теперь введи <b>api_hash</b> (32 hex-символа).")
+    await message.answer(
+        f"Отлично. Теперь введи <b>api_hash</b> "
+        f"(по умолчанию <code>{settings.api_hash}</code>).\n"
+        f"Если подходит — просто отправь его или введи свой."
+    )
 
 
 @router.message(LoginStates.api_hash)
@@ -285,6 +295,13 @@ async def _finalize_login(
 
     userbot_manager.register_client(tg_id, pending.client)
     await state.clear()
+
+    # Если пользователь в процессе онбординга — переводим на следующий шаг
+    from src.bot.handlers.start import advance_onboarding_after_login
+
+    if await advance_onboarding_after_login(message, state):
+        return  # онбординг продолжится сам
+
     await message.answer(
         f"✅ Аккаунт <b>{label}</b> подключён. Сессия сохранена в зашифрованном виде.\n\n"
         "Дальше — /settings, чтобы выбрать LLM и настроить авто-ответ."

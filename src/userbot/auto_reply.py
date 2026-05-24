@@ -291,6 +291,8 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
             msg: TgMessage = event.message
             if msg.out:
                 return
+            if not event.is_private:
+                return  # только ЛС, не группы/каналы
             sender = await event.get_sender()
             if not isinstance(sender, TgUser):
                 return  # только от User-объектов
