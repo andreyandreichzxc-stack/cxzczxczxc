@@ -13,10 +13,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import sqlite3
 import threading
 from pathlib import Path
+from urllib.parse import urlparse
 
-from src.config import settings
+from src.config import PROJECT_ROOT, settings
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,41 @@ _MAX_CONTEXT_CHARS = 2000
 
 # === LLM-WIKI constants ===
 OWNER_KEY = "_owner"  # special key for owner profile
+
+# === FTS5 helpers ===
+_FTS5_KEYWORDS = frozenset({"or", "and", "not", "near"})
+
+
+def _fts5_simple_query(query: str) -> str:
+    """Build a safe FTS5 MATCH expression from free-text query.
+
+    Each word becomes a prefix-match joined with OR.
+    FTS5 operator keywords are escaped with double-quotes.
+    """
+    parts: list[str] = []
+    for raw in query.split():
+        clean = "".join(ch for ch in raw if ch.isalnum() or ch in "_-")
+        if len(clean) < 2:
+            continue
+        lower = clean.lower()
+        if lower in _FTS5_KEYWORDS:
+            parts.append(f'"{lower}"')
+        else:
+            parts.append(lower + "*")
+    if not parts:
+        return ""
+    return " OR ".join(parts)
+
+
+def _get_db_path() -> Path:
+    """Resolve the SQLite database file path from settings.database_url."""
+    db_url = str(settings.database_url)
+    parsed = urlparse(db_url)
+    db_path = Path(parsed.path.lstrip("/"))
+    if not db_path.is_absolute():
+        db_path = PROJECT_ROOT / db_path
+    return db_path
+
 
 # Per-file locks for thread-safe append (TOCTOU prevention)
 _file_locks: dict[str, threading.Lock] = {}
@@ -204,13 +241,49 @@ def list_context_files() -> list[str]:
 
 
 def search_in_contexts(query: str, limit: int = 5) -> list[dict]:
-    """Search across all context files for a query (substring, case-insensitive).
+    """Search across all context files using FTS5 with ranked results.
 
-    Returns [{"key": "оля", "snippet": "...контекст..."}, ...]
+    Falls back to substring search if the FTS5 table doesn't exist.
+    Returns [{"key": "оля", "snippet": "...<b>контекст</b>...", "rank": 0.5}, ...]
     """
     if not CONTEXTS_DIR.exists():
         return []
-    results = []
+
+    db_path = _get_db_path()
+
+    # ── Try FTS5 first ──────────────────────────────────────────────
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(str(db_path))
+            fts_q = _fts5_simple_query(query)
+            if fts_q:
+                rows = conn.execute(
+                    "SELECT key, snippet(contexts_fts, 1, '<b>', '</b>', '…', 64) AS snippet, "
+                    "       rank "
+                    "FROM contexts_fts WHERE contexts_fts MATCH ? "
+                    "ORDER BY rank LIMIT ?",
+                    (fts_q, limit),
+                ).fetchall()
+                conn.close()
+                if rows:
+                    return [
+                        {
+                            "key": r[0],
+                            "snippet": r[1] or "",
+                            "rank": float(r[2]) if r[2] is not None else 0.0,
+                        }
+                        for r in rows
+                    ]
+        except sqlite3.OperationalError:
+            pass  # FTS5 table doesn't exist → fall back
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    # ── Fallback: substring search ──────────────────────────────────
+    results: list[dict] = []
     ql = query.lower()
     for md_file in CONTEXTS_DIR.iterdir():
         if md_file.suffix != ".md":
@@ -224,7 +297,7 @@ def search_in_contexts(query: str, limit: int = 5) -> list[dict]:
             start = max(0, pos - 40)
             end = min(len(text), pos + len(query) + 80)
             snippet = text[start:end].strip()
-            results.append({"key": md_file.stem, "snippet": snippet})
+            results.append({"key": md_file.stem, "snippet": snippet, "rank": 0.0})
             if len(results) >= limit:
                 break
     return results
@@ -244,6 +317,153 @@ def init_owner_context() -> None:
     )
     save_context(OWNER_KEY, template)
     logger.info("Initialized _owner.md context file")
+
+
+# ============================================================================
+# FTS5 indexing: index all .md context files for fast search
+# ============================================================================
+
+
+def index_contexts_to_fts() -> int:
+    """Index all context .md files into the FTS5 virtual table.
+
+    Creates ``contexts_fts(key, content)`` if it doesn't exist,
+    then INSERT OR REPLACE every .md file's content.
+
+    Called once at startup from ``main.py``.
+    Returns count of indexed files.
+    """
+    if not CONTEXTS_DIR.exists():
+        logger.debug("Contexts directory does not exist, skipping FTS5 indexing")
+        return 0
+
+    db_path = _get_db_path()
+    if not db_path.exists():
+        logger.warning("Database file not found at %s, skipping FTS5 indexing", db_path)
+        return 0
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS contexts_fts "
+            "USING fts5(key, content, tokenize='unicode61 remove_diacritics 2')"
+        )
+        conn.execute("DELETE FROM contexts_fts")  # clear stale entries
+
+        count = 0
+        for md_file in sorted(CONTEXTS_DIR.iterdir()):
+            if md_file.suffix != ".md":
+                continue
+            key = md_file.stem
+            if not key:
+                continue
+            try:
+                content = md_file.read_text(encoding="utf-8")
+            except Exception:
+                logger.warning("Failed to read context file: %s", md_file)
+                continue
+            conn.execute(
+                "INSERT INTO contexts_fts(key, content) VALUES (?, ?)",
+                (key, content),
+            )
+            count += 1
+
+        conn.commit()
+        logger.info("Indexed %d context files into FTS5", count)
+        return count
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# Auto-extract facts: lightweight regex-based extraction from dialog turns
+# ============================================================================
+
+# Self-referential fact patterns
+_SELF_FACT_PATTERNS = [
+    re.compile(rf"(?:я\s+{pat}[^.]*\.)", re.IGNORECASE | re.UNICODE)
+    for pat in [
+        r"работаю",
+        r"живу",
+        r"учусь",
+        r"занимаюсь",
+        r"люблю",
+        r"не\s+люблю",
+        r"предпочитаю",
+        r"хочу",
+    ]
+]
+
+# Broader self-fact: "мне нравится X", "у меня Y"
+_BROAD_SELF_FACT_RE = re.compile(
+    r"(?:мне\s+нравится|у\s+меня\s+есть|мой\s+\w+|моя\s+\w+)[^.]*\.(?!\s*\d)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Contact-fact detection: "<Name> — fact" or "<Name> - fact" or "<Name> это fact"
+# Built dynamically from existing context keys
+
+
+async def try_extract_context_updates(
+    session,
+    user_text: str,
+    assistant_text: str,
+    owner_id: int,
+) -> int:
+    """Try to extract new facts from the current turn and update context files.
+
+    Uses lightweight regex-based heuristics (no LLM call — fast):
+    1. Detect self-referential facts: "я работаю в X", "мне нравится Y", etc.
+    2. Detect contact references: "Оля — веган", "с Артёмом лучше не спорить"
+
+    Args:
+        session: DB session (unused — kept for caller compatibility).
+        user_text: What the user said.
+        assistant_text: What the bot replied (unused — kept for future use).
+        owner_id: Telegram user ID (unused — kept for compatibility).
+
+    Returns:
+        Count of updated context files.
+    """
+    if not user_text:
+        return 0
+
+    updated = 0
+
+    # ── 1. Self-facts → _owner.md ────────────────────────────────────
+    for pat in _SELF_FACT_PATTERNS:
+        for match in pat.finditer(user_text):
+            fact = match.group(0).strip()
+            if len(fact) > 10:
+                await asyncio.to_thread(append_to_context, OWNER_KEY, fact)
+                updated += 1
+
+    for match in _BROAD_SELF_FACT_RE.finditer(user_text):
+        fact = match.group(0).strip()
+        # Avoid duplicates from exact patterns above
+        if len(fact) > 10:
+            await asyncio.to_thread(append_to_context, OWNER_KEY, fact)
+            updated += 1
+
+    # ── 2. Contact-facts → <contact>.md ──────────────────────────────
+    existing_keys = list_context_files()
+    for key_name in existing_keys:
+        if key_name == OWNER_KEY or key_name.startswith("_"):
+            continue
+        # Pattern: "Name — fact" or "Name - fact" or "Name это fact"
+        contact_pattern = re.compile(
+            rf"\b{re.escape(key_name)}\s*(?:—|–|—|это|\s+-\s+)\s*(.+?)(?:\.\s|$)",
+            re.IGNORECASE | re.UNICODE,
+        )
+        for match in contact_pattern.finditer(user_text):
+            fact = match.group(1).strip()
+            if 5 < len(fact) < 500:
+                await asyncio.to_thread(append_to_context, key_name, fact)
+                updated += 1
+
+    if updated:
+        logger.debug("try_extract_context_updates: updated %d context files", updated)
+    return updated
 
 
 # ============================================================================

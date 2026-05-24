@@ -489,6 +489,21 @@ async def maybe_evolve_after_turn(
     if not provider:
         return False
 
+    # Phase: update context files from dialog (lightweight, no LLM)
+    try:
+        from src.core.memory.context_files import try_extract_context_updates
+
+        updated = await try_extract_context_updates(
+            session=None,
+            user_text=user_text,
+            assistant_text=bot_response or "",
+            owner_id=telegram_id,
+        )
+        if updated:
+            logger.debug("Updated %d context files from dialog", updated)
+    except Exception:
+        pass  # non-critical
+
     # 1. Быстрый фидбек: пользователь сказал что-то про характер?
     if _detect_feedback_in_text(user_text):
         evolved = await evolve_from_feedback(telegram_id, user_text, provider)

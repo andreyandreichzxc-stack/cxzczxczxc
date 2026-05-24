@@ -49,9 +49,10 @@ async def main() -> None:
 
     await init_db()
 
-    from src.core.memory.context_files import init_owner_context
+    from src.core.memory.context_files import index_contexts_to_fts, init_owner_context
 
     init_owner_context()
+    index_contexts_to_fts()
 
     try:
         from src.core.infra.hooks import hooks
