@@ -107,8 +107,16 @@ async def step_api_id(message: Message, state: FSMContext) -> None:
 @router.message(LoginStates.api_hash)
 async def step_api_hash(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
-    # Auto-accept default api_hash if user just presses Enter
-    if not text:
+    # Auto-accept default api_hash if user presses Enter OR types keyword
+    if not text or text.lower() in (
+        "дефолтный",
+        "default",
+        "стандартный",
+        "да",
+        "ок",
+        "yes",
+        "ok",
+    ):
         text = settings.api_hash
     if len(text) != 32 or not all(c in "0123456789abcdefABCDEF" for c in text):
         await message.answer(
