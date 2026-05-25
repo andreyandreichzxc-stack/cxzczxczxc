@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -54,6 +55,8 @@ async def process_incoming(
     owner: User,
     contact: Contact | None,
     provider: LLMProvider | None = None,
+    *,
+    is_private: bool = True,
 ) -> InboxDecision:
     """Принимает решение по входящему сообщению.
 
@@ -64,6 +67,11 @@ async def process_incoming(
     4. Smart digest → QUEUE_FOR_DIGEST
     5. По умолчанию → SILENT_LOG
     """
+    # 0. Group/channel messages are never urgent
+    urgency_limit: str = "urgent"
+    if not is_private:
+        urgency_limit = "normal"
+
     # 1. Folder filter: если контакт не в отслеживаемых папках — игнорируем
     if _is_filtered_by_folder(owner, contact):
         return InboxDecision(
@@ -78,6 +86,22 @@ async def process_incoming(
             reason="Сообщение без текста",
             confidence=1.0,
         )
+
+    # 1.5 Reputation gate — unknown/new contacts can't be URGENT
+    reputation = _check_reputation(contact, sender_name, message_text)
+    if reputation == "spam":
+        return InboxDecision(
+            action=InboxAction.IGNORE,
+            reason="Spam detected — message patterns match spam",
+            confidence=0.95,
+        )
+    elif reputation == "unknown":
+        if _URGENCY_RANK[urgency_limit] > _URGENCY_RANK["normal"]:
+            urgency_limit = "normal"
+    elif reputation == "low":
+        if _URGENCY_RANK[urgency_limit] > _URGENCY_RANK["important"]:
+            urgency_limit = "important"
+    # trusted — keep current urgency_limit
 
     # Построить провайдера, если не передан
     if provider is None and owner.settings.llm_provider:
@@ -94,6 +118,12 @@ async def process_incoming(
         provider=provider,
         sender_name=sender_name,
     )
+
+    # Apply reputation/group cap on urgency
+    if urgency == "urgent" and _URGENCY_RANK[urgency_limit] < _URGENCY_RANK["urgent"]:
+        urgency = urgency_limit
+    elif urgency == "important" and urgency_limit == "normal":
+        urgency = "normal"
 
     # 3. Срочное уведомление
     if urgency == "urgent" and owner.settings.urgent_notify_enabled:
@@ -161,3 +191,69 @@ def _should_check_draft(
     if settings.draft_only_important and urgency == "normal":
         return False
     return True
+
+
+_URGENCY_RANK = {
+    "normal": 1,
+    "important": 2,
+    "urgent": 3,
+}
+
+
+def _check_reputation(contact, sender_name: str, message_text: str) -> str:
+    """Check sender reputation. Returns: 'trusted', 'low', 'unknown', 'spam'."""
+    if not contact:
+        # Unknown contact — check if message looks like spam
+        if _looks_like_spam(message_text):
+            return "spam"
+        return "unknown"
+
+    # Known contact — check signals
+    spam = _looks_like_spam(message_text)
+    if spam:
+        # Even known contacts can send spam (compromised accounts)
+        return "low"
+
+    # Has conversation history?
+    # (contact in DB means they've been synced — trusted)
+    return "trusted"
+
+
+_SPAM_PATTERNS = [
+    # Price/spam patterns
+    r"\$\d+\.?\d*",  # "$1.95"
+    r"\d+\s*(?:доллар|dollar|usd|eur|₽|руб)",  # "100 рублей"
+    # Admin/manager spam
+    r"admin\s+deal",  # "Admin Deal"
+    r"top\s+\w+\s+provider",  # "Top GPT Provider"
+    # Emoji overload (>3 unique emoji in message)
+    r"(?:[\U0001F300-\U0001F9FF]){4,}",
+    # Suspension/banned words
+    r"suspension\s+issue",
+    r"warranty|warranty",
+    r"restock(?:ed)?",
+]
+
+
+def _looks_like_spam(text: str) -> bool:
+    """Heuristic spam detection — no LLM needed."""
+    if not text:
+        return False
+    t = text.lower()
+    # Check spam patterns
+    for pattern in _SPAM_PATTERNS:
+        if re.search(pattern, t, re.IGNORECASE):
+            return True
+    # Emoji density: >20% emoji in short messages
+    if len(text) < 100:
+        emoji_count = sum(1 for c in text if ord(c) > 0x1F000)
+        if emoji_count > 0 and emoji_count / len(text) > 0.2:
+            return True
+    # ALL_CAPS + short message (<30 chars) = likely spam
+    if len(text) < 30 and text == text.upper() and text.isalpha():
+        return True
+    # URL + short message + no personal context
+    if ("http" in t or "www." in t) and len(text) < 200:
+        if not any(w in t for w in ("привет", "здравствуй", "как дела", "слушай")):
+            return True
+    return False

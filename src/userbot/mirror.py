@@ -94,6 +94,8 @@ async def _process_incoming_bg(
     peer_id: int,
     sender_name: str,
     text: str,
+    *,
+    is_private: bool = True,
 ) -> None:
     """Фоновая обработка входящего сообщения: InboxManager + notifier.
 
@@ -114,6 +116,7 @@ async def _process_incoming_bg(
                     owner=_im_owner,
                     contact=_im_contact,
                     provider=_im_provider,
+                    is_private=is_private,
                 )
 
                 # Обновить ConversationState
@@ -272,6 +275,9 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                             peer_id=peer_id,
                             sender_name=sender_name or str(peer_id),
                             text=msg.text,
+                            is_private=event.is_private
+                            if event.is_private is not None
+                            else True,
                         )
                     )
                 )
