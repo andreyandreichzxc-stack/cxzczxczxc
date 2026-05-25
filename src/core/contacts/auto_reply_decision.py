@@ -18,6 +18,7 @@ from enum import Enum
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config import settings
 from src.db.models import AutoReplyLog, Contact, Message, User
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Prevents runaway LLM costs when many peers trigger auto-reply at once.
 # Key: "YYYY-MM-DD-HH" hour bucket, value: count of replies sent.
 _global_reply_count: dict[str, int] = {}
-_GLOBAL_REPLY_MAX_PER_HOUR = 100
+_GLOBAL_REPLY_MAX_PER_HOUR = settings.auto_reply_global_limit_per_hour
 
 
 def _global_reply_hour_key() -> str:
@@ -186,7 +187,7 @@ async def decide(
         select(func.count(Message.id)).where(
             Message.user_id == owner.id,
             Message.peer_id == peer_id,
-            Message.is_outgoing == False,
+            Message.is_outgoing.is_(False),
             Message.date >= spam_threshold,
         )
     )
@@ -204,7 +205,7 @@ async def decide(
         .where(
             Message.user_id == owner.id,
             Message.peer_id == peer_id,
-            Message.is_outgoing == True,
+            Message.is_outgoing.is_(True),
             Message.date >= recent_self_threshold,
         )
         .order_by(Message.date.desc())

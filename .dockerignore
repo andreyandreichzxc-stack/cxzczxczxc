@@ -20,3 +20,7 @@ Dockerfile
 docker-compose.yml
 .dockerignore
 README.md
+tests/
+skills/
+AGENTS.md
+.codegraph/

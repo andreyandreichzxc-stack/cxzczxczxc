@@ -166,7 +166,7 @@ async def test_provider_fallback_exhausted_error():
 async def test_cooldown_until_handles_naive_datetime():
     """_ensure_utc нормализует naive datetime как UTC-aware — без TypeError."""
     from src.llm.router import _ensure_utc
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timezone
 
     # naive datetime (как из старых записей SQLite)
     naive = datetime(2025, 1, 15, 12, 0, 0)

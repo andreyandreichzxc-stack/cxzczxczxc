@@ -6,6 +6,9 @@ is injected into the system prompt so the LLM "knows" about that person.
 
 LLM-WIKI: Generic key-based API for arbitrary knowledge files.
 See: save_context / get_context / append_to_context / search_in_contexts.
+
+Semantic search: embeds context files into Qdrant "contexts" collection.
+Hybrid search combines FTS5 (keywords) + Qdrant (semantic) via RRF.
 """
 
 from __future__ import annotations
@@ -16,9 +19,13 @@ import re
 import sqlite3
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from src.config import PROJECT_ROOT, settings
+
+if TYPE_CHECKING:
+    from qdrant_client import QdrantClient
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +38,11 @@ OWNER_KEY = "_owner"  # special key for owner profile
 
 # === FTS5 helpers ===
 _FTS5_KEYWORDS = frozenset({"or", "and", "not", "near"})
+
+# === Qdrant semantic search ===
+_QDRANT_COLLECTION = "contexts"
+_qdrant_client: QdrantClient | None = None
+_qdrant_dim: int | None = None
 
 
 def _fts5_simple_query(query: str) -> str:
@@ -155,6 +167,7 @@ def save_context(key: str, content: str) -> None:
     CONTEXTS_DIR.mkdir(parents=True, exist_ok=True)
     path = CONTEXTS_DIR / f"{safe_k}.md"
     path.write_text(content, encoding="utf-8")
+    _schedule_semantic_index(safe_k, content)
     logger.info("Saved context '%s' (%d chars)", key, len(content))
 
 
@@ -214,20 +227,21 @@ def append_to_context(key: str, text: str, max_lines: int = 500) -> None:
         if len(current_lines) >= max_lines:
             # Remove oldest fact line (keep header)
             header_end = 0
-            for i, l in enumerate(current_lines):
-                if l.startswith("- ["):
+            for i, line_text in enumerate(current_lines):
+                if line_text.startswith("- ["):
                     header_end = i
                     break
             if header_end > 0:
                 current_lines.pop(header_end)
             # Remove first fact line after header
-            for i, l in enumerate(current_lines):
-                if l.startswith("- ["):
+            for i, line_text in enumerate(current_lines):
+                if line_text.startswith("- ["):
                     current_lines.pop(i)
                     break
 
         current_lines.append(new_line.rstrip("\n"))
         path.write_text("\n".join(current_lines) + "\n", encoding="utf-8")
+        _schedule_semantic_index(safe_k, "\n".join(current_lines))
         logger.debug("Appended to '%s': %s", key, line[:80])
 
 
@@ -275,7 +289,7 @@ def search_in_contexts(query: str, limit: int = 5) -> list[dict]:
                         for r in rows
                     ]
         except sqlite3.OperationalError:
-            pass  # FTS5 table doesn't exist → fall back
+            pass  # FTS5 table doesn't exist → fall back to substring
         finally:
             try:
                 conn.close()
@@ -496,6 +510,184 @@ def _setup_auto_save_hook() -> None:
         logger.info("Auto-save hook registered for context files")
     except Exception:
         logger.debug("Failed to register auto-save hook (hooks not ready yet)")
+
+
+# ============================================================================
+# Semantic search: Qdrant-based vector search for context files
+# ============================================================================
+
+
+def _get_qdrant() -> "QdrantClient":
+    """Lazy-init Qdrant client for context vector search."""
+    global _qdrant_client
+    if _qdrant_client is None:
+        from qdrant_client import QdrantClient
+
+        path = settings.data_dir / "qdrant"
+        path.mkdir(parents=True, exist_ok=True)
+        _qdrant_client = QdrantClient(path=str(path))
+    return _qdrant_client
+
+
+async def index_context_for_semantic(key: str, content: str, provider=None) -> bool:
+    """Embed context file content and store in Qdrant 'contexts' collection."""
+    if provider is None:
+        return False
+    try:
+        embedding = await provider.embed(content[:2000])
+        if not embedding:
+            return False
+        client = await asyncio.to_thread(_get_qdrant)
+        dim = len(embedding)
+        global _qdrant_dim
+        if _qdrant_dim != dim:
+            try:
+                from qdrant_client.http import models as qmodels
+
+                await asyncio.to_thread(
+                    client.create_collection,
+                    collection_name=_QDRANT_COLLECTION,
+                    vectors_config=qmodels.VectorParams(
+                        size=dim, distance=qmodels.Distance.COSINE
+                    ),
+                )
+            except Exception:
+                pass
+            _qdrant_dim = dim
+        from qdrant_client.http import models as qmodels
+
+        point_id = abs(hash(key)) % (10**9)
+        await asyncio.to_thread(
+            client.upsert,
+            collection_name=_QDRANT_COLLECTION,
+            points=[
+                qmodels.PointStruct(
+                    id=point_id,
+                    vector=embedding,
+                    payload={"key": key, "preview": content[:300]},
+                )
+            ],
+        )
+        logger.debug("Semantic index: '%s' (%d chars, dim=%d)", key, len(content), dim)
+        return True
+    except Exception:
+        logger.debug("Semantic index failed for '%s'", key, exc_info=True)
+        return False
+
+
+async def search_contexts_semantic(query: str, provider, limit: int = 5) -> list[dict]:
+    """Search context files semantically via Qdrant embeddings."""
+    try:
+        embedding = await provider.embed(query)
+        if not embedding:
+            return []
+    except Exception:
+        logger.debug("Failed to embed query for semantic search", exc_info=True)
+        return []
+    try:
+        client = await asyncio.to_thread(_get_qdrant)
+        try:
+            await asyncio.to_thread(
+                client.get_collection, collection_name=_QDRANT_COLLECTION
+            )
+        except Exception:
+            return []
+
+        results = await asyncio.to_thread(
+            client.search,  # type: ignore[attr-defined]
+            collection_name=_QDRANT_COLLECTION,
+            query_vector=embedding,
+            limit=limit,
+        )
+        return [
+            {
+                "key": r.payload.get("key", "?"),
+                "snippet": r.payload.get("preview", "")[:200],
+                "score": float(r.score),
+            }
+            for r in results
+        ]
+    except Exception:
+        logger.debug("Semantic search failed", exc_info=True)
+        return []
+
+
+async def search_contexts_hybrid(
+    query: str, provider=None, limit: int = 5
+) -> list[dict]:
+    """Hybrid search: FTS5 + semantic via RRF. Falls back to FTS5-only if no provider."""
+    fts_results = search_in_contexts(query, limit=limit * 2)
+    sem_results: list[dict] = []
+    if provider:
+        sem_results = await search_contexts_semantic(query, provider, limit=limit * 2)
+    if not sem_results:
+        return fts_results[:limit]
+    # RRF merge
+    K = 60
+    scores: dict[str, float] = {}
+    for i, r in enumerate(fts_results):
+        scores[r["key"]] = scores.get(r["key"], 0) + 1.0 / (K + i + 1)
+    for i, r in enumerate(sem_results):
+        scores[r["key"]] = scores.get(r["key"], 0) + 1.0 / (K + i + 1)
+    merged: dict[str, dict] = {}
+    for r in fts_results + sem_results:
+        k = r["key"]
+        if k not in merged:
+            merged[k] = {
+                "key": k,
+                "snippet": r.get("snippet", ""),
+                "score": scores.get(k, 0),
+            }
+        else:
+            merged[k]["score"] = scores.get(k, merged[k]["score"])
+    return sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:limit]
+
+
+async def rebuild_semantic_index(provider) -> int:
+    """Re-index ALL context files into Qdrant. Returns count of indexed files."""
+    if not CONTEXTS_DIR.exists():
+        return 0
+    count = 0
+    for md_file in sorted(CONTEXTS_DIR.iterdir()):
+        if md_file.suffix != ".md" or not md_file.stem:
+            continue
+        try:
+            content = md_file.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if await index_context_for_semantic(md_file.stem, content, provider):
+            count += 1
+    logger.info("Rebuilt semantic index: %d context files", count)
+    return count
+
+
+def _schedule_semantic_index(key: str, content: str) -> None:
+    """Fire-and-forget: schedule semantic indexing for a context file.
+
+    Tries to get a running event loop and create a task.
+    Gracefully skips if no event loop is running.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_index_with_provider(key, content))
+    except RuntimeError:
+        pass  # no running event loop — skip
+
+
+async def _index_with_provider(key: str, content: str) -> None:
+    """Lazy-load a provider and index the context file."""
+    try:
+        from src.llm.router import build_provider
+        from src.db.repo import get_or_create_user
+        from src.db.session import get_session
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, settings.owner_telegram_id)
+            provider = await build_provider(session, owner)
+            if provider:
+                await index_context_for_semantic(key, content, provider)
+    except Exception:
+        logger.debug("Semantic index schedule failed for '%s'", key, exc_info=True)
 
 
 _setup_auto_save_hook()

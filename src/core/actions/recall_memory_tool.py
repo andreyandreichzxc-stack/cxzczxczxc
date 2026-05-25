@@ -41,16 +41,22 @@ async def recall_memory(
         A dict with ``"facts": [...]`` and ``"found": N``, or
         ``{"error": "..."}`` on failure.
     """
-    user = kwargs.get("user")
+    _user_val = kwargs.get("user")
 
-    if user is None:
+    if _user_val is None:
         return {"error": "user not provided"}
+
+    # user may be an int (telegram_id) or a User ORM object — normalise
+    if hasattr(_user_val, "telegram_id"):
+        telegram_id: int = _user_val.telegram_id
+    else:
+        telegram_id = int(_user_val)
 
     try:
         from src.core.memory.memory_recall import recall
 
         result = await recall(
-            telegram_id=user,
+            telegram_id=telegram_id,
             query=query,
             limit=limit,
             include_deep=False,

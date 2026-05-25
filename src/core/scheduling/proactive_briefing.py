@@ -2,7 +2,11 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import partial
 
+from sqlalchemy import case, select, func, and_, or_, desc
+
+from src.config import settings
 from src.core.memory.memory_fuel import get_fuel_stats
 from src.core.memory.memory_health import (
     calculate_health_score,
@@ -11,9 +15,16 @@ from src.core.memory.memory_health import (
     format_health_compact,
 )
 from src.core.scheduling.notification_queue import notification_queue
-from src.db.models import Notification
 from src.core.contacts.reply_radar import collect_reply_radar
 from src.core.memory.temporal_layers import format_layer_stats, get_layer_stats
+from src.db.models import (
+    Commitment,
+    Contact,
+    ConversationState,
+    Memory,
+    Message,
+    Notification,
+)
 from src.db.repo import (
     get_memory_stats,
     get_or_create_user,
@@ -21,10 +32,16 @@ from src.db.repo import (
     list_memories,
     list_open_commitments,
 )
-from src.config import settings
 from src.db.session import get_session
+from src.core.infra.task_manager import task_manager
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Backward compat: старые структуры для ручной команды /briefing
+# (используется в digest_cmd.py)
+# ═══════════════════════════════════════════════════════════════════
 
 
 @dataclass
@@ -60,7 +77,7 @@ class BriefingData:
 
 
 async def collect_briefing_data(owner_id: int) -> BriefingData:
-    """Собирает данные для брифинга: срочные сообщения, ожидающие ответа, обязательства."""
+    """Собирает полные данные для ручного брифинга (/briefing)."""
     result = BriefingData()
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
@@ -134,7 +151,7 @@ async def collect_briefing_data(owner_id: int) -> BriefingData:
 
 
 def format_briefing(data: BriefingData, title: str) -> str:
-    """Форматирует брифинг в HTML."""
+    """Форматирует полный брифинг в HTML (для /briefing)."""
     lines = [f"<b>📋 {title}</b>", ""]
 
     if data.health:
@@ -244,8 +261,269 @@ def format_briefing(data: BriefingData, title: str) -> str:
     return "\n".join(lines)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Утренний дайджест — новый компактный формат для 9:00
+# ═══════════════════════════════════════════════════════════════════
+
+
+async def _collect_morning_digest(owner_id: int) -> str:
+    """Собирает утренний дайджест: вчера, неотвеченные, дедлайны, здоровье, план."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, owner_id)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday_start = today_start - timedelta(days=1)
+        seven_days_ago = now - timedelta(days=7)
+        two_days_ahead = now + timedelta(hours=48)
+
+        lines = ["☀️ Доброе утро!"]
+
+        # ── 1. Вчерашняя статистика ────────────────────────────────
+        dialogs_r = await session.execute(
+            select(func.count(func.distinct(Message.peer_id))).where(
+                Message.user_id == owner.id,
+                Message.date >= yesterday_start,
+                Message.date < today_start,
+            )
+        )
+        yday_dialogs = dialogs_r.scalar_one() or 0
+
+        conflicts_r = await session.execute(
+            select(func.count())
+            .select_from(Memory)
+            .where(
+                Memory.user_id == owner.id,
+                Memory.sentiment == "negative",
+                Memory.created_at >= yesterday_start,
+                Memory.created_at < today_start,
+            )
+        )
+        yday_conflicts = conflicts_r.scalar_one() or 0
+
+        commits_r = await session.execute(
+            select(func.count())
+            .select_from(Commitment)
+            .where(
+                Commitment.user_id == owner.id,
+                Commitment.created_at >= yesterday_start,
+                Commitment.created_at < today_start,
+            )
+        )
+        yday_commits = commits_r.scalar_one() or 0
+
+        lines.append(
+            f"📊 Вчера: {yday_dialogs} диалогов, "
+            f"{yday_conflicts} конфликт, "
+            f"{yday_commits} обещания."
+        )
+        lines.append("")
+
+        # ── 2. Неотвеченные сообщения ──────────────────────────────
+        unanswered_r = await session.execute(
+            select(ConversationState)
+            .where(
+                ConversationState.user_id == owner.id,
+                ConversationState.last_incoming_at >= seven_days_ago,
+                or_(
+                    ConversationState.last_outgoing_at.is_(None),
+                    ConversationState.last_incoming_at
+                    > ConversationState.last_outgoing_at,
+                ),
+                ConversationState.status != "archived",
+            )
+            .order_by(desc(ConversationState.last_incoming_at))
+            .limit(10)
+        )
+        unanswered = list(unanswered_r.scalars().all())
+
+        needs_reply_names: list[str] = []
+        for conv in unanswered:
+            hours = (now - conv.last_incoming_at).total_seconds() / 3600
+            urgency = "🔴" if hours > 48 else "🟡"
+
+            cr = await session.execute(
+                select(Contact.display_name).where(
+                    Contact.user_id == owner.id,
+                    Contact.peer_id == conv.peer_id,
+                )
+            )
+            name = cr.scalar_one_or_none() or str(conv.peer_id)
+
+            # Последний входящий текст
+            mr = await session.execute(
+                select(Message.text)
+                .where(
+                    Message.user_id == owner.id,
+                    Message.peer_id == conv.peer_id,
+                    Message.is_outgoing.is_(False),
+                )
+                .order_by(desc(Message.date))
+                .limit(1)
+            )
+            last_text = mr.scalar_one_or_none() or ""
+            snippet = last_text[:50].replace("\n", " ") if last_text else ""
+
+            days = int(hours / 24)
+            if days >= 1:
+                time_str = f"ждёт ответ {days} дн."
+            else:
+                time_str = f"ждёт ответ {int(hours)} ч."
+
+            line = f"{urgency} {name}: {time_str}"
+            if snippet:
+                line += f" Последнее: «{snippet}»"
+            lines.append(line)
+            needs_reply_names.append(name)
+
+        if unanswered:
+            lines.append("")
+
+        # ── 3. Дедлайны в ближайшие 48ч ────────────────────────────
+        dl_r = await session.execute(
+            select(Commitment)
+            .where(
+                Commitment.user_id == owner.id,
+                Commitment.status == "open",
+                Commitment.deadline_at.is_not(None),
+                Commitment.deadline_at >= now,
+                Commitment.deadline_at <= two_days_ahead,
+            )
+            .order_by(Commitment.deadline_at.asc())
+            .limit(10)
+        )
+        upcoming = list(dl_r.scalars().all())
+
+        deadline_names: list[str] = []
+        for c in upcoming:
+            cr = await session.execute(
+                select(Contact.display_name).where(
+                    Contact.user_id == owner.id,
+                    Contact.peer_id == c.peer_id,
+                )
+            )
+            name = cr.scalar_one_or_none() or str(c.peer_id)
+
+            dl = c.deadline_at
+            if dl and dl.tzinfo is not None:
+                dl = dl.replace(tzinfo=None)
+
+            if dl:
+                hours_left = (dl - now).total_seconds() / 3600
+                if hours_left <= 24:
+                    time_str = "дедлайн сегодня"
+                else:
+                    time_str = "дедлайн завтра"
+            else:
+                time_str = ""
+
+            text = (c.text or "")[:80]
+            lines.append(f"🟡 {name}: {time_str} — {text}")
+            deadline_names.append(name)
+
+        if upcoming:
+            lines.append("")
+
+        # ── 4. Здоровые контакты ───────────────────────────────────
+        healthy_lines = await _collect_healthy(
+            session, owner, yesterday_start, today_start, seven_days_ago
+        )
+        lines.extend(healthy_lines)
+
+        if healthy_lines:
+            lines.append("")
+
+        # ── 5. План на сегодня ─────────────────────────────────────
+        plan: list[str] = []
+        if needs_reply_names:
+            plan.append(f"ответить {', '.join(needs_reply_names[:3])}")
+        if deadline_names:
+            plan.append(f"проверить: {', '.join(deadline_names[:3])}")
+
+        if plan:
+            lines.append(f"📋 На сегодня: {'; '.join(plan)}")
+
+        return "\n".join(lines)
+
+
+async def _collect_healthy(
+    session, owner, yesterday_start, today_start, seven_days_ago
+) -> list[str]:
+    """Собирает 💚-строки для контактов с health > 80 и недавней активностью."""
+    rows_r = await session.execute(
+        select(
+            Contact.peer_id,
+            Contact.display_name,
+            func.count(Message.id).label("msg_total"),
+            func.max(Message.date).label("last_date"),
+            func.sum(case((Message.is_outgoing.is_(True), 1), else_=0)).label(
+                "outgoing"
+            ),
+        )
+        .join(
+            Message,
+            and_(
+                Message.user_id == Contact.user_id,
+                Message.peer_id == Contact.peer_id,
+            ),
+        )
+        .where(
+            Contact.user_id == owner.id,
+            Message.date >= seven_days_ago,
+        )
+        .group_by(Contact.peer_id, Contact.display_name)
+    )
+
+    result: list[str] = []
+    for row in rows_r.all():
+        peer_id, name, msg_total, last_date, outgoing = row
+        outgoing = outgoing or 0
+
+        if last_date:
+            if last_date.tzinfo is None:
+                last_date = last_date.replace(tzinfo=timezone.utc)
+            days_gap = (datetime.now(timezone.utc) - last_date).days
+        else:
+            days_gap = 365
+
+        reply_ratio = outgoing / max(msg_total, 1)
+
+        # Упрощённая формула health_score (как в health_score.py)
+        score = 100.0
+        score -= min(days_gap / 7.0 * 10.0, 60.0)
+        if msg_total < 10:
+            score -= 10.0
+        if 0.3 <= reply_ratio <= 0.7:
+            score += 10.0
+        elif reply_ratio > 0.9:
+            score -= 15.0
+        elif reply_ratio < 0.1 and msg_total > 5:
+            score -= 20.0
+        score = max(0.0, min(100.0, round(score)))
+
+        if score >= 80:
+            yday_r = await session.execute(
+                select(func.count())
+                .select_from(Message)
+                .where(
+                    Message.user_id == owner.id,
+                    Message.peer_id == peer_id,
+                    Message.date >= yesterday_start,
+                    Message.date < today_start,
+                )
+            )
+            yday_msgs = yday_r.scalar_one() or 0
+            result.append(f"💚 С {name} всё хорошо, {yday_msgs} сообщений вчера")
+
+    return result[:5]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Scheduler loop — только утренний брифинг в 9:00
+# ═══════════════════════════════════════════════════════════════════
+
+
 async def proactive_briefing_loop(owner_id: int) -> None:
-    """Фоновый цикл: утренний брифинг в 9:00, вечерний в 21:00 по tz владельца."""
+    """Фоновый цикл: утренний дайджест в 9:00–9:05 по tz владельца."""
     from src.core.infra.timeutil import now_in_tz
 
     while True:
@@ -258,51 +536,38 @@ async def proactive_briefing_loop(owner_id: int) -> None:
                     else "UTC"
                 )
 
-            now = now_in_tz(tz_name)
-            hour = now.hour
-
-            if hour in (9, 21):
+            now_tz = now_in_tz(tz_name)
+            if now_tz.hour == 9 and now_tz.minute < 5:
                 # Вычислить начало часового слота в tz пользователя, затем в UTC
-                slot_start_tz = now.replace(minute=0, second=0, microsecond=0)
+                slot_start_tz = now_tz.replace(
+                    hour=9, minute=0, second=0, microsecond=0
+                )
                 slot_start_utc = slot_start_tz.astimezone(timezone.utc).replace(
                     tzinfo=None
                 )
 
                 async with get_session() as session:
                     owner = await get_or_create_user(session, owner_id)
-                    if owner.settings.proactive_last_sent != slot_start_utc:
-                        owner.settings.proactive_last_sent = slot_start_utc
-                        await session.commit()
-                    else:
+                    if owner.settings.proactive_last_sent == slot_start_utc:
                         await asyncio.sleep(settings.proactive_briefing_check_sec)
                         continue
+                    owner.settings.proactive_last_sent = slot_start_utc
+                    await session.commit()
 
-                data = await collect_briefing_data(owner_id)
-                if hour == 9:
-                    title = "☀️ Утренний брифинг"
-                    category = "morning"
-                else:
-                    title = "🌙 Вечерний брифинг"
-                    category = "evening"
-                text = format_briefing(data, title)
+                text = await _collect_morning_digest(owner_id)
                 await notification_queue.enqueue(
                     topic="briefing",
                     text=text,
                     priority=Notification.PRIORITY_MEDIUM,
-                    category=category,
+                    category="morning",
                 )
                 await asyncio.sleep(3600)  # не повторять в этот час
 
-            await asyncio.sleep(
-                settings.proactive_briefing_check_sec
-            )  # проверка каждые 5 минут
+            await asyncio.sleep(settings.proactive_briefing_check_sec)
         except Exception:
             logger.exception("Briefing loop error")
             await asyncio.sleep(settings.proactive_briefing_check_sec)
 
-
-from functools import partial
-from src.core.infra.task_manager import task_manager
 
 task_manager.register(
     "proactive-briefing", partial(proactive_briefing_loop, settings.owner_telegram_id)

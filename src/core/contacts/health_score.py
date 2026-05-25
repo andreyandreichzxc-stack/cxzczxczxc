@@ -1,6 +1,6 @@
 """Contact relationship health scoring — 0-100 metric."""
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import logging
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ async def get_contact_health(owner_id: int, peer_id: int) -> dict:
             .where(
                 Message.user_id == owner.id,
                 Message.peer_id == peer_id,
-                Message.is_outgoing == True,
+                Message.is_outgoing.is_(True),
             )
         )
         outgoing = r.scalar_one() or 0

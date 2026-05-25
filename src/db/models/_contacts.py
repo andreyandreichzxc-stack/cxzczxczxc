@@ -108,6 +108,13 @@ class ContactProfile(Base):
         Text, nullable=True
     )  # JSON {"rules": ["rule1", "rule2"]} — per-contact style rules
 
+    memory_digest: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # JSON — precomputed per-contact summary (facts, promises, health, etc.)
+    memory_digest_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
@@ -150,3 +157,15 @@ class ConversationState(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
+
+
+class AllowedContact(Base):
+    """Pairing allowlist — approved contacts that bypass the pairing guard."""
+
+    __tablename__ = "allowed_contacts"
+
+    telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    approved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    label: Mapped[str | None] = mapped_column(String(256), nullable=True)

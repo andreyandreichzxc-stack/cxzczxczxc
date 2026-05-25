@@ -66,7 +66,7 @@ def _truncate_smart(text: str, max_chars: int) -> str:
     last_space = truncated.rfind(" ")
     if last_space > max_chars // 2:
         return truncated[:last_space].rstrip() + "…"
-    return truncated.rstrip() + "…"
+    return truncated[: max_chars - 1].rstrip() + "…"
 
 
 # Приоритет при усечении: что выкидывать в первую очередь
@@ -106,6 +106,8 @@ class AssemblyContext:
     frozen_snapshot: str = ""
     # Per-contact rules block (pre-loaded and passed as string to avoid async in sync method)
     contact_rules_block: str = ""
+    # Recent user corrections (pre-loaded in maestro, injected into Tier 2)
+    correction_context: str = ""
 
 
 class PromptAssembler:
@@ -126,7 +128,10 @@ class PromptAssembler:
         if target == "maestro":
             # SOUL.md загружен → используем его вместо hardcoded блоков
             if _SOUL_MD is not None:
-                return _SOUL_MD
+                return (
+                    _SOUL_MD
+                    + "\n\n## ПРАВИЛА\nСледуй границам, стилю и правилам из SOUL.md."
+                )
             return (
                 self._blocks["stable_maestro_core"]
                 + "\n\n"
@@ -148,6 +153,21 @@ class PromptAssembler:
             parts.append(self._blocks["context_maestro_agents"])
             parts.append(self._blocks["context_maestro_intents"])
             parts.append(self._blocks["context_maestro_format"])
+            # Memory directive
+            parts.append("")
+            parts.append("[ПАМЯТЬ] Не читай файлы вручную.")
+            parts.append("Используй recall_memory, search_contexts, cross_chat_search.")
+            parts.append("Frozen snapshot уже в промпте. Для деталей — вызывай tools.")
+            parts.append(
+                "Для сложных запросов — обрабатывай данные через tools, не загружай в контекст."
+            )
+            # Correction learning — feed recent user corrections into prompt
+            if ctx.correction_context:
+                parts.append("")
+                parts.append(
+                    "[УЧТИ ИСПРАВЛЕНИЯ] Пользователь поправлял: "
+                    + ctx.correction_context
+                )
         elif target == "agent":
             parts.append(self._blocks["context_agent_intents"])
             parts.append(self._blocks["context_agent_format"])

@@ -8,6 +8,7 @@ After sync completes, this module:
 5. Shows progress per contact
 """
 
+import hashlib
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ from src.core.memory.memory_queue import MemoryJob, enqueue
 from src.db.repo import fetch_chat_messages, get_or_create_user, list_memories
 from src.db.session import get_session
 from src.llm.base import ChatMessage, LLMProvider
+from src.bot.pending_questions import add_question
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,72 @@ _DEDUP_SIMILARITY_THRESHOLD = 0.85
 # ---------------------------------------------------------------------------
 
 
+async def _detect_ambiguous_contacts(
+    owner_id: int,
+    contact_ids: list[int],
+    name_map: dict[int, str],
+    owner,
+) -> None:
+    """Detect potentially ambiguous contacts and queue questions (Feature 1).
+
+    Checks:
+    1. Contacts with suspicious names ("Unknown", empty, numeric-only)
+    2. Contacts with very similar display names (potential duplicates)
+    """
+    suspicious_names: list[tuple[int, str]] = []
+    names_for_comparison: list[tuple[int, str]] = []
+
+    for pid in contact_ids:
+        name = name_map.get(pid, str(pid))
+        stripped = name.strip()
+
+        # Empty or generic names
+        if not stripped or stripped.lower() in (
+            "unknown",
+            "deleted account",
+            "удалённый аккаунт",
+        ):
+            suspicious_names.append((pid, f'Контакт "{name}" — кто это?'))
+            continue
+
+        # Numeric-only names (likely phone numbers or raw IDs)
+        if stripped.lstrip("+").isdigit() and len(stripped) >= 7:
+            suspicious_names.append(
+                (pid, f'Контакт "{name}" — это номер телефона? Уточни имя.')
+            )
+            continue
+
+        names_for_comparison.append((pid, stripped))
+
+    # Queue suspicious name questions
+    for _pid, question in suspicious_names:
+        await add_question(owner_id, question)
+        logger.debug("Queued question for owner %d: %s", owner_id, question)
+
+    # Detect similar names (potential duplicates) via name-based hash grouping
+    def _simplify_name(n: str) -> str:
+        return re.sub(r"[^a-zа-яё]", "", n.lower())
+
+    name_groups: dict[str, list[str]] = {}
+    for pid, name in names_for_comparison:
+        key = _simplify_name(name)
+        name_groups.setdefault(key, []).append(name)
+
+    for key, group in name_groups.items():
+        if len(group) > 1:
+            for i in range(len(group)):
+                for j in range(i + 1, len(group)):
+                    name_a, name_b = group[i], group[j]
+                    if name_a != name_b:
+                        question = f'"{name_a}" и "{name_b}" — это один человек?'
+                        await add_question(owner_id, question)
+                        logger.debug(
+                            "Queued similarity question for owner %d: %s",
+                            owner_id,
+                            question,
+                        )
+
+
 async def smart_extract_after_sync(
     owner_id: int,
     provider: LLMProvider,
@@ -88,7 +156,7 @@ async def smart_extract_after_sync(
         progress_message: aiogram Message для progress_tracker (per‑contact).
 
     Returns:
-        {"owner_facts": N, "contact_facts": M, "skipped_stale": K}
+        {"owner_facts": N, "contact_facts": M, "skipped_stale": K, "recent_facts": [...]}
     """
     total_owner_facts = 0
     total_contact_facts = 0
@@ -108,6 +176,9 @@ async def smart_extract_after_sync(
             async with get_session() as session:
                 c = await get_contact(session, owner, pid)
             _name_map[pid] = c.display_name if c else str(pid)
+
+    # ── Detect ambiguous contacts (Feature 1: question accumulation) ──
+    await _detect_ambiguous_contacts(owner_id, contact_ids, _name_map, owner)
 
     # Выбираем источник контактов: с прогрессом или без
     if progress_message and total > 0:
@@ -129,6 +200,10 @@ async def smart_extract_after_sync(
         contact_iter = _pid_iter()
 
     _contact_idx = 0
+
+    # Collect recent facts for conversational display (Feature 2)
+    _recent_facts: list[str] = []
+
     async for peer_id in contact_iter:
         _contact_idx += 1
 
@@ -170,6 +245,9 @@ async def smart_extract_after_sync(
         if owner_facts:
             await _save_facts_to_queue(owner_id, contact_id=None, facts=owner_facts)
             total_owner_facts += len(owner_facts)
+            for fact in owner_facts[:2]:
+                if len(_recent_facts) < 10:
+                    _recent_facts.append(fact["fact"])
 
         # --- 2. Извлекаем факты о КОНТАКТЕ ---
         contact_facts, skipped = await _extract_llm_filtered(
@@ -185,6 +263,9 @@ async def smart_extract_after_sync(
                 owner_id, contact_id=contact_peer_id, facts=contact_facts
             )
             total_contact_facts += len(contact_facts)
+            for fact in contact_facts[:2]:
+                if len(_recent_facts) < 10:
+                    _recent_facts.append(fact["fact"])
 
         # --- progress: done ---
         extra_parts = []
@@ -202,6 +283,7 @@ async def smart_extract_after_sync(
         "owner_facts": total_owner_facts,
         "contact_facts": total_contact_facts,
         "skipped_stale": total_skipped,
+        "recent_facts": _recent_facts,
     }
 
 
@@ -352,7 +434,6 @@ def _has_invalid_date(fact_text: str) -> bool:
 
 def _extract_dates(text: str) -> list[datetime]:
     """Извлекает даты из текста факта. Возвращает список datetime (UTC)."""
-    now = datetime.now(timezone.utc)
     found: list[datetime] = []
 
     for pattern in _DATE_PATTERNS:
@@ -415,7 +496,7 @@ async def _is_duplicate(
     contact_id: int | None,
     fact_text: str,
 ) -> bool:
-    """Проверяет, есть ли похожий факт в БД."""
+    """Проверяет, есть ли похожий факт в БД (через hash)."""
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
         existing = await list_memories(session, owner, contact_id=contact_id)
@@ -424,25 +505,25 @@ async def _is_duplicate(
     for mem in existing:
         if not mem.is_active or not mem.fact:
             continue
-        existing_lower = mem.fact.lower().strip()
-        # Точное совпадение
-        if fact_lower == existing_lower:
+        if fact_lower == mem.fact.lower().strip():
             return True
-        # Частичное совпадение — короткие факты строже
-        min_len = min(len(fact_lower), len(existing_lower))
-        if min_len < 10:
-            if fact_lower == existing_lower:
-                return True
+
+    # Hash-based fuzzy dedup (first 10 words normalized)
+    norm = " ".join(fact_lower.split()[:10])
+    f_hash = hashlib.md5(norm.encode()).hexdigest()
+    existing_hashes: set[str] = set()
+    for mem in existing:
+        if not mem.is_active or not mem.fact:
             continue
-        ratio = SequenceMatcher(None, fact_lower, existing_lower).ratio()
-        if ratio >= _DEDUP_SIMILARITY_THRESHOLD:
-            logger.debug(
-                "Duplicate detected (ratio=%.3f): %r vs %r",
-                ratio,
-                fact_text[:60],
-                mem.fact[:60],
-            )
-            return True
+        e_norm = " ".join(mem.fact.lower().split()[:10])
+        existing_hashes.add(hashlib.md5(e_norm.encode()).hexdigest())
+
+    if f_hash in existing_hashes:
+        logger.debug(
+            "Duplicate detected (hash): %r",
+            fact_text[:60],
+        )
+        return True
 
     return False
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import time
 
+from src.config import settings
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
 from src.llm.router import _ensure_utc, build_provider
@@ -22,7 +23,10 @@ logger = logging.getLogger(__name__)
 
 _recall_cache: dict[str, tuple[float, RecallResult]] = {}
 _recall_lock: asyncio.Lock = asyncio.Lock()
-_RECALL_CACHE_MAX = 1000
+_RECALL_CACHE_MAX = settings.max_recall_cache_size
+_RECALL_CACHE_RESULT_TTL = 30.0  # TTL for results WITH facts
+_RECALL_CACHE_EMPTY_TTL = 60.0  # TTL for empty results
+_bg_bump_tasks: list[asyncio.Task] = []  # track background bump tasks
 
 
 def _utc_now() -> datetime:
@@ -120,6 +124,27 @@ class RecallResult:
     meta: dict = field(default_factory=dict)
 
 
+async def _bump_use_count_async(
+    telegram_id: int,
+    result: RecallResult,
+) -> None:
+    """Fire-and-forget: increment use_count for cached results."""
+    try:
+        async with get_session() as session:
+            from src.db.models import Memory
+
+            now_cache = datetime.now(timezone.utc)
+            for f in result.facts:
+                if f.memory_id:
+                    m = await session.get(Memory, f.memory_id)
+                    if m:
+                        m.use_count = (m.use_count or 0) + 1
+                        m.last_used_at = now_cache
+            await session.flush()
+    except Exception:
+        logger.debug("Async use_count bump failed", exc_info=True)
+
+
 async def recall(
     telegram_id: int,
     *,
@@ -149,13 +174,26 @@ async def recall(
 
     Возвращает список RecalledFact с причинами.
     """
+    global _bg_bump_tasks
     _cache_key = f"{telegram_id}:{query}:{contact_id}:{mode}"
     _cache_now = time.monotonic()
     async with _recall_lock:
         if _cache_key in _recall_cache:
-            _ts, _cached = _recall_cache[_cache_key]
-            if _cache_now - _ts < 60:
-                return _cached
+            ts, cached = _recall_cache[_cache_key]
+            # Check TTL based on whether result has facts
+            ttl = _RECALL_CACHE_RESULT_TTL if cached.facts else _RECALL_CACHE_EMPTY_TTL
+            if _cache_now - ts < ttl:
+                # Async increment use_count — don't block the return
+                if cached.facts:
+                    _bg_bump_tasks.append(
+                        asyncio.create_task(_bump_use_count_async(telegram_id, cached))
+                    )
+                    # Clean done tasks periodically
+                    if len(_bg_bump_tasks) > 20:
+                        _bg_bump_tasks = [t for t in _bg_bump_tasks if not t.done()]
+                return cached
+            else:
+                del _recall_cache[_cache_key]
 
     result = RecallResult()
     mode = (mode or "deep").lower()
@@ -271,12 +309,20 @@ async def recall(
                 if provider:
                     embedding = await provider.embed(query[:300])
 
+                    # Лимит поиска зависит от режима: light → 0 (не вызывается),
+                    # normal → 5, deep → 10
+                    qdrant_limit = {
+                        "light": 0,
+                        "normal": 5,
+                        "deep": 10,
+                    }.get(mode, 10)
+
                     # Параллельный запуск: векторный + ключевой поиск
                     vector_task = get_vector_store().search_similar_memories(
                         user_id=owner.id,
                         embedding=embedding,
                         threshold=semantic_threshold,
-                        limit=10,
+                        limit=qdrant_limit,
                         contact_id=contact_id,
                     )
                     keyword_task = search_memories_fts_with_scores(
@@ -284,7 +330,7 @@ async def recall(
                         owner,
                         query,
                         contact_id=contact_id,
-                        limit=10,
+                        limit=qdrant_limit,
                     )
 
                     vector_hits_raw, keyword_hits_raw = await asyncio.gather(
@@ -476,15 +522,17 @@ async def recall(
             "reasons_used": list(set(f.reason for f in result.facts)),
         }
 
-        # Cache result ONLY when no facts were returned (read-only query).
-        # If facts were returned, use_count is about to be incremented
-        # and caching would serve stale counts on the next call.
-        if not result.facts:
-            async with _recall_lock:
-                if len(_recall_cache) >= _RECALL_CACHE_MAX:
-                    oldest = min(_recall_cache.items(), key=lambda x: x[1][0])
-                    del _recall_cache[oldest[0]]
-                _recall_cache[_cache_key] = (_cache_now, result)
+        # Cache ALL results (before use_count increment so cache is clean).
+        # On cache hit, _bump_use_count_async fires a background increment.
+        async with _recall_lock:
+            if len(_recall_cache) >= _RECALL_CACHE_MAX:
+                # Evict 10% of oldest entries (not just 1)
+                evict_count = max(1, int(_RECALL_CACHE_MAX * 0.1))
+                sorted_items = sorted(_recall_cache.items(), key=lambda x: x[1][0])
+                for i in range(evict_count):
+                    if i < len(sorted_items):
+                        del _recall_cache[sorted_items[i][0]]
+            _recall_cache[_cache_key] = (_cache_now, result)
 
         # Инкрементируем use_count для возвращённых фактов
         for f in result.facts:

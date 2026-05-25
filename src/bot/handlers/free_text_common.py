@@ -8,6 +8,8 @@ import time
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from src.bot.reply_dedup import dedup
+
 # ── Telegram message length safety ─────────────────────────────────────
 TELEGRAM_SAFE_MAX = 4000  # Telegram hard limit is 4096 chars
 
@@ -82,6 +84,8 @@ async def safe_answer(
     """Send ``text`` via ``message.answer()``, splitting into multiple messages if too long.
     ``reply_markup`` (if any) is attached only to the last message.
     """
+    if dedup.is_duplicate(message.chat.id, text):
+        return
     parts = _smart_split(text, max_len)
     for i, part in enumerate(parts):
         final_kwargs = {}

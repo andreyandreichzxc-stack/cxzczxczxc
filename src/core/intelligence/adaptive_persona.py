@@ -11,7 +11,6 @@ ChatGPT-style personality system:
 
 import json
 import logging
-from datetime import datetime, timezone
 
 from src.db.session import get_session
 from src.db.repo import get_or_create_user, get_persona, update_persona
@@ -252,7 +251,6 @@ async def detect_persona_change(user_text: str) -> dict | None:
 
 async def apply_persona_changes(telegram_id: int, changes: dict):
     """Применяет изменения к persona."""
-    from src.core.context_cache import invalidate as cache_invalidate
 
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
@@ -1564,8 +1562,6 @@ def _detect_contact_name(text: str) -> str | None:
     Возвращает raw-имя контакта или None.
     """
     import re
-
-    t = text.lower().strip()
 
     patterns = [
         r"(?:напиши|отправь|черкани|сбрось|закинь)\s+([а-яёa-z]+(?:\s+[а-яёa-z]+){0,2})",

@@ -98,15 +98,18 @@ async def step_api_id(message: Message, state: FSMContext) -> None:
     await state.update_data(api_id=int(text))
     await state.set_state(LoginStates.api_hash)
     await message.answer(
-        f"Отлично. Теперь введи <b>api_hash</b> "
-        f"(по умолчанию <code>{settings.api_hash}</code>).\n"
-        f"Если подходит — просто отправь его или введи свой."
+        "Отлично. Теперь введи <b>api_hash</b> "
+        f"(по умолчанию <code>{settings.api_hash[:4]}••••{settings.api_hash[-4:]}</code>).\n"
+        "Если подходит — просто отправь его или введи свой."
     )
 
 
 @router.message(LoginStates.api_hash)
 async def step_api_hash(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
+    # Auto-accept default api_hash if user just presses Enter
+    if not text:
+        text = settings.api_hash
     if len(text) != 32 or not all(c in "0123456789abcdefABCDEF" for c in text):
         await message.answer(
             "api_hash должен быть строкой из 32 hex-символов. Попробуй ещё раз или /cancel."

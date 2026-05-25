@@ -406,6 +406,7 @@ async def exec_show_self(intent: dict, message: Message) -> None:
             include_self=True,
             include_pinned=True,
             include_tasks=False,
+            mode="normal",
         )
         if result.facts:
             lines.append("")

@@ -30,10 +30,15 @@ from src.llm.base import ChatMessage
 def setup_db():
     """Recreate all tables before each test (pattern from test_memory_smoke)."""
     from src.db.session import engine, Base, init_db
+    from sqlalchemy import text
 
     async def _recreate():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
+            # Drop artifacts that survive drop_all and would confuse init_db
+            await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+            await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
+            await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
         await init_db()
 
     asyncio.run(_recreate())

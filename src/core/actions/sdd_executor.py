@@ -226,10 +226,16 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
 
     # 3. Build execution namespace
     # kwargs dict is available so code can access params by key: data = kwargs.get('test_data', [])
+    # Sanitize kwargs — never pass DB/callbacks to sandbox
+    _safe_kwargs: dict[str, Any] = {
+        k: v
+        for k, v in kwargs.items()
+        if k not in ("session", "user", "provider", "userbot_manager", "owner", "bot")
+    }
     namespace: dict[str, Any] = {
         "__builtins__": safe_builtins,
-        "kwargs": kwargs,
-        **kwargs,
+        "kwargs": _safe_kwargs,
+        **_safe_kwargs,
     }
 
     # 4. Capture print() output

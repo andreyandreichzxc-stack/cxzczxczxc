@@ -21,7 +21,6 @@ from src.core.cache.smart_cache import (
     L0_MAX_SIZE,
     L1_MAX_SIZE_PER_OWNER,
     GRADUATION_MAX_PER_OWNER_PER_DAY,
-    SOURCE_WEIGHTS,
 )
 
 OWNER_ID = 123456789
@@ -32,10 +31,15 @@ OWNER2_ID = 987654321
 def setup_db():
     """Recreate all tables before each test."""
     from src.db.session import engine, Base
+    from sqlalchemy import text
 
     async def _recreate():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
+            # Drop artifacts that survive drop_all and would confuse init_db
+            await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+            await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
+            await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
         await init_db()
 
     asyncio.run(_recreate())
@@ -145,7 +149,7 @@ class TestL1OverflowProtection:
         # The very first entry (l1key_0) should be evicted from L1
         # But it might still be in L0 — force a fresh cache read
         c2 = SmartCache()
-        val = await c2.get("l1key_0", OWNER_ID)
+        await c2.get("l1key_0", OWNER_ID)
         # It may or may not be there depending on access time ordering
         # The key assertion is: count didn't exceed limit
         assert count <= L1_MAX_SIZE_PER_OWNER
@@ -254,7 +258,6 @@ class TestCleanupStaleEntries:
 
     @pytest.mark.asyncio
     async def test_importance_decays_on_recalculation(self):
-        from src.core.cache.smart_cache import SmartCache as SC
         from datetime import datetime, timezone, timedelta
 
         c = SmartCache()

@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 
-from src.config import settings
 
 logger = logging.getLogger(__name__)
 

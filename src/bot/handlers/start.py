@@ -12,9 +12,13 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+from sqlalchemy import func, select
 
 from src.bot.filters import OwnerOnly, is_onboarded
 from src.bot.states import OnboardingStates
+from src.db.models._contacts import Contact
+from src.db.models._learning import AdaptivePersona
+from src.db.models._memory import Memory
 from src.db.repo import get_or_create_user, upsert_api_key
 from src.db.session import get_session
 from src.core.infra.timeutil import TZ_PRESETS, is_valid_tz, tz_short
@@ -575,7 +579,12 @@ async def cb_onboarding_sync_all(callback: CallbackQuery, state: FSMContext) -> 
         status = f"⚠️ Синхронизация не удалась: {exc}"
 
     await state.clear()
-    await _finish_onboarding(callback.message.chat.id, callback.bot, extra=status)
+    await _finish_onboarding(
+        callback.message.chat.id,
+        callback.bot,
+        tg_id=callback.from_user.id,
+        extra=status,
+    )
 
     if callback.message:
         try:
@@ -640,6 +649,7 @@ async def step_onboarding_sync_folders_text(
     await _finish_onboarding(
         message.chat.id,
         message.bot,
+        tg_id=message.from_user.id,
         extra=f"📂 Папки: {', '.join(folder_names)}\n{status}",
     )
 
@@ -659,25 +669,82 @@ async def cb_onboarding_sync_skip(callback: CallbackQuery, state: FSMContext) ->
     if callback.message is None:
         await callback.answer("Сообщение недоступно.")
         return
-    await _finish_onboarding(callback.message.chat.id, callback.bot)
+    await _finish_onboarding(
+        callback.message.chat.id, callback.bot, tg_id=callback.from_user.id
+    )
 
 
 # ─── Finish ────────────────────────────────────────────────────────────
 
 
-async def _finish_onboarding(chat_id: int, bot, extra: str = "") -> None:
-    """Финальное сообщение после завершения онбординга."""
+async def _finish_onboarding(chat_id: int, bot, tg_id: int, extra: str = "") -> None:
+    """Финальное сообщение с детальным саммари после завершения онбординга."""
+
+    tone_labels = {
+        "professional": "Деловой",
+        "friendly": "Тёплый",
+        "efficient": "Эффективный",
+        "default": "Стандартный",
+        "cynical": "Циничный",
+        "warm": "Тёплый",
+    }
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, tg_id)
+
+        # Считаем контакты
+        contact_count: int = (
+            await session.scalar(
+                select(func.count())
+                .select_from(Contact)
+                .where(Contact.user_id == owner.id)
+            )
+        ) or 0
+
+        # Считаем активные факты в памяти
+        fact_count: int = (
+            await session.scalar(
+                select(func.count())
+                .select_from(Memory)
+                .where(Memory.user_id == owner.id, Memory.is_active.is_(True))
+            )
+        ) or 0
+
+        # Данные сессии
+        session_label = "—"
+        if owner.session:
+            session_label = owner.session.account_label or owner.session.phone or "—"
+
+        # LLM ключи
+        providers = sorted(
+            {k.provider for k in owner.key_slots if getattr(k, "enabled", True)}
+        )
+        key_count = len(providers)
+        key_names = ", ".join(_pretty_provider(p) for p in providers)
+
+        # Часовой пояс
+        tz_name = owner.settings.timezone or "UTC"
+
+        # Режим личности
+        persona = await session.scalar(
+            select(AdaptivePersona).where(AdaptivePersona.user_id == owner.id)
+        )
+        tone_key = persona.base_tone if persona else "default"
+        tone_label = tone_labels.get(tone_key, tone_key)
+
     msg = (
-        "🎉 <b>Я готов!</b>\n\n"
-        "Всё настроено, теперь я могу полноценно работать.\n\n"
-        "<b>Попробуй:</b>\n"
-        "• Напиши мне что-нибудь своими словами — я пойму\n"
-        "• /help — список всех команд\n"
-        "• /settings — изменить настройки\n\n"
-        "📖 <b>Подсказки:</b>\n"
-        "• <i>«Напиши Ивану что задержусь на 10 минут»</i>\n"
-        "• <i>«Что нового в чате с Петей?»</i>\n"
-        "• <i>«Напомни завтра в 10 про отчёт»</i>"
+        "🎉 <b>Готово! Что настроено:</b>\n"
+        f"• Telegram: подключён (аккаунт {session_label})\n"
+        f"• LLM: {key_count} ключ{'ей' if key_count != 1 else ''} ({key_names if key_names else '—'})\n"
+        f"• Часовой пояс: {tz_name}\n"
+        f"• Контактов: {contact_count}\n"
+        f"• Фактов в памяти: {fact_count}\n"
+        f"• Режим личности: {tone_label}\n\n"
+        "<b>Что дальше:</b>\n"
+        "• /help — все команды\n"
+        "• Просто напиши мне — я пойму\n"
+        "• /contact Имя — что я знаю о человеке\n"
+        "• /mode — сменить стиль общения"
     )
     if extra:
         msg = extra + "\n\n" + msg

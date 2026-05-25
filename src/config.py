@@ -228,6 +228,40 @@ class Settings(BaseSettings):
     )
     disk_monitor_interval_sec: int = Field(600, description="Интервал проверки диска")
 
+    # Memory
+    max_recall_cache_size: int = Field(
+        1000, description="Максимальный размер кэша recall"
+    )
+    memory_consolidation_interval_sec: int = Field(
+        21600, description="Интервал консолидации памяти (6 часов)"
+    )
+
+    # Humanizer
+    humanizer_deep_min_length: int = Field(
+        100, description="Минимальная длина текста для deep humanizer"
+    )
+    humanizer_deep_min_score: float = Field(
+        0.3, description="Минимальный AI-score для deep humanizer"
+    )
+
+    # Tool loop
+    max_tool_iterations: int = Field(
+        5, description="Макс. итераций tool-calling в Maestro"
+    )
+
+    # Pending
+    pending_ttl_sec: int = Field(
+        300, description="TTL ожидающих подтверждений (5 минут)"
+    )
+
+    # Auto-reply
+    auto_reply_global_limit_per_hour: int = Field(
+        100, description="Глобальный лимит авто-ответов в час"
+    )
+
+    # Context
+    context_max_turns: int = Field(50, description="Макс. витков диалога перед сжатием")
+
     @property
     def data_dir(self) -> Path:
         path = PROJECT_ROOT / "data"

@@ -48,7 +48,7 @@ def analyze_ai_score(text: str) -> tuple[float, dict]:
             )
 
     # 4. Length check
-    from .patterns import IDEAL_LENGTH_MIN, IDEAL_LENGTH_MAX  # noqa: F811
+    from .patterns import IDEAL_LENGTH_MIN  # noqa: F811
 
     if len(text) < IDEAL_LENGTH_MIN:
         score += 0.1

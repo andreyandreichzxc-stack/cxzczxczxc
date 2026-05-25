@@ -1,6 +1,5 @@
 """Runtime-статистика humanizer'а."""
 
-import time as _time
 
 _stats: dict[str, int | float] = {
     "total_checks": 0,

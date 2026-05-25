@@ -291,9 +291,12 @@ async def _fs_search(dir_path: str, pattern: str) -> dict:
     limit = 50
     loop = asyncio.get_running_loop()
 
-    def _search() -> list[dict]:
+    def _search() -> list[dict] | dict:
         matches: list[dict] = []
-        compiled = re.compile(pattern, re.IGNORECASE)
+        try:
+            compiled = re.compile(pattern, re.IGNORECASE, timeout=5)
+        except (re.error, OverflowError, RuntimeError):
+            return {"error": "Invalid regex pattern"}
         for root_str, _dirs, files in os.walk(str(resolved)):
             if len(matches) >= limit:
                 break

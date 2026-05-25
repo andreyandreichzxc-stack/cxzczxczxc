@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
@@ -64,6 +63,8 @@ class SmartCache:
             return dt.replace(tzinfo=timezone.utc)
         return dt
 
+    _MAX_KEY_LOCKS: int = 500  # cap to prevent unbounded growth
+
     def __init__(self) -> None:
         self._l0: OrderedDict[str, str] = OrderedDict()
         self._l0_lock = asyncio.Lock()
@@ -84,9 +85,17 @@ class SmartCache:
         return f"{owner_id}:{key}"
 
     def _ensure_lock(self, key: str, owner_id: int) -> asyncio.Lock:
-        """Return or create a per-(owner,key) asyncio.Lock."""
+        """Return or create a per-(owner,key) asyncio.Lock.
+
+        If _key_locks exceeds _MAX_KEY_LOCKS, evict unlocked entries first.
+        """
         lk = self._lock_key(key, owner_id)
         if lk not in self._key_locks:
+            # Evict if over cap
+            if len(self._key_locks) >= self._MAX_KEY_LOCKS:
+                to_remove = [k for k, v in self._key_locks.items() if not v.locked()]
+                for k in to_remove[: self._MAX_KEY_LOCKS // 4]:
+                    del self._key_locks[k]
             self._key_locks[lk] = asyncio.Lock()
         return self._key_locks[lk]
 
@@ -113,6 +122,7 @@ class SmartCache:
             await self._bump_l1_access(key, owner_id)
             self._ops_since_cleanup += 1
             await self._maybe_cleanup_standalone()
+            self._maybe_cleanup_key_locks()
             return value
 
         # ── L1 check ──
@@ -154,12 +164,14 @@ class SmartCache:
 
                     self._ops_since_cleanup += 1
                     await self._maybe_cleanup(session)
+                    self._maybe_cleanup_key_locks()
 
                     return entry.cache_value
 
         # ── Cache miss ──
         self._ops_since_cleanup += 1
         await self._maybe_cleanup_standalone()
+        self._maybe_cleanup_key_locks()
         return None
 
     async def set(
@@ -214,9 +226,9 @@ class SmartCache:
                         existing.access_count + 1, ACCESS_COUNT_CAP
                     )
                     existing.importance_score = initial_score
-                    existing.content_hash = content_hash
                     if content_hash != existing.content_hash:
                         existing.graduated = False  # content changed → re-graduate
+                    existing.content_hash = content_hash
                     await session.flush()
                     entry = existing
                 else:
@@ -248,6 +260,7 @@ class SmartCache:
                             await self._graduate(entry, owner_id, session)
 
                 await self._maybe_cleanup(session)
+                self._maybe_cleanup_key_locks()
 
         self._ops_since_cleanup += 1
 
@@ -491,6 +504,17 @@ class SmartCache:
             entry.source,
             entry.importance_score,
         )
+
+    # ── Key-lock cleanup (prevent _key_locks leak) ────────────────────
+
+    def _maybe_cleanup_key_locks(self) -> None:
+        """Remove unused locks from _key_locks every 1000 ops."""
+        if self._ops_since_cleanup < 1000:
+            return
+        self._ops_since_cleanup = 0
+        unused = [k for k, v in self._key_locks.items() if not v.locked()]
+        for k in unused:
+            del self._key_locks[k]
 
     # ── Periodic cleanup ──────────────────────────────────────────────
 

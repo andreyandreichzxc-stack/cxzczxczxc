@@ -1,4 +1,5 @@
 import httpx
+from collections.abc import AsyncGenerator
 from openai import (
     APIConnectionError,
     AsyncOpenAI,
@@ -31,15 +32,28 @@ class OpenAIProvider:
         except Exception:
             return False  # unknown error — assume invalid
 
+    def _resolve_model(self, heavy: bool) -> str:
+        return LLMDefaults.OPENAI_CHAT_HEAVY if heavy else LLMDefaults.OPENAI_CHAT_LIGHT
+
     async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
-        model = (
-            LLMDefaults.OPENAI_CHAT_HEAVY if heavy else LLMDefaults.OPENAI_CHAT_LIGHT
-        )
+        model = self._resolve_model(heavy)
         resp = await self._client.chat.completions.create(
             model=model,
             messages=[{"role": m.role, "content": m.content} for m in messages],
         )
         return resp.choices[0].message.content or ""
+
+    async def chat_stream(
+        self, messages: list[ChatMessage], *, heavy: bool = False
+    ) -> AsyncGenerator[str, None]:
+        model = self._resolve_model(heavy)
+        fmt = [{"role": m.role, "content": m.content} for m in messages]
+        stream = await self._client.chat.completions.create(
+            model=model, messages=fmt, stream=True
+        )
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
 
     async def embed(self, text: str) -> list[float]:
         from src.core.actions.embedding_cache import get as cache_get, set as cache_set

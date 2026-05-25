@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import math
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 
@@ -132,6 +133,32 @@ async def _run_decay_and_validation(owner_id: int) -> tuple[int, int]:
                         elif new_conf < mem.confidence * 0.7:  # значительно затух
                             mem.confidence = new_conf
                             decayed_count += 1
+
+                # --- Time-based confidence decay (Feature 2) ---
+                # Facts that haven't been recalled slowly lose confidence
+                now_aware = datetime.now(timezone.utc)
+                ref_date = mem.last_used_at or mem.created_at
+                if ref_date is not None:
+                    days_since_use = (now_aware - ref_date).total_seconds() / 86400
+                else:
+                    days_since_use = 0
+
+                if days_since_use > 7:
+                    time_decay = 0.95**days_since_use  # 0.95^7 ≈ 0.70 after a week
+                    mem.confidence = min(
+                        mem.confidence or 0.5,
+                        (mem.confidence or 0.5) * time_decay,
+                    )
+
+                # --- Tier promotion/demotion (Feature 3) ---
+                if mem.use_count and mem.use_count >= 10:
+                    if mem.memory_tier == 1:
+                        mem.memory_tier = 2  # promote to medium-term
+                    elif mem.memory_tier == 2 and mem.use_count >= 30:
+                        mem.memory_tier = 3  # promote to long-term
+                elif mem.use_count is None or mem.use_count == 0:
+                    if days_since_use > 30 and (mem.memory_tier or 1) > 0:
+                        mem.memory_tier = (mem.memory_tier or 1) - 1  # demote
 
                 await session.flush()
 

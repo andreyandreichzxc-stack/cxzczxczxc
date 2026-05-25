@@ -13,6 +13,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
 from src.bot.handlers.rate_limiter import check_rate_limit
+from src.bot.pending_questions import get_pending, has_pending
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.services.chat_actions import (
     catchup_action,
@@ -24,6 +25,7 @@ from src.core.services.chat_actions import (
 from src.core.contacts.chat_service import load_chat
 from src.core.memory.memory_extractor import extract_and_save_memories
 from src.core.memory.smart_memory import smart_extract_after_sync
+from src.core.contacts.contact_memory_digest import get_contact_digest
 from src.core.contacts.contact_resolver import ContactCandidate, resolve
 from src.db.repo import (
     add_watched_peer,
@@ -519,6 +521,32 @@ async def cb_sync_opt(callback: CallbackQuery, userbot_manager: UserbotManager) 
     await callback.answer()
 
 
+async def _estimate_dialogs_count(
+    client,
+    *,
+    private: bool = True,
+    groups: bool = False,
+    archived: bool = False,
+) -> int:
+    """Быстро подсчитывает количество диалогов для оценки времени синхронизации."""
+    from telethon.tl.types import User as TlUser
+
+    count = 0
+    try:
+        for archived_pass in [False, True] if archived else [False]:
+            async for dialog in client.iter_dialogs(limit=500, archived=archived_pass):
+                entity = dialog.entity
+                is_user = isinstance(entity, TlUser)
+                if is_user and not private:
+                    continue
+                if not is_user and not groups:
+                    continue
+                count += 1
+    except Exception:
+        return 0
+    return count
+
+
 @router.callback_query(F.data.startswith("sync:start:"))
 async def cb_sync_start(
     callback: CallbackQuery, userbot_manager: UserbotManager
@@ -555,10 +583,21 @@ async def cb_sync_start(
     if not progress_msg:
         return
 
-    await progress_msg.edit_text("🔄 Синхронизация запущена...")
-
     from src.userbot.dialogs import prefetch_recent_messages, sync_dialogs_with_options
     from src.db.repo import get_or_create_user
+
+    # ─── Оценка времени синхронизации ───
+    dialogs_estimate = await _estimate_dialogs_count(
+        client, private=private, groups=groups, archived=archived
+    )
+    if dialogs_estimate > 0:
+        await progress_msg.edit_text(
+            f"⏳ Синхронизация ~{dialogs_estimate} диалогов. "
+            "Это займёт 2-5 минут. Я покажу прогресс."
+        )
+        await asyncio.sleep(1)
+
+    await progress_msg.edit_text("🔄 Синхронизация запущена...")
 
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
@@ -617,6 +656,18 @@ async def cb_sync_start(
             f"  📥 Загружено сообщений: {stats['messages']}"
             f"{'  🗑 Удалено устаревших' if stats.get('removed') else ''}"
         )
+
+        # ── Check pending questions (Feature 1) ──
+        owner_telegram_id = callback.from_user.id
+        if await has_pending(owner_telegram_id):
+            pending = await get_pending(owner_telegram_id)
+            if pending:
+                numbered = [f"{i + 1}. {q}" for i, q in enumerate(pending)]
+                await progress_msg.answer(
+                    "🤔 Пока синхронизировались, у меня появились вопросы:\n\n"
+                    + "\n".join(numbered)
+                    + "\n\nОтветь на них, когда будет удобно. Я запомню.",
+                )
 
         # Предложение извлечь память (smart memory)
         await _offer_smart_memory_extraction(progress_msg, owner, private)
@@ -910,7 +961,6 @@ async def cb_smart_memories(
         return
 
     contact_ids = [c.peer_id for c in targets]
-    contact_names = {c.peer_id: c.display_name for c in targets}
 
     # --- Прогресс: поддерживаем массив статусов ---
     statuses: list[dict] = [
@@ -976,22 +1026,39 @@ async def cb_smart_memories(
     # Финальный результат
     total_facts = result["owner_facts"] + result["contact_facts"]
     skipped = result["skipped_stale"]
+    recent_facts: list[str] = result.get("recent_facts", [])
 
-    summary_parts = []
-    if result["owner_facts"]:
-        summary_parts.append(f"{result['owner_facts']} о себе")
-    if result["contact_facts"]:
-        summary_parts.append(f"{result['contact_facts']} о контактах")
-    summary = ", ".join(summary_parts) if summary_parts else "0"
+    # ── Conversational output (Feature 2) ──
+    if total_facts == 0:
+        await progress_msg.edit_text(
+            "Я посмотрел диалоги, но пока не заметил ничего такого, "
+            "что стоило бы запомнить. Наверное, вы ещё не так много общались.\n\n"
+            "Как начнётся активная переписка — я сразу всё подхвачу! 😊"
+        )
+    else:
+        lines = ["Так, посмотрел диалоги. Вот что я заметил:\n"]
+        if recent_facts:
+            # Interleave fun conversational wrapper with facts
+            for fact in recent_facts[:8]:
+                # Format: capitalise first letter, add Russian-style conversational tone
+                fact_clean = fact.strip().rstrip(".,;!")
+                # Heuristic: if fact starts with verb/conjunction, format as observation
+                if fact_clean and not fact_clean[0].isupper():
+                    fact_clean = fact_clean[0].upper() + fact_clean[1:]
+                lines.append(f"• {fact_clean}.")
+        else:
+            lines.append(
+                f"(Только что запомнил {total_facts} фактов. Расскажу подробнее, когда спросишь.)"
+            )
 
-    await progress_msg.edit_text(
-        f"✅ <b>Анализ завершён!</b>\n\n"
-        f"🧩 Всего фактов: <b>{total_facts}</b>\n"
-        f"  {summary}\n"
-        f"⏭ Пропущено (даты/дубли): <b>{skipped}</b>\n"
-        f"👥 Проанализировано: <b>{len(targets)}</b> контактов\n\n"
-        f"Теперь я лучше понимаю тебя и твои отношения с людьми 🤝"
-    )
+        skipped_note = ""
+        if skipped > 0:
+            skipped_note = f"\nПропустил {skipped} фактов — даты были слишком старые или это были повторы."
+
+        lines.append(
+            f"\nПохоже на правду? Я уже сохранил ({total_facts} фактов), но если что — поправь.{skipped_note}"
+        )
+        await progress_msg.edit_text("\n".join(lines))
 
     await callback.answer()
 
@@ -1138,10 +1205,43 @@ async def cb_profile(callback: CallbackQuery, userbot_manager: UserbotManager) -
     )
 
     contact_name = contact.display_name if contact else str(peer_id)
+
+    # Build profile text with digest
+    lines = [f"👤 <b>{contact_name}</b>"]
+
+    try:
+        digest = await get_contact_digest(callback.from_user.id, peer_id)
+        if digest.get("style"):
+            archetype = digest["style"].get("archetype")
+            if archetype:
+                lines.append(f"\n🎭 Стиль: {archetype}")
+        if digest.get("promises"):
+            lines.append("\n📋 Обещания:")
+            for p in digest["promises"][:2]:
+                text_short = p.get("text", "")[:80]
+                deadline = p.get("deadline", "")
+                if deadline:
+                    lines.append(f"  • {text_short} ({deadline})")
+                else:
+                    lines.append(f"  • {text_short}")
+        if digest.get("risks"):
+            for r in digest["risks"]:
+                detail = r.get("detail", "")
+                if detail:
+                    lines.append(f"\n⚠️ {detail}")
+        if digest.get("facts"):
+            lines.append("\n🧠 Факты:")
+            for f in digest["facts"][:3]:
+                fact_text = f.get("fact", "")[:100]
+                if fact_text:
+                    lines.append(f"  • {fact_text}")
+    except Exception:
+        logger.debug("Failed to load contact digest for peer %d", peer_id, exc_info=True)
+
+    lines.append(f"\n💡 Подробнее: /profile {contact_name}")
+
     if callback.message:
-        await callback.message.answer(
-            f"👤 Используй /profile {contact_name} для просмотра профиля"
-        )
+        await callback.message.answer("\n".join(lines))
     else:
         await callback.answer("Сообщение недоступно.", show_alert=True)
 

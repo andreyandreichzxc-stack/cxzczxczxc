@@ -1,19 +1,23 @@
 """search_contexts tool — registered via @tool decorator.
 
-Wraps ``src.core.memory.context_files.search_in_contexts`` and
-``list_context_files`` as a tool that the LLM can invoke to search
+Wraps ``src.core.memory.context_files`` as a tool that the LLM can invoke to search
 the user's context notes (owner profile, contact profiles, arbitrary
 knowledge files stored under ``data/contexts/``).
+
+Supports hybrid search: FTS5 (keywords) + Qdrant (semantic) via RRF.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
 from src.core.actions.tool_registry import tool
-from src.core.memory.context_files import list_context_files, search_in_contexts
+from src.core.memory.context_files import (
+    list_context_files,
+    search_contexts_hybrid,
+    search_in_contexts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +28,8 @@ logger = logging.getLogger(__name__)
         "Поиск по контекстным заметкам (о владельце и контактах). "
         "Используй когда нужно найти информацию о принципах, предпочтениях, "
         "фактах о пользователе или его контактах. "
-        "Поддерживает action='search' (поиск по запросу) и action='list' (список всех ключей)."
+        "Гибридный поиск: семантический (по смыслу) + ключевые слова. "
+        "Поддерживает action='search' и action='list'."
     ),
     category="search",
     risk="low",
@@ -42,13 +47,13 @@ async def _search_contexts_tool(
 ) -> dict[str, Any]:
     """Search or list context files.
 
-    ``action="search"`` — full-text search across all .md context files
-    with ranked results and highlighted snippets.
+    ``action="search"`` — hybrid search (FTS5 keywords + Qdrant semantic)
+    across all .md context files with ranked results and highlighted snippets.
 
     ``action="list"`` — return all context file keys (without .md extension).
 
     Returns:
-        For ``search``: ``{"ok": True, "results": [{"key": ..., "snippet": ..., "rank": ...}], "count": N}``
+        For ``search``: ``{"ok": True, "results": [{"key": ..., "snippet": ..., "score": ...}], "count": N}``
         For ``list``: ``{"ok": True, "keys": [...], "count": N}``
     """
     if action == "list":
@@ -59,7 +64,14 @@ async def _search_contexts_tool(
         if not query.strip():
             return {"error": "query is required for action='search'"}
         try:
-            results = await asyncio.to_thread(search_in_contexts, query, limit)
+            # Try hybrid search (FTS5 + semantic) if provider is available
+            provider = kwargs.get("provider")
+            if provider:
+                results = await search_contexts_hybrid(
+                    query, provider=provider, limit=limit
+                )
+            else:
+                results = search_in_contexts(query, limit=limit)
             return {"ok": True, "results": results, "count": len(results)}
         except Exception:
             logger.exception("search_contexts tool failed")

@@ -1,8 +1,19 @@
 """SQLAlchemy ORM models — backward-compatible re-exports."""
 
 from src.db.models._base import Base, User
-from src.db.models._auth import UserSettings, TelegramSession, ApiKey, LlmKeySlot
-from src.db.models._contacts import Contact, ContactProfile, ConversationState
+from src.db.models._auth import (
+    UserSettings,
+    TelegramSession,
+    ApiKey,
+    LlmKeySlot,
+    PendingQuestion,
+)
+from src.db.models._contacts import (
+    AllowedContact,
+    Contact,
+    ContactProfile,
+    ConversationState,
+)
 from src.db.models._messaging import (
     Message,
     AutoReplyLog,
@@ -13,6 +24,7 @@ from src.db.models._messaging import (
     Commitment,
     IndexJob,
     Folder,
+    ConversationSummary,
 )
 from src.db.models._memory import (
     Memory,
@@ -37,12 +49,14 @@ from src.db.models._learning import (
 )
 
 __all__ = [
+    "AllowedContact",
     "Base",
     "User",
     "UserSettings",
     "TelegramSession",
     "ApiKey",
     "LlmKeySlot",
+    "PendingQuestion",
     "Contact",
     "ContactProfile",
     "ConversationState",
@@ -55,6 +69,7 @@ __all__ = [
     "Commitment",
     "IndexJob",
     "Folder",
+    "ConversationSummary",
     "Memory",
     "MemoryLink",
     "MemoryCluster",

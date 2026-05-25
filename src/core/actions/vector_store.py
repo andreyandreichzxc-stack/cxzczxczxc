@@ -469,13 +469,46 @@ class VectorStore:
             )
 
     async def check_health_and_recover(self) -> bool:
-        """Проверяет целостность Qdrant и восстанавливает при повреждении.
-        Возвращает True если здоров, False если восстановился."""
+        """Проверяет целостность Qdrant и восстанавливается при повреждении.
+        Возвращает True если здоров, False если восстановился.
+
+        WARNING: Recovery destroys ALL vector data. Only triggered for
+        persistent corruption (not transient failures).
+        """
         try:
             self._client.get_collections()
             return True
         except Exception:
-            logger.exception("Qdrant health check failed — attempting recovery")
+            logger.exception("Qdrant health check failed")
+
+            # Try a simple reconnect first (transient failure?)
+            try:
+                qdrant_dir = settings.data_dir / "qdrant"
+                self._client.close()
+                self._client = QdrantClient(path=str(qdrant_dir))
+                self._client.get_collections()
+                logger.info("Qdrant reconnected successfully")
+                return True
+            except Exception:
+                logger.error("Qdrant reconnect failed — storage may be corrupted")
+
+            # CORRUPTION: only recovery path
+            # Notify owner before wiping
+            try:
+                from src.core.scheduling.notification_queue import notification_queue
+
+                await notification_queue.enqueue(
+                    topic="system",
+                    text=(
+                        "⚠️ Qdrant повреждён, векторный индекс сброшен. "
+                        "Семантический поиск временно недоступен. "
+                        "Запусти /index для восстановления."
+                    ),
+                    priority=1,
+                )
+            except Exception:
+                pass
+
             try:
                 import shutil
 

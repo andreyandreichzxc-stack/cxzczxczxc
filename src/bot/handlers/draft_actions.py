@@ -20,6 +20,7 @@ from src.bot.filters import OwnerOnly
 from src.bot.handlers.smart_keyboard import smart_post_action_keyboard
 from src.bot.states import DraftStates
 from src.core.contacts.send_guard import store_undo
+from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import get_or_create_user as _get_or_create_user
 from src.db.session import get_session
 from src.llm.router import build_provider
@@ -215,7 +216,7 @@ async def step_draft_edit(message: Message, state: FSMContext) -> None:
         await message.answer("✅ Отправлено! 🚀", reply_markup=after_kb)
     except Exception as e:
         await state.clear()
-        await message.answer(f"❌ Ошибка отправки 😞: {e}")
+        await message.answer(f"❌ Ошибка отправки 😞: {sanitize_html(str(e))}")
     await state.clear()
 
 

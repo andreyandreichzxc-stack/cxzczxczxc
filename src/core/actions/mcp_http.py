@@ -14,8 +14,10 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
+import socket
 from typing import Any
 from urllib.parse import urlparse
 
@@ -44,6 +46,7 @@ _SSRF_BLOCKED_HOSTS = frozenset(
         "0.0.0.0",
         "::1",
         "[::1]",
+        "169.254.169.254",
     }
 )
 
@@ -212,11 +215,15 @@ async def _do_request(
 def _check_ssrf(url: str) -> dict[str, Any] | None:
     """Return an error dict if *url* targets a blocked host, else ``None``.
 
-    Blocks:
+    Resolves the hostname to an IP first (prevents DNS rebinding attacks),
+    then checks against blocklists for:
     - ``localhost`` and all variants (``127.0.0.1``, ``0.0.0.0``, ``::1``).
     - Private / link-local / reserved IP ranges (``10.x.x.x``,
       ``172.16-31.x.x``, ``192.168.x.x``, ``169.254.x.x``,
       ``127.x.x.x``, ``255.255.255.255``).
+    - IPv6 loopback (``::1``), link-local (``fe80::/10``), ULA (``fc00::/7``).
+    - AWS metadata endpoint (``169.254.169.254``).
+    - IPv4-mapped IPv6 addresses that resolve to private IPv4.
     """
     try:
         parsed = urlparse(url)
@@ -234,34 +241,65 @@ def _check_ssrf(url: str) -> dict[str, Any] | None:
             )
         }
 
-    # 127.x.x.x range (common loopback)
-    if hostname.startswith("127.") or hostname == "255.255.255.255":
-        return {"error": f"SSRF protection: requests to {hostname!r} are not allowed."}
+    # Resolve DNS first — prevents rebinding attacks
+    try:
+        ip = socket.gethostbyname(hostname)
+    except socket.gaierror:
+        return {"error": f"SSRF protection: cannot resolve hostname {hostname!r}."}
 
-    # Private IPv4 ranges
-    parts = hostname.split(".")
-    if len(parts) == 4 and all(p.isdigit() for p in parts):
-        first = int(parts[0])
-        second = int(parts[1])
-        # 10.0.0.0/8
-        if first == 10:
+    # Check resolved IP against blocklist
+    if ip in _SSRF_BLOCKED_HOSTS:
+        return {
+            "error": (
+                f"SSRF protection: requests to {hostname!r} (resolved to {ip!r}) "
+                f"are not allowed."
+            )
+        }
+
+    # 127.x.x.x range (common loopback)
+    if ip.startswith("127.") or ip == "255.255.255.255":
+        return {
+            "error": (
+                f"SSRF protection: requests to {hostname!r} (resolved to {ip!r}) "
+                f"are not allowed."
+            )
+        }
+
+    # Use ipaddress module for thorough checking
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return {"error": f"SSRF protection: invalid IP {ip!r} for {hostname!r}."}
+
+    if addr.version == 4:
+        if addr.is_private or addr.is_loopback or addr.is_link_local:
             return {
-                "error": f"SSRF protection: private IP range 10.x.x.x is not allowed."
+                "error": (
+                    f"SSRF protection: requests to {hostname!r} "
+                    f"(resolved to private IP {ip!r}) are not allowed."
+                )
             }
-        # 172.16.0.0/12
-        if first == 172 and 16 <= second <= 31:
+    elif addr.version == 6:
+        if addr.is_private or addr.is_loopback or addr.is_link_local:
             return {
-                "error": f"SSRF protection: private IP range 172.16-31.x.x is not allowed."
+                "error": (
+                    f"SSRF protection: requests to {hostname!r} "
+                    f"(resolved to private IPv6 {ip!r}) are not allowed."
+                )
             }
-        # 192.168.0.0/16
-        if first == 192 and second == 168:
-            return {
-                "error": f"SSRF protection: private IP range 192.168.x.x is not allowed."
-            }
-        # 169.254.0.0/16 (link-local)
-        if first == 169 and second == 254:
-            return {
-                "error": f"SSRF protection: link-local IP range 169.254.x.x is not allowed."
-            }
+        # Check IPv4-mapped IPv6 addresses
+        try:
+            v6 = ipaddress.IPv6Address(ip)
+            if v6.ipv4_mapped:
+                mapped = v6.ipv4_mapped
+                if mapped.is_private or mapped.is_loopback:
+                    return {
+                        "error": (
+                            f"SSRF protection: requests to {hostname!r} "
+                            f"(resolved to mapped IPv4 {mapped}) are not allowed."
+                        )
+                    }
+        except (ValueError, AttributeError):
+            pass
 
     return None

@@ -1,7 +1,37 @@
-FROM python:3.12-slim
+# ============================================================================
+# Stage 1: Builder — install deps + pip packages
+# ============================================================================
+FROM python:3.12-slim AS builder
 
-# ffmpeg нужен для голосовых/audio (faster-whisper умеет webm/ogg через ffmpeg)
-# libgomp1 — рантайм OpenMP для ctranslate2 (внутри faster-whisper)
+# Build dependencies (needed for ctranslate2, torch, etc.)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       gcc g++ make \
+       ffmpeg \
+       libgomp1 \
+       ca-certificates \
+       tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# Install Python packages into /venv
+COPY requirements.txt ./
+RUN python -m venv /venv \
+    && /venv/bin/pip install --upgrade pip \
+    && /venv/bin/pip install -r requirements.txt
+
+# ============================================================================
+# Stage 2: Runner — minimal production image
+# ============================================================================
+FROM python:3.12-slim AS runner
+
+# Runtime only — no build tools
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ffmpeg \
@@ -15,20 +45,21 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     XDG_CACHE_HOME=/app/data/cache \
-    HF_HOME=/app/data/cache/huggingface
+    HF_HOME=/app/data/cache/huggingface \
+    PATH="/venv/bin:$PATH"
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --upgrade pip \
-    && pip install -r requirements.txt
+# Copy virtual env from builder (all pip packages)
+COPY --from=builder /venv /venv
 
+# Copy application code
 COPY src/ ./src/
 COPY main.py healthcheck.py ./
 COPY alembic.ini .
 COPY alembic/ alembic/
 
-# data — монтируется томом снаружи (БД, сессии, qdrant, media, кэш моделей)
+# data — mounted as volume (DB, sessions, qdrant, media, model cache)
 RUN mkdir -p /app/data \
     && useradd -m appuser \
     && chown -R appuser:appuser /app

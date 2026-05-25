@@ -21,8 +21,6 @@ from src.config import LLMDefaults
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.timeutil import HM_RE, TZ_PRESETS, is_valid_tz, tz_short
 from src.core.intelligence.adaptive_persona import (
-    VALID_LEVELS,
-    VALID_TONES,
     reset_persona_to_snapshot,
 )
 from src.db.repo import (
@@ -257,7 +255,7 @@ async def cmd_settings(message: Message, command: CommandObject) -> None:
                 f"🔍 Результаты по «{query}»:\n\n" + "\n".join(results[:15])
             )
         else:
-            await message.answer(f"❌ Ничего не найдено по «{query}».")
+            await message.answer(f"❌ Ничего не найдено по «{sanitize_html(query)}».")
         return
 
     text, kb = await _render_menu(message.from_user.id)

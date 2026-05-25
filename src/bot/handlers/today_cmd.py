@@ -23,6 +23,7 @@ from src.db.repo import (
     list_memory_candidates,
 )
 from src.core.contacts.reply_radar import collect_reply_radar, format_radar, RadarItem
+from src.core.contacts.inbox_priority import rank_inbox, format_inbox
 from src.core.memory.memory_health import calculate_health_score, format_health_compact
 from src.core.memory.temporal_layers import utc_naive, utcnow_naive
 
@@ -86,7 +87,26 @@ async def cmd_today(message: Message):
         # Streak
         streak = await _daily_reply_streak(telegram_id)
 
+    # Inbox Priority
+    inbox = await rank_inbox(telegram_id, limit=5)
+
     lines = ["<b>📡 Пульт управления</b>", ""]
+
+    # Inbox Priority (new ranking)
+    if inbox:
+        lines.append(f"📥 <b>Приоритетные входящие ({len(inbox)}):</b>")
+        for item in inbox:
+            icon = item["urgency"].split()[0]
+            lines.append(
+                f"{icon} <b>{sanitize_html(item['peer_name'])}</b> — "
+                f"{item['hours_unreplied']:.0f}ч [{item['priority_score']}]"
+            )
+            if item["reasons"]:
+                lines.append(f"   <i>{sanitize_html(', '.join(item['reasons']))}</i>")
+        lines.append("")
+    else:
+        lines.append("📥 <b>Входящие пусты</b> — не на что отвечать!")
+        lines.append("")
 
     # Radar
     if radar:
@@ -132,7 +152,7 @@ async def cmd_today(message: Message):
         lines.append(streak)
     lines.append("")
     lines.append(
-        "<i>/radar — только ответы | /warnings — конфликты | /habits — привычки</i>"
+        "<i>/inbox — приоритетные | /radar — ответы | /warnings — конфликты | /habits — привычки</i>"
     )
 
     text = "\n".join(lines)
@@ -161,6 +181,14 @@ async def cmd_radar(message: Message):
                 f"<b>{sanitize_html(item.contact_name)}</b> — {item.score} баллов",
                 reply_markup=_radar_keyboard(item),
             )
+
+
+@router.message(Command("inbox"))
+async def cmd_inbox(message: Message):
+    """Приоритизированные входящие: здоровье контакта + дедлайны + обязательства."""
+    ranked = await rank_inbox(message.from_user.id, limit=10)
+    text = await format_inbox(ranked)
+    await message.answer(text)
 
 
 # Callback: radar:why

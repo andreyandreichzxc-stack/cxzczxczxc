@@ -141,6 +141,21 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
         "Background saved %d facts for user %d", len(job.facts or []), job.telegram_id
     )
 
+    # ── Invalidate contact memory digest ────────────────────────────
+    if job.contact_id is not None:
+        try:
+            from src.core.contacts.contact_memory_digest import (
+                invalidate_contact_digest,
+            )
+
+            await invalidate_contact_digest(job.contact_id)
+        except Exception:
+            logger.debug(
+                "Failed to invalidate digest for peer %d",
+                job.contact_id,
+                exc_info=True,
+            )
+
 
 async def _handle_extract(session, owner, job: MemoryJob) -> None:
     """Извлечь и сохранить факты из текста переписки (job_type='extract')."""

@@ -1,3 +1,4 @@
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -20,6 +21,12 @@ class LLMProvider(Protocol):
     async def chat(
         self, messages: list[ChatMessage], *, heavy: bool = False
     ) -> str: ...
+
+    async def chat_stream(
+        self, messages: list[ChatMessage], *, heavy: bool = False
+    ) -> AsyncGenerator[str, None]:
+        """Stream tokens from chat completion. Raises NotImplementedError if unsupported."""
+        raise NotImplementedError("chat_stream not supported by this provider")
 
     async def embed(self, text: str) -> list[float]: ...
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -16,8 +17,8 @@ logger = logging.getLogger(__name__)
 MAX_CACHE_SIZE = 2000
 """Максимальное количество записей в кэше. При превышении удаляется самая старая запись."""
 
-_cache: dict[str, tuple[float, Any]] = {}
-"""Кэш: ключ -> (expires_at_monotonic, value)"""
+_cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+"""Кэш: ключ -> (expires_at_monotonic, value). OrderedDict для O(1) eviction."""
 
 _cache_lock = asyncio.Lock()
 """Async lock for _cache — prevents TOCTOU races in async code."""
@@ -44,10 +45,9 @@ async def put(key: str, value: Any, ttl: int = 30) -> None:
     """Сохранить значение в кэш с TTL в секундах (по умолчанию 30)."""
     async with _cache_lock:
         if len(_cache) >= MAX_CACHE_SIZE:
-            # Эвикция самой старой записи (с минимальным expires_at)
-            oldest_key = min(_cache, key=lambda k: _cache[k][0])
-            _cache.pop(oldest_key, None)
-            logger.debug("Cache evicted oldest: %s", oldest_key)
+            # Evict oldest entry (first in OrderedDict) — O(1)
+            _cache.popitem(last=False)
+            logger.debug("Cache evicted oldest (OrderedDict popitem)")
 
         expires_at = time.monotonic() + ttl
         _cache[key] = (expires_at, value)

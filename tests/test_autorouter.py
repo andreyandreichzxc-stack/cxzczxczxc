@@ -128,7 +128,8 @@ class TestMakePlan:
     @pytest.mark.asyncio
     async def test_make_plan_returns_router_plan(self):
         mock_session = AsyncMock()
-        mock_owner = MagicMock()
+        mock_session.execute.return_value = MagicMock()
+        mock_owner = AsyncMock()
         mock_owner.telegram_id = 123456789
 
         with (
@@ -139,11 +140,19 @@ class TestMakePlan:
                 "src.core.intelligence.smart_autorouter.get_or_create_user",
                 return_value=mock_owner,
             ),
+            patch(
+                "src.core.memory.memory_recall.recall",
+            ) as mock_recall,
+            patch(
+                "src.core.memory.memory_recall.format_recall_for_prompt",
+                return_value="",
+            ),
         ):
             mock_cm = AsyncMock()
             mock_cm.__aenter__.return_value = mock_session
             mock_cm.__aexit__.return_value = None
             mock_get_session.return_value = mock_cm
+            mock_recall.return_value = MagicMock(facts=[])
 
             plan = await make_plan("найди договор", 123456789)
             assert isinstance(plan, RouterPlan)

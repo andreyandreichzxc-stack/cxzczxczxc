@@ -13,7 +13,7 @@ Both actions rely on an active ``TelegramClient`` obtained from the
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from telethon import TelegramClient
@@ -75,7 +75,12 @@ async def mcp_telegram(
     """
     # ── Resolve runtime dependencies ──────────────────────────────────
     userbot_manager = kwargs.get("userbot_manager")
-    telegram_id: int = kwargs.get("user", 0)
+    _user_val = kwargs.get("user", 0)
+    # user may be an int (telegram_id) or a User ORM object — normalise
+    if hasattr(_user_val, "telegram_id"):
+        telegram_id: int = _user_val.telegram_id
+    else:
+        telegram_id = int(_user_val)
 
     if userbot_manager is None:
         return {"error": "userbot_manager not available in kwargs"}

@@ -135,23 +135,64 @@ async def _build_reply_text(
         provider = await build_provider(session, owner)
         contact = await get_contact(session, owner, peer_id)
 
-        # Загрузка фактов памяти через единый сервис MemoryRecallService
+        # ── Memory context: try contact digest first (fast precomputed) ──
         relevant_facts = []
+        memory_context = ""
+        digest_used = False
         try:
-            result = await recall(
-                owner_telegram_id,
-                contact_id=peer_id,
-                query=incoming_text[:200],
-                limit=8,
-                include_self=True,
-                include_pinned=True,
-                include_tasks=False,
+            from src.core.contacts.contact_memory_digest import (
+                get_contact_digest,
             )
-            relevant_facts = [(rf.confidence, rf.fact) for rf in result.facts]
-            relevant_facts.sort(key=lambda x: x[0], reverse=True)
-            memory_context = format_recall_for_prompt(result)
+
+            digest = await get_contact_digest(owner_telegram_id, peer_id)
+            if digest.get("facts"):
+                # Use digest facts — much faster than full recall
+                relevant_facts = [(f["confidence"], f["fact"]) for f in digest["facts"]]
+                relevant_facts.sort(key=lambda x: x[0], reverse=True)
+                memory_context = (
+                    "<recall_context>\n"
+                    + "\n".join(f"- {f['fact']}" for f in digest["facts"][:5])
+                    + "\n</recall_context>"
+                )
+                digest_used = True
+            else:
+                raise ValueError("empty digest facts")
         except Exception:
-            logger.warning("recall failed, skipping memory context")
+            logger.debug(
+                "Digest unavailable for peer %d, falling back to recall",
+                peer_id,
+            )
+
+        # Fallback: full recall if digest didn't provide facts
+        if not digest_used:
+            try:
+                result = await recall(
+                    owner_telegram_id,
+                    contact_id=peer_id,
+                    query=incoming_text[:200],
+                    limit=8,
+                    include_self=True,
+                    include_pinned=True,
+                    include_tasks=False,
+                    mode="light",
+                )
+                # Safety net: if light mode returned too few facts, retry with normal
+                if len(result.facts) < 3:
+                    result = await recall(
+                        owner_telegram_id,
+                        contact_id=peer_id,
+                        query=incoming_text[:200],
+                        limit=8,
+                        include_self=True,
+                        include_pinned=True,
+                        include_tasks=False,
+                        mode="normal",
+                    )
+                relevant_facts = [(rf.confidence, rf.fact) for rf in result.facts]
+                relevant_facts.sort(key=lambda x: x[0], reverse=True)
+                memory_context = format_recall_for_prompt(result)
+            except Exception:
+                logger.warning("recall failed, skipping memory context")
 
         # Contact Archetype — вычисляем если ещё не задан
         if contact and contact.archetype is None:
@@ -299,6 +340,22 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
             is_bot = bool(getattr(sender, "bot", False))
             is_private = bool(event.is_private)
 
+            # ── Pairing guard: unknown contacts must be approved ──────────
+            sender_id = sender.id
+            if sender_id > 0:  # skip non-real contacts (0, negative)
+                from src.core.security.pairing import pairing
+
+                if not await pairing.is_allowed(sender_id):
+                    if pairing.is_pending(sender_id):
+                        await event.reply("⏳ Ожидаю подтверждения от владельца.")
+                    else:
+                        code = pairing.start_pairing(sender_id)
+                        await event.reply(
+                            f"🔒 Я тебя не знаю. Твой код подтверждения: **{code}**\n"
+                            f"Передай его владельцу для доступа."
+                        )
+                    return  # Skip all auto-reply logic
+
             async with get_session() as session:
                 owner: User = await get_or_create_user(session, owner_telegram_id)
                 if owner.settings is None or not owner.settings.auto_reply_enabled:
@@ -385,6 +442,14 @@ async def _make_handler(client: TelegramClient, owner_telegram_id: int):
                 )
                 if not reply:
                     return
+                # Humanizer для smart-ответов (чтобы не звучать как AI)
+                try:
+                    from src.core.humanizer.humanizer import humanize_response
+
+                    reply = humanize_response(reply or "")
+                except Exception:
+                    pass
+
             else:  # static (default)
                 reply = static_text.strip()
                 if not reply:

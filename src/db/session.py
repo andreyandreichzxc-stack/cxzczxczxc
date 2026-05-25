@@ -2,10 +2,12 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from src.config import settings
+from src.config import PROJECT_ROOT, settings
 from src.db.models import Base
 
 logger = logging.getLogger(__name__)
@@ -28,10 +30,12 @@ def _set_sqlite_pragmas(dbapi_connection, connection_record):
     cursor.close()
 
 
-# Alembic is configured for schema migrations (alembic/).
-# Future model changes should be captured via:
+# Alembic is the CANONICAL schema migration path.
+# Future model changes MUST be captured via:
 #   alembic revision --autogenerate -m "description"
-# The ALTER TABLE blocks below handle legacy migrations for existing DBs.
+#   alembic upgrade head
+# Base.metadata.create_all is only used as a one-time bootstrap fallback
+# when the alembic_version table is missing (fresh DB / direct run of main()).
 
 # SQLite FTS5: virtual table + триггеры синхронизации с messages.
 # Хранит rowid = messages.id.
@@ -148,6 +152,27 @@ async def _migrate_related_memory_to_links(conn) -> None:
 
 
 async def init_db() -> None:
+    """Initialise database: PRAGMAs, schema, FTS5 tables, data migrations.
+
+    Schema management policy
+    ------------------------
+    Alembic is the **canonical** migration path.  ``run()`` in ``main.py``
+    runs ``alembic upgrade head`` synchronously before the event loop starts,
+    so by the time this function executes the ``alembic_version`` table exists
+    and all migrations have been applied.
+
+    ``Base.metadata.create_all`` is only used as a **one-time bootstrap
+    fallback** when the ``alembic_version`` table is missing (fresh database,
+    or ``main()`` called directly without the ``run()`` wrapper).  In that
+    case the head revision is stamped immediately so subsequent runs can use
+    Alembic.
+
+    This avoids the "belt and suspenders" anti-pattern where both Alembic
+    *and* ``create_all`` run on every startup, which can silently hide
+    missing migrations (developer adds a column to an ORM model but forgets
+    ``alembic revision --autogenerate`` → ``create_all`` silently creates it,
+    masking the desync).
+    """
     settings.data_dir  # триггерит создание директории
     async with engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL"))
@@ -160,11 +185,50 @@ async def init_db() -> None:
             text("PRAGMA wal_autocheckpoint=1000")
         )  # checkpoint every 1000 pages
 
-        # Schema bootstrap: ORM models → create_all.
-        # Alembic (alembic upgrade head) is the canonical migration path and
-        # should be run as a pre-start step before the event loop starts.
-        # See "Migration Workflow" in alembic/README or run() in main.py.
-        await conn.run_sync(Base.metadata.create_all)
+        # --- Schema: Alembic-canonical, create_all as bootstrap fallback ---
+        result = await conn.execute(
+            text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='alembic_version'"
+            )
+        )
+        alembic_applied = result.first() is not None
+
+        if alembic_applied:
+            logger.debug(
+                "alembic_version table found — Alembic is canonical; "
+                "skipping Base.metadata.create_all"
+            )
+        else:
+            logger.warning(
+                "alembic_version table NOT found — bootstrapping schema via "
+                "Base.metadata.create_all. This should only happen on a "
+                "fresh database or if main() is called directly. Alembic "
+                "remains the canonical migration path going forward."
+            )
+            await conn.run_sync(Base.metadata.create_all)
+
+            # Stamp the head revision so Alembic knows all migrations are
+            # already applied (create_all built the current ORM schema).
+            _alembic_cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
+            _script = ScriptDirectory.from_config(_alembic_cfg)
+            head_rev = _script.get_current_head()
+            await conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS alembic_version "
+                    "(version_num VARCHAR(32) NOT NULL)"
+                )
+            )
+            await conn.execute(
+                text(
+                    "INSERT OR IGNORE INTO alembic_version (version_num) VALUES (:rev)"
+                ),
+                {"rev": head_rev},
+            )
+            logger.info(
+                "Stamped alembic head revision %s after create_all bootstrap",
+                head_rev,
+            )
 
         # FTS5 virtual tables are not tracked by Alembic — raw SQL.
         for stmt in _FTS_SETUP:

@@ -7,6 +7,7 @@ from src.core.memory.memory_queue import start_worker, stop_worker
 from src.core.scheduling.notification_queue import notification_queue
 from src.core.infra.task_manager import task_manager, stop_ff_tasks
 from src.core.infra.update_notifier import check_and_notify_update
+from src.config import PROJECT_ROOT
 from src.db.session import init_db
 from src.userbot.manager import UserbotManager
 
@@ -23,6 +24,7 @@ def _register_background_tasks() -> None:
     import src.core.scheduling.news  # noqa: F401
     import src.core.infra.auto_sync  # noqa: F401
     import src.core.memory.memory_checker  # noqa: F401
+    import src.core.memory.memory_consolidator  # noqa: F401
     import src.core.scheduling.smart_digest  # noqa: F401
     import src.core.scheduling.proactive_briefing  # noqa: F401
     import src.core.scheduling.follow_up  # noqa: F401
@@ -38,6 +40,9 @@ def _register_background_tasks() -> None:
     import src.core.memory.memory_clusterer  # noqa: F401
     import src.core.intelligence.skills  # noqa: F401
     import src.core.intelligence.skills_curator  # noqa: F401
+    import src.core.intelligence.burnout_detector  # noqa: F401
+    import src.core.scheduling.dream_cycle  # noqa: F401
+    import src.core.scheduling.proactive_nudge  # noqa: F401
 
 
 async def main() -> None:
@@ -49,10 +54,35 @@ async def main() -> None:
 
     await init_db()
 
+    # --- Gating: check runtime dependencies ---
+    from src.core.infra.gating import gates
+    from src.core.infra.gating_checks import register_default_gates
+
+    register_default_gates()
+    gates.run_all()
+
+    # --- Context Engine: register pluggable providers ---
+    from src.core.context.engine import engine
+    from src.core.context.providers.memory_provider import MemoryProvider
+    from src.core.context.providers.vector_provider import VectorProvider
+    from src.core.context.providers.wiki_context_provider import WikiContextProvider
+    from src.core.context.providers.frozen_provider import frozen_provider
+
+    engine.register(MemoryProvider())
+    engine.register(VectorProvider())
+    engine.register(WikiContextProvider())
+    engine.register(frozen_provider)
+    logger.info("Context engine registered %d providers", len(engine.providers))
+
     from src.core.memory.context_files import index_contexts_to_fts, init_owner_context
 
     init_owner_context()
-    index_contexts_to_fts()
+    try:
+        count = index_contexts_to_fts()
+        if count:
+            logger.info("FTS5 context index: %d files", count)
+    except Exception:
+        logger.warning("FTS5 context indexing failed (non-critical)", exc_info=True)
 
     try:
         from src.core.infra.hooks import hooks
@@ -130,12 +160,15 @@ async def main() -> None:
 
 
 def run() -> None:
-    # Run Alembic migrations synchronously before the event loop starts.
-    # This avoids asyncio.run() nesting inside the existing event loop.
+    # --- Schema migrations (Alembic — CANONICAL) ---
+    # Run synchronously before the event loop starts.  This avoids
+    # asyncio.run() nesting inside the existing event loop.
+    # init_db() in session.py will detect the alembic_version table
+    # and skip its create_all fallback — see init_db() docstring.
     import alembic.command
     import alembic.config
 
-    _cfg = alembic.config.Config("alembic.ini")
+    _cfg = alembic.config.Config(str(PROJECT_ROOT / "alembic.ini"))
     alembic.command.upgrade(_cfg, "head")
 
     try:

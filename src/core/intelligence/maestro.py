@@ -9,6 +9,7 @@ import logging
 import re
 from typing import Any
 
+from src.config import settings
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.actions.vector_store import get_vector_store
 from src.core.intelligence.agent_orchestrator import (
@@ -26,7 +27,7 @@ from src.core.intelligence.guardrails import evaluate as guardrail_evaluate
 logger = logging.getLogger(__name__)
 
 # ── Максимальное число итераций в tool‑loop ──
-MAX_TOOL_ITERATIONS = 5
+MAX_TOOL_ITERATIONS = settings.max_tool_iterations
 
 # ── Глобальный оркестратор агентов ──
 # Один экземпляр на всё приложение: кеш, health-трекинг, таймауты.
@@ -194,6 +195,7 @@ async def process(
     self_profile: str | None = None,
     rag_enabled: bool = True,
     contact_id: int | None = None,
+    userbot_manager: Any | None = None,
 ) -> dict[str, Any]:
     """Главная точка входа. Maestro понимает пользователя и составляет план."""
     ctx_parts = []
@@ -286,6 +288,23 @@ async def process(
             except Exception:
                 logger.debug("Failed to load anti_ai setting", exc_info=True)
 
+        # Pre-load recent corrections for context injection
+        correction_context = ""
+        if owner_id is not None:
+            try:
+                from src.core.intelligence.correction_learner import (
+                    get_recent_corrections,
+                )
+
+                corrections = await get_recent_corrections(owner_id, limit=3)
+                if corrections:
+                    correction_context = "; ".join(
+                        f'"{c["original"][:80]}" → "{c["corrected"][:80]}"'
+                        for c in corrections
+                    )
+            except Exception:
+                logger.debug("Failed to load correction context", exc_info=True)
+
         ctx = AssemblyContext(
             target="maestro",
             user_id=owner_id or 0,
@@ -296,6 +315,7 @@ async def process(
             confirmed_rules=confirmed_rules,
             anti_ai=anti_ai,
             history_block=history_block or "",
+            correction_context=correction_context,
         )
         if owner_id is not None:
             try:
@@ -326,6 +346,22 @@ async def process(
                         _lines.append(f"[{_f.reason}] {_f.fact}")
                     ctx.frozen_snapshot = "\n".join(_lines)
                     frozen_snapshot_injected = True
+
+                    # Also update the frozen_provider so ContextEngine can serve it
+                    try:
+                        from src.core.context.providers.frozen_provider import (
+                            frozen_provider,
+                        )
+
+                        frozen_provider.set_frozen(
+                            owner_id,
+                            [
+                                {"fact": f"[{_f.reason}] {_f.fact}"}
+                                for _f in _recall_result.facts
+                            ],
+                        )
+                    except Exception:
+                        logger.debug("Failed to set frozen provider", exc_info=True)
             except Exception:
                 logger.debug("Frozen snapshot recall failed, skipping", exc_info=True)
 
@@ -403,6 +439,17 @@ async def process(
             "Если их недостаточно — используй инструмент recall_memory."
         )
     system += tools_section
+
+    # ── Inject skill documentation ──
+    from src.core.intelligence.skill_docs import list_skill_docs
+
+    skill_docs = list_skill_docs()
+    if skill_docs:
+        system += "\n\n## Доступные навыки\n"
+        for doc in skill_docs:
+            lines = doc["content"].split("\n")
+            purpose_line = lines[3] if len(lines) > 3 else ""
+            system += f"- **{doc['name']}**: {purpose_line}\n"
 
     # ── Tool‑calling loop ──
     messages = [
@@ -508,12 +555,32 @@ async def process(
                 }
 
             # Execute tool with runtime dependencies
+            # Open a DB session and resolve the User ORM for the duration
+            # of the tool call.  The session stays alive until the tool
+            # returns, then commits/rolls back automatically.
             runtime_kwargs: dict[str, Any] = {"provider": provider}
+            if userbot_manager is not None:
+                runtime_kwargs["userbot_manager"] = userbot_manager
+
             if owner_id is not None:
-                runtime_kwargs["user"] = owner_id
-            result = await tool_registry.execute(
-                tool_name, _confirmed=False, **gr.sanitized_params, **runtime_kwargs
-            )
+                async with get_session() as session:
+                    owner = await get_or_create_user(session, owner_id)
+                    runtime_kwargs["session"] = session
+                    runtime_kwargs["user"] = owner
+                    if userbot_manager is not None:
+                        client = userbot_manager.get_client(owner_id)
+                        if client is not None:
+                            runtime_kwargs["client"] = client
+                    result = await tool_registry.execute(
+                        tool_name,
+                        _confirmed=False,
+                        **gr.sanitized_params,
+                        **runtime_kwargs,
+                    )
+            else:
+                result = await tool_registry.execute(
+                    tool_name, _confirmed=False, **gr.sanitized_params, **runtime_kwargs
+                )
 
             # Feed result back to LLM
             result_str = json.dumps(result, ensure_ascii=False, default=str)
@@ -751,6 +818,7 @@ async def run_pipeline(
     self_profile: str | None = None,
     rag_enabled: bool = True,
     contact_id: int | None = None,
+    userbot_manager: Any | None = None,
 ) -> dict[str, Any]:
     """Полный пайплайн: Maestro → агенты → финальный ответ.
 
@@ -786,6 +854,7 @@ async def run_pipeline(
         self_profile=self_profile,
         rag_enabled=rag_enabled,
         contact_id=contact_id,
+        userbot_manager=userbot_manager,
     )
 
     used_agents = []
@@ -858,15 +927,30 @@ async def run_pipeline(
             + "\n".join(agent_errors)
             + f"\n\nОтветь пользователю сам: {user_text}"
         )
+        fallback_messages = [
+            ChatMessage(role="system", content=MAESTRO_SYSTEM),
+            ChatMessage(role="user", content=fallback_prompt),
+        ]
+
+        # Try streaming for fallback response
+        stream = None
+        try:
+            stream = provider.chat_stream(fallback_messages, heavy=True)
+        except (AttributeError, NotImplementedError):
+            pass
+
+        if stream is not None:
+            return {
+                "_stream": stream,
+                "final_response": "",
+                "plan": plan.get("plan", []),
+                "used_agents": [],
+                "agent_errors": agent_errors,
+            }
+
         try:
             raw = await asyncio.wait_for(
-                provider.chat(
-                    [
-                        ChatMessage(role="system", content=MAESTRO_SYSTEM),
-                        ChatMessage(role="user", content=fallback_prompt),
-                    ],
-                    heavy=True,
-                ),
+                provider.chat(fallback_messages, heavy=True),
                 timeout=60.0,
             )
             return {
@@ -931,17 +1015,30 @@ async def run_pipeline(
     if agent_texts:
         combined = "\n\n".join(agent_texts)
         promo = MAESTRO_AFTER_AGENTS.format(agent_results=combined)
+        synthesis_messages = [
+            ChatMessage(role="system", content=promo),
+            ChatMessage(role="user", content=f"Пользователь сказал: {user_text}"),
+        ]
+
+        # Try streaming for final response
+        stream = None
+        try:
+            stream = provider.chat_stream(synthesis_messages, heavy=True)
+        except (AttributeError, NotImplementedError):
+            pass
+
+        if stream is not None:
+            return {
+                "_stream": stream,
+                "final_response": "",
+                "plan": plan.get("plan", []),
+                "used_agents": used_agents,
+                "agent_errors": agent_errors,
+            }
+
         try:
             raw = await asyncio.wait_for(
-                provider.chat(
-                    [
-                        ChatMessage(role="system", content=promo),
-                        ChatMessage(
-                            role="user", content=f"Пользователь сказал: {user_text}"
-                        ),
-                    ],
-                    heavy=True,
-                ),
+                provider.chat(synthesis_messages, heavy=True),
                 timeout=60.0,
             )
             raw = raw.strip()

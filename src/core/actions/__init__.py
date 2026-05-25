@@ -12,6 +12,7 @@ import src.core.actions.sdd_executor  # noqa: F401
 import src.core.actions.mcp_telegram  # noqa: F401
 import src.core.actions.mcp_http  # noqa: F401
 import src.core.actions.mcp_reminders  # noqa: F401
+import src.core.actions.mcp_profile  # noqa: F401
 
 __all__ = [
     "tool",

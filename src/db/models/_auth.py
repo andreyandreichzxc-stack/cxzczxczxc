@@ -170,3 +170,16 @@ class LlmKeySlot(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="key_slots")
+
+
+class PendingQuestion(Base):
+    """Pending questions queued during async reply generation."""
+
+    __tablename__ = "pending_questions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    question: Mapped[str] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )

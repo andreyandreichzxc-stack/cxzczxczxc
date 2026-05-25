@@ -196,7 +196,7 @@ async def compile_experience(
 
     # 4. Запрашиваем LLM
     prompt = EVOLVE_PROMPT.format(
-        dialogs=dialogs_text,
+        dialogs=dialogs_text.replace("{", "{{").replace("}", "}}"),
         current_style=current_style,
         previous_experience=previous_experience,
     )
@@ -379,7 +379,7 @@ async def evolve_from_feedback(
             pass
 
     prompt = FEEDBACK_PROMPT.format(
-        feedback=feedback[:500],
+        feedback=feedback[:500].replace("{", "{{").replace("}", "}}"),
         current_style=current_style,
         current_experience=current_experience,
     )
@@ -502,7 +502,7 @@ async def maybe_evolve_after_turn(
         if updated:
             logger.debug("Updated %d context files from dialog", updated)
     except Exception:
-        pass  # non-critical
+        logger.debug("Context file update skipped (non-critical)", exc_info=True)
 
     # 1. Быстрый фидбек: пользователь сказал что-то про характер?
     if _detect_feedback_in_text(user_text):

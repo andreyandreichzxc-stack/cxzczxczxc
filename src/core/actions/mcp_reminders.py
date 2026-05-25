@@ -67,7 +67,12 @@ async def mcp_reminders(
     Returns:
         A dict with the result data or an ``"error"`` key on failure.
     """
-    telegram_id: int = kwargs.get("user", 0)
+    _user_val = kwargs.get("user", 0)
+    # user may be an int (telegram_id) or a User ORM object — normalise
+    if hasattr(_user_val, "telegram_id"):
+        telegram_id: int = _user_val.telegram_id
+    else:
+        telegram_id = int(_user_val)
 
     try:
         if action == "list":

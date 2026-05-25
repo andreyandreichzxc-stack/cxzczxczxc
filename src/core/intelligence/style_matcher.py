@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select, desc
 
-from src.db.models import AdaptivePersona, Message
+from src.db.models import Message
 from src.db.repo import get_or_create_user, get_persona, update_persona
 from src.db.session import get_session
 from src.llm.base import ChatMessage

@@ -12,12 +12,15 @@ from aiogram.types import Message
 
 from src.bot.handlers import (
     analyze_cmd,
+    approve_cmd,
     catchup_cmd,
     chat_cmd,
     contact_cmd,
     digest_cmd,
     draft_actions,
     explain_cmd,
+    gates_cmd,
+    health_cmd,
     help_cmd,
     humanize_cmd,
     inbox_cmd,
@@ -110,17 +113,18 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
 
     dp["userbot_manager"] = userbot_manager
 
-    # ─── Онбординг-гард: блокирует другие команды, пока юзер не прошёл /start ───
+    # ─── Онбординг-гард: фазовая блокировка команд ───
     @dp.message.outer_middleware()
     async def onboarding_guard_middleware(
         handler, message: Message, data: dict
     ) -> None:
-        """Перенаправляет не-онбордингнутых пользователей на /start.
+        """Перенаправляет не-онбордингнутых пользователей на нужный шаг.
 
-        Пропускает:
-          - /start, /login, /cancel — всегда
-          - активные FSM-состояния (LoginStates, SettingsStates, OnboardingStates)
-          - пользователей, прошедших полный онбординг
+        Фазы:
+          1 (нет сессии)     — только /start, /login, /cancel
+          2 (нет LLM-ключа)  — плюс /keys, /settings
+          3 (нет часового)   — всё разрешено, но подсказка /sync после ответа
+          4 (готов)          — без ограничений
         """
         tg_id = message.from_user.id
         if tg_id != settings.owner_telegram_id:
@@ -138,20 +142,38 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
             if current is not None:
                 return await handler(message, data)
 
-        # Проверяем онбординг (с кэшированием на 30 сек через FSM data)
-        from src.bot.filters import is_onboarded
+        from src.bot.filters import get_onboarding_phase
 
-        if await is_onboarded(tg_id):
+        phase = await get_onboarding_phase(tg_id)
+
+        # Фаза 4 — всё настроено, пропускаем
+        if phase == 4:
             return await handler(message, data)
 
-        # Не прошёл онбординг — перенаправляем
-        logger.info("onboarding_guard: redirecting user %d to /start", tg_id)
-        await message.answer(
-            "👋 <b>Сначала заверши настройку!</b>\n\n"
-            "Напиши /start чтобы пройти быстрый онбординг (5 шагов) "
-            "и я смогу полноценно работать 🤖"
-        )
+        # Фаза 1 — нет сессии: только /start, /login, /cancel (уже пропущены выше)
+        if phase == 1:
+            await message.answer("Сначала сделай /login")
+            return
 
+        # Фаза 2 — нет LLM-ключа: разрешаем /keys и /settings
+        if phase == 2:
+            if text.startswith(("/keys", "/settings")):
+                return await handler(message, data)
+            await message.answer("Теперь добавь API-ключ для LLM. Жми /keys add.")
+            return
+
+        # Фаза 3 — нет часового пояса / синхронизации:
+        # разрешаем всё, но после ответа показываем подсказку /sync
+        await handler(message, data)
+        try:
+            await message.answer("💡 Хочешь чтобы я запомнил важное? Сделай /sync.")
+        except Exception:
+            pass
+        return
+
+    dp.include_router(approve_cmd.router)
+    dp.include_router(gates_cmd.router)
+    dp.include_router(health_cmd.router)
     dp.include_router(help_cmd.router)
     dp.include_router(inbox_cmd.router)
     dp.include_router(start.router)

@@ -15,6 +15,7 @@ from aiogram.types import (
 from src.bot.filters import OwnerOnly
 from src.core.contacts.contact_resolver import resolve
 from src.core.contacts.profile_builder import build_profile
+from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import (
     get_contact,
     get_contact_profile,
@@ -239,7 +240,9 @@ async def cmd_profile(
         except ValueError:
             candidates = await resolve(client, owner, args)
             if not candidates:
-                await message.answer(f"🙅 Не нашёл контакт «{args}». Попробуй /sync.")
+                await message.answer(
+                    f"🙅 Не нашёл контакт «{sanitize_html(args)}». Попробуй /sync."
+                )
                 return
             if len(candidates) > 1 and candidates[0].score < 90:
                 names = "\n".join(f"• {c.label()} · {c.score}%" for c in candidates[:5])

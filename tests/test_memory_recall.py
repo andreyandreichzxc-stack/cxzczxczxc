@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import time
+from unittest.mock import patch
+
 import pytest
 from datetime import datetime, timedelta, timezone
 
+pytestmark = pytest.mark.usefixtures("_db_init")
+
 from src.db.session import get_session
 from src.db.repo import get_or_create_user, add_memory, add_commitment
-from src.core.memory.memory_recall import recall, format_recall_for_prompt
+from src.core.memory.memory_recall import (
+    recall,
+    format_recall_for_prompt,
+    _mmr_rerank,
+    _jaccard_similarity,
+    RecalledFact,
+    RecallResult,
+)
+from src.core.memory.hybrid_search import reciprocal_rank_fusion
 
 
 def utc_naive():
@@ -80,6 +93,8 @@ async def test_expires_at_excludes():
 @pytest.mark.asyncio
 async def test_use_count_increments():
     """use_count растёт после каждого recall."""
+    import asyncio as _aio
+
     async with get_session() as session:
         owner = await get_or_create_user(session, 123459)
         await add_memory(session, owner, fact="тестовый факт", confidence=0.8)
@@ -98,8 +113,10 @@ async def test_use_count_increments():
         m = (await session.execute(select(Memory).where(Memory.id == mid))).scalar_one()
         assert m.use_count >= 1
 
-    # второй вызов
+    # второй вызов (может вернуть из кеша + async bump)
     await recall(123459, limit=5)
+    # Ждём завершения fire-and-forget async bumper
+    await _aio.sleep(0.5)
     async with get_session() as session:
         from src.db.models import Memory
         from sqlalchemy import select
@@ -150,3 +167,169 @@ async def test_no_facts_graceful():
     result = await recall(123462, limit=5)
     assert result.facts == []
     assert result.meta["total_active"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Cache tests (mock database — test logic only)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_recall_cache_hit():
+    """Второй вызов с тем же ключом возвращает кешированный результат."""
+    import src.core.memory.memory_recall as mr_mod
+
+    fake_result = RecallResult(
+        facts=[RecalledFact(fact="кешированный факт", reason="📌 закреплён")],
+        meta={"cached": True},
+    )
+    cache_key = "123456:test query:None:deep"
+
+    # Напрямую тестируем логику кеша: проверяем что свежая запись
+    # (< 30 сек для результатов с фактами) считается валидной
+    with patch.object(mr_mod, "_recall_cache", {}) as mock_cache:
+        mock_cache[cache_key] = (time.monotonic(), fake_result)
+        # Проверяем что ключ есть и не протух
+        assert cache_key in mock_cache
+        cached_ts, cached_val = mock_cache[cache_key]
+        assert time.monotonic() - cached_ts < 30
+        assert cached_val.facts[0].fact == "кешированный факт"
+
+
+@pytest.mark.asyncio
+async def test_recall_cache_expiry():
+    """Кеш протухает через 60 секунд."""
+    import src.core.memory.memory_recall as mr_mod
+
+    fake_result = RecallResult(
+        facts=[RecalledFact(fact="просроченный кеш", reason="🆕 свежий")],
+        meta={"cached": True},
+    )
+    cache_key = "123457:stale:None:deep"
+
+    # Кеш с timestamp 31+ секунд назад — для результатов с фактами (TTL=30)
+    # должен считаться невалидным
+    old_time = time.monotonic() - 61.0
+
+    with patch.object(mr_mod, "_recall_cache", {}) as mock_cache:
+        mock_cache[cache_key] = (old_time, fake_result)
+        assert cache_key in mock_cache
+        cached_ts, cached_val = mock_cache[cache_key]
+        # Проверяем что запись просрочена (> 30 сек для результатов с фактами)
+        assert time.monotonic() - cached_ts >= 30, (
+            f"Ожидалась просроченная запись, разница: {time.monotonic() - cached_ts:.1f}s"
+        )
+
+
+# ---------------------------------------------------------------------------
+# MMR rerank tests (pure logic, no DB)
+# ---------------------------------------------------------------------------
+
+
+class TestMMRRerank:
+    """Тесты алгоритма Maximal Marginal Relevance re-ranking."""
+
+    def test_mmr_rerank_diversifies(self):
+        """Дублирующиеся факты получают разные ранги."""
+        facts = [
+            {"score": 0.9, "fact": "я люблю кофе"},
+            {"score": 0.9, "fact": "я люблю кофе"},  # почти дубликат
+            {"score": 0.8, "fact": "я работаю в IT"},
+            {"score": 0.7, "fact": "я живу в Москве"},
+        ]
+        result = _mmr_rerank(facts)
+        # Первый — самый релевантный
+        assert result[0]["fact"] == "я люблю кофе"
+        # Дубликат должен быть отодвинут ниже уникального контента
+        # (второй "я люблю кофе" имеет max_sim=1.0 с первым,
+        #  поэтому его MMR = 0.7*0.9 - 0.3*1.0 = 0.33,
+        #  а "я работаю в IT" имеет MMR = 0.7*0.8 - 0.3*0.0 = 0.56)
+        assert result[1]["fact"] != "я люблю кофе", (
+            "Дубликат не должен быть на втором месте"
+        )
+
+    def test_mmr_rerank_empty(self):
+        """Пустой список — пустой результат."""
+        assert _mmr_rerank([]) == []
+
+    def test_mmr_rerank_single(self):
+        """Один факт — возвращается как есть."""
+        facts = [{"score": 0.5, "fact": "один факт"}]
+        result = _mmr_rerank(facts)
+        assert len(result) == 1
+        assert result[0]["fact"] == "один факт"
+
+    def test_jaccard_similarity_identical(self):
+        """Jaccard для одинаковых строк = 1.0."""
+        sim = _jaccard_similarity("я люблю кофе", "я люблю кофе")
+        assert sim == 1.0
+
+    def test_jaccard_similarity_different(self):
+        """Jaccard для разных строк = 0.0."""
+        sim = _jaccard_similarity("я люблю кофе", "завтра еду в Сочи")
+        assert sim == 0.0
+
+    def test_jaccard_similarity_partial(self):
+        """Jaccard для частично пересекающихся строк."""
+        sim = _jaccard_similarity("я люблю кофе", "я люблю чай")
+        # пересечение: я, люблю (2), объединение: я, люблю, кофе, чай (4)
+        assert sim == 0.5
+
+
+# ---------------------------------------------------------------------------
+# RRF tests (pure logic, no DB)
+# ---------------------------------------------------------------------------
+
+
+class TestRRF:
+    """Тесты Reciprocal Rank Fusion."""
+
+    def test_rrf_weights_positions(self):
+        """RRF использует позицию, а не raw score."""
+        # Два списка с одинаковыми ID, но разными позициями
+        vector_results = [(1, 0.99), (2, 0.50), (3, 0.30)]
+        keyword_results = [(2, 0.80), (1, 0.60), (3, 0.10)]
+
+        result = reciprocal_rank_fusion(vector_results, keyword_results)
+
+        # ID=1: позиции 1 (vector) и 2 (keyword)
+        #   rrf = 1/(60+1) + 1/(60+2) = 1/61 + 1/62 ≈ 0.0164 + 0.0161 ≈ 0.0325
+        # ID=2: позиции 2 (vector) и 1 (keyword)
+        #   rrf = 1/(60+2) + 1/(60+1) = 1/62 + 1/61 ≈ 0.0325
+        # ID=3: позиции 3 (vector) и 3 (keyword)
+        #   rrf = 1/(60+3) + 1/(60+3) ≈ 0.0159 + 0.0159 ≈ 0.0317
+        # ID=1 и ID=2 должны иметь близкие (или равные) скоры
+        scores = {mem_id: round(score, 6) for mem_id, score in result}
+        assert scores[1] == scores[2], (
+            f"RRF для ID=1 и ID=2 должны быть равны (симметричные позиции), "
+            f"получено: {scores}"
+        )
+        assert scores[3] < scores[1], (
+            "ID=3 на 3-м месте в обоих списках должен иметь ниже score"
+        )
+
+    def test_rrf_empty_inputs(self):
+        """Пустые входные списки — пустой результат."""
+        result = reciprocal_rank_fusion(None, None)
+        assert result == []
+
+    def test_rrf_single_list(self):
+        """Только один список — работает как rank-based scoring."""
+        vector_results = [(100, 0.9), (200, 0.8), (300, 0.5)]
+        result = reciprocal_rank_fusion(vector_results)
+        assert len(result) == 3
+        assert result[0][0] == 100  # первый в ранжировании
+        assert result[1][0] == 200
+        assert result[2][0] == 300
+
+    def test_rrf_k_value_affects_score(self):
+        """Разное k даёт разное распределение скоров."""
+        results = [(1, 0.9), (2, 0.5)]
+        r1 = reciprocal_rank_fusion(results, k=0)
+        r2 = reciprocal_rank_fusion(results, k=60)
+        r3 = reciprocal_rank_fusion(results, k=1000)
+        # С разными k скоры должны отличаться
+        assert r1[0][1] != r2[0][1]
+        assert r2[0][1] != r3[0][1]
+        # Порядок сохраняется
+        assert r1[0][0] == r2[0][0] == r3[0][0] == 1

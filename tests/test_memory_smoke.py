@@ -38,10 +38,15 @@ OWNER_TG_ID = 123456789
 def setup_db():
     """Пересоздаёт таблицы перед каждым тестом (чтобы не копились данные)."""
     from src.db.session import engine, Base
+    from sqlalchemy import text
 
     async def _recreate():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
+            # Drop artifacts that survive drop_all and would confuse init_db
+            await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+            await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
+            await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
         await init_db()
 
     asyncio.run(_recreate())

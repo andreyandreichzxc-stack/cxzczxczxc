@@ -8,6 +8,8 @@ import sys
 import time
 import uuid
 
+from src.config import settings
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -33,6 +35,7 @@ from src.db.repo import add_memory, get_or_create_user
 from src.db.session import get_session
 from src.userbot.manager import UserbotManager
 
+from src.core.intelligence.pre_gate import check_pre_gate
 from src.llm.base import ChatMessage
 from src.core.infra.timeutil import now_in_tz
 
@@ -47,6 +50,13 @@ from .free_text_common import (
     safe_answer,
 )
 from src.core.intelligence.routing_wordlists import learn_routing as _learn_routing
+
+from src.core.humanizer import (
+    humanize_response,
+    humanize_deep,
+    analyze_ai_score,
+    _cache_last_humanized,
+)
 
 from .free_text_exec import (
     exec_add_api_key,
@@ -103,7 +113,7 @@ _LAST_INTENT_TTL = 900.0
 # Format: {uid_str: {"telegram_id": int, "tool": str, "tool_params": dict, "ts": float}}
 _pending_confirmations: dict[str, dict] = {}
 _pending_confirmations_lock = asyncio.Lock()
-_PENDING_TTL = 300.0  # 5 минут — удаляем stale записи
+_PENDING_TTL = settings.pending_ttl_sec  # 5 минут — удаляем stale записи
 
 
 def _cleanup_stale_pending() -> None:
@@ -185,7 +195,22 @@ async def _cb_tool_confirm(
     )
 
     try:
-        result = await tool_registry.execute(tool_name, _confirmed=True, **tool_params)
+        async with get_session() as session:
+            owner = await get_or_create_user(session, callback.from_user.id)
+            client = (
+                userbot_manager.get_client(callback.from_user.id)
+                if userbot_manager
+                else None
+            )
+            result = await tool_registry.execute(
+                tool_name,
+                _confirmed=True,
+                session=session,
+                user=owner,
+                client=client,
+                userbot_manager=userbot_manager,
+                **tool_params,
+            )
         ok = result.get("ok", True) if isinstance(result, dict) else True
         if callback.message:
             if ok:
@@ -628,8 +653,34 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
     if handler_info is not None:
         handler, _ = handler_info
         await handler(intent, message, state, userbot_manager, tz_name=tz_name)
+        # Record action for smart correction
+        try:
+            from src.bot.handlers.smart_correction import record_action
+
+            await record_action(
+                message.from_user.id,
+                {
+                    "intent": kind,
+                    "params": dict(intent),
+                },
+            )
+        except Exception:
+            logger.debug("record_action failed for %s", kind, exc_info=True)
         return
     await _execute_intent(intent, message, state, userbot_manager, tz_name=tz_name)
+    # Record action for smart correction (classic intents)
+    try:
+        from src.bot.handlers.smart_correction import record_action
+
+        await record_action(
+            message.from_user.id,
+            {
+                "intent": kind,
+                "params": dict(intent),
+            },
+        )
+    except Exception:
+        logger.debug("record_action failed for classic %s", kind, exc_info=True)
 
 
 # ── Pipeline stages ──────────────────────────────────────────────────
@@ -805,6 +856,19 @@ async def check_followup(
     if followup:
         intent, _update_type = followup
         await _execute_intent(intent, message, state, userbot_manager, tz_name=tz_name)
+        # Record action for smart correction
+        try:
+            from src.bot.handlers.smart_correction import record_action
+
+            await record_action(
+                owner_telegram_id,
+                {
+                    "intent": intent.get("intent", ""),
+                    "params": dict(intent),
+                },
+            )
+        except Exception:
+            logger.debug("record_action failed in followup", exc_info=True)
         _save_intent_context(owner_telegram_id, intent)
         _fire_record_trajectory(
             owner_telegram_id,
@@ -830,6 +894,92 @@ def _time_of_day_greeting(tz_name: str | None = None) -> str:
     return "Доброй ночи"
 
 
+def _detect_context_hint(
+    raw: str,
+    plan_purpose: str | None = None,
+) -> str | None:
+    """Определяет контекстную подсказку для humanize_response.
+
+    Сначала смотрит на purpose из плана авто-роутера,
+    затем на ключевые слова в тексте пользователя.
+    """
+    # 1. Purpose → hint mapping
+    purpose_map: dict[str, str] = {
+        "search": "search",
+        "analysis": "analysis",
+        "draft": "send",
+        "memory": "memory",
+    }
+    if plan_purpose and plan_purpose in purpose_map:
+        return purpose_map[plan_purpose]
+
+    # 2. Ключевые слова в тексте
+    text_lower = raw.lower()
+    if any(kw in text_lower for kw in ("найди", "поиск", "поищи", "search", "ищи")):
+        return "search"
+    if any(kw in text_lower for kw in ("проанализируй", "анализ", "разбери", "разбор")):
+        return "analysis"
+    if _looks_like_send_request(text_lower):
+        return "send"
+    if any(kw in text_lower for kw in ("напомни", "напоминание", "remind", "напомни")):
+        return "reminder"
+    if any(
+        kw in text_lower
+        for kw in ("запомни", "сохрани", "в память", "store_memory", "remember")
+    ):
+        return "memory"
+    if any(
+        kw in text_lower for kw in ("новости", "новость", "дайджест", "digest", "news")
+    ):
+        return "news"
+    return None
+
+
+def _looks_like_send_request(text_lower: str) -> bool:
+    """True only for messaging intent, not generic "write text/code/recipe" requests."""
+    if any(kw in text_lower for kw in ("отправь", "отправить", "сообщение", "с draft")):
+        return True
+    if "напиши" not in text_lower:
+        return False
+    recipient_markers = (
+        " оле",
+        " ему",
+        " ей",
+        " им ",
+        " маме",
+        " папе",
+        " артёму",
+        " артему",
+    )
+    return any(marker in f" {text_lower} " for marker in recipient_markers)
+
+
+def _safe_for_deep_humanize(text: str, context_hint: str | None = None) -> bool:
+    """Avoid second-pass LLM rewriting for structured or exact outputs."""
+    if context_hint == "send":
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    structured_markers = ("```", "<code", "</", "{", "}", "[", "]")
+    if any(marker in stripped for marker in structured_markers):
+        return False
+    if stripped.startswith(("{", "[", "- ", "* ", "1. ")):
+        return False
+    if "|" in stripped and "\n" in stripped:
+        return False
+    exact_output_words = (
+        "json",
+        "yaml",
+        "sql",
+        "код",
+        "команд",
+        "traceback",
+        "exception",
+    )
+    return not any(word in stripped.lower() for word in exact_output_words)
+
+
 async def execute_instant(
     plan,
     message: Message,
@@ -845,14 +995,47 @@ async def execute_instant(
         await hooks.emit("on_message_received", user_id=owner_telegram_id, text=raw)
     except Exception:
         pass  # hooks are optional, never break core flow
-    # Динамическое приветствие с учётом наличия памяти
+
+    # ✨ Pre-LLM gate: handle greetings/farewells without LLM
+    gate_response = check_pre_gate(raw)
+    if gate_response:
+        response = gate_response
+        _cache_last_humanized(owner_telegram_id, response)
+        await safe_answer(
+            message, sanitize_html(response), reply_markup=memory_quick_keyboard()
+        )
+        await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
+        _fire_record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="instant_gate",
+            intent_json={"intent": "chat"},
+            response_text=response,
+            success=True,
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
+        await _post_turn_optimize(owner_telegram_id, raw, response)
+        return True
+
+    # Динамическое приветствие с учётом наличия памяти и сессии
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
         memories = await recall(telegram_id=owner_telegram_id, limit=1, mode="normal")
         has_memory = bool(memories and memories.facts)
+        has_session = owner.session is not None
         name = getattr(owner, "alias", None) or ""
 
-    if not has_memory:
+    if not has_memory and not has_session:
+        # Совершенно новый пользователь — first touch
+        response = (
+            "Привет! Я AI-ассистент. Обожаю своего создателя (@dutysissy)!\n\n"
+            "Чтобы я заработал, нужно 3 шага:\n"
+            "1. /login — привязать Telegram-аккаунт\n"
+            "2. Добавить API-ключ для LLM (я подскажу как)\n"
+            "3. /sync — я прочитаю твои чаты и запомню важное\n\n"
+            "Поехали! Жми /login 🚀"
+        )
+    elif not has_memory:
         response = (
             "Привет! Я твой AI-ассистент. "
             "Я тебя пока не знаю — расскажи о себе или дай доступ к чатам через /sync, и я запомню."
@@ -860,8 +1043,29 @@ async def execute_instant(
     else:
         response = f"{_time_of_day_greeting(tz_name=tz_name)}{', ' + name if name else ''}! Чем займёмся?"
 
+    # Humanize the response
+    context_hint = _detect_context_hint(
+        raw, plan_purpose=plan.tasks[0].purpose.value if plan.tasks else None
+    )
+    response = humanize_response(response, context_hint=context_hint)
+    _cache_last_humanized(owner_telegram_id, response)
+
     await safe_answer(message, sanitize_html(response))
     await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
+    # Record action for smart correction (skip first-time/intro messages)
+    if has_memory or has_session:
+        try:
+            from src.bot.handlers.smart_correction import record_action
+
+            await record_action(
+                owner_telegram_id,
+                {
+                    "intent": "chat",
+                    "params": {"reply": response[:200]},
+                },
+            )
+        except Exception:
+            logger.debug("record_action failed in execute_instant", exc_info=True)
     _fire_record_trajectory(
         owner_telegram_id,
         request_text=raw,
@@ -1003,6 +1207,28 @@ async def execute_maestro(
         await hooks.emit("on_message_received", user_id=owner_telegram_id, text=raw)
     except Exception:
         pass  # hooks are optional, never break core flow
+
+    # ✨ Pre-LLM gate: handle greetings/farewells without LLM
+    gate_response = check_pre_gate(raw)
+    if gate_response:
+        response = gate_response
+        _cache_last_humanized(owner_telegram_id, response)
+        await safe_answer(
+            message, sanitize_html(response), reply_markup=memory_quick_keyboard()
+        )
+        _fire_record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="maestro_gate",
+            intent_json={"intent": "chat"},
+            response_text=response,
+            success=True,
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
+        await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
+        await _post_turn_optimize(owner_telegram_id, raw, response)
+        return True
+
     rag_needed = plan.recall_mode == "deep"
     try:
         pipeline_result = await run_pipeline(
@@ -1012,6 +1238,7 @@ async def execute_maestro(
             history_block=history_block,
             global_style=injected_style,
             rag_enabled=rag_needed,
+            userbot_manager=userbot_manager,
         )
 
         # ── Handle tool confirmation needed ──────────────────────────
@@ -1047,12 +1274,176 @@ async def execute_maestro(
             )
             return True
 
+        # ── Handle streaming response ────────────────────────────────
+        stream = pipeline_result.get("_stream")
+        if stream is not None:
+            # Определяем context_hint заранее для финального humanize
+            plan_purpose = plan.tasks[0].purpose.value if plan.tasks else None
+            context_hint = _detect_context_hint(raw, plan_purpose=plan_purpose)
+
+            # Получаем стилевой профиль
+            try:
+                from src.core.intelligence.style_matcher import (
+                    get_or_update_style_profile,
+                )
+
+                style_block = await get_or_update_style_profile(owner_telegram_id)
+            except Exception:
+                style_block = None
+
+            # Send initial message with cursor
+            sent_msg = await message.answer("▌")
+            full_text = ""
+            last_update = asyncio.get_event_loop().time()
+
+            try:
+                async for chunk in stream:
+                    full_text += chunk
+                    now = asyncio.get_event_loop().time()
+                    if now - last_update >= 0.5:
+                        display_text = full_text + " ▌"
+                        try:
+                            await sent_msg.edit_text(display_text[:4000])
+                        except Exception:
+                            pass  # message deleted or too old
+                        last_update = now
+            except Exception:
+                logger.debug("Stream interrupted", exc_info=True)
+
+            if not full_text.strip():
+                try:
+                    await sent_msg.edit_text("⚠️ Не получилось сгенерировать ответ")
+                except Exception:
+                    await message.answer("⚠️ Не получилось сгенерировать ответ")
+                return True
+
+            # Apply humanization after streaming
+            humanized = humanize_response(
+                full_text.strip(),
+                context_hint=context_hint,
+                style_profile=style_block or "",
+            )
+            # Deep humanize if needed
+            score, _ = analyze_ai_score(humanized)
+            if (
+                score > 0.3
+                and len(humanized) > 100
+                and _safe_for_deep_humanize(humanized, context_hint=context_hint)
+            ):
+                try:
+                    humanized = await humanize_deep(
+                        humanized, provider, user_style=style_block or ""
+                    )
+                except Exception:
+                    logger.debug("humanize_deep failed on streamed text", exc_info=True)
+
+            response_text = sanitize_html(humanized)
+            _cache_last_humanized(owner_telegram_id, response_text)
+
+            # Final message without cursor
+            try:
+                await sent_msg.edit_text(
+                    response_text[:4000], reply_markup=memory_quick_keyboard()
+                )
+            except Exception:
+                await safe_answer(
+                    message, response_text, reply_markup=memory_quick_keyboard()
+                )
+
+            # Auto-save facts
+            track_ff(
+                asyncio.create_task(
+                    _maybe_auto_save_facts(
+                        raw, response_text, owner_telegram_id, provider
+                    )
+                )
+            )
+
+            used = pipeline_result.get("used_agents", [])
+            errors = pipeline_result.get("agent_errors", [])
+            if used:
+                logger.debug("Maestro agents: %s", used)
+            if errors:
+                logger.debug("Maestro agent errors: %s", errors)
+
+            _fire_record_trajectory(
+                owner_telegram_id,
+                request_text=raw,
+                route_mode="maestro",
+                intent_json={"intent": "maestro"},
+                actions_json=pipeline_result.get("plan", []),
+                response_text=response_text,
+                success=True,
+                error="; ".join(errors) if errors else None,
+                latency_ms=int((time.monotonic() - turn_started) * 1000),
+            )
+            await ctx_store.add_turn(
+                message.from_user.id, raw[:200], response_text[:400]
+            )
+            await _post_turn_optimize(owner_telegram_id, raw, response_text)
+            try:
+                from src.core.infra.hooks import hooks
+
+                await hooks.emit(
+                    "on_message_post_maestro",
+                    user_id=owner_telegram_id,
+                    input=raw,
+                    response=response_text,
+                    plan=pipeline_result.get("plan", []),
+                )
+            except Exception:
+                pass
+            return True
+
         # ── Handle tool results from tool loop ───────────────────────
         # Если maestro вернул tool_result, используем его для обогащения
         # ответа, но итоговый ответ берём из final_response (LLM уже
         # синтезировала его с учётом результатов инструмента).
         response_text = pipeline_result.get("final_response", "")
         if response_text:
+            # ── Humanizer: post-process response ──────────────────────
+            # Определяем контекстную подсказку из purpose плана
+            plan_purpose = plan.tasks[0].purpose.value if plan.tasks else None
+            context_hint = _detect_context_hint(raw, plan_purpose=plan_purpose)
+
+            # Получаем стилевой профиль пользователя
+            try:
+                from src.core.intelligence.style_matcher import (
+                    get_or_update_style_profile,
+                )
+
+                style_block = await get_or_update_style_profile(owner_telegram_id)
+            except Exception:
+                style_block = None
+
+            # Stage 1: fast humanize (clip endings, add context followup)
+            humanized = humanize_response(
+                response_text,
+                context_hint=context_hint,
+                style_profile=style_block or "",
+            )
+
+            # Stage 2: deep humanize if still too AI-like
+            score, _ = analyze_ai_score(humanized)
+            if (
+                score > 0.3
+                and len(humanized) > 100
+                and _safe_for_deep_humanize(humanized, context_hint=context_hint)
+            ):
+                try:
+                    user_style_hint = style_block or ""
+                    humanized = await humanize_deep(
+                        humanized, provider, user_style=user_style_hint
+                    )
+                except Exception:
+                    logger.debug(
+                        "humanize_deep failed, using light humanized", exc_info=True
+                    )
+
+            response_text = humanized
+            _cache_last_humanized(owner_telegram_id, response_text)
+            # ── End Humanizer ─────────────────────────────────────────
+
             # Auto-save: fire-and-forget сохранение фактов о пользователе
             track_ff(
                 asyncio.create_task(

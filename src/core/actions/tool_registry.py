@@ -33,6 +33,15 @@ from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
+# Module-level: cached import of dateutil for _tool_set_reminder
+try:
+    from dateutil.parser import parse as _dateparse
+
+    _HAS_DATEUTIL = True
+except ImportError:
+    _dateparse = None  # type: ignore[assignment]
+    _HAS_DATEUTIL = False
+
 
 # ── ToolSpec ─────────────────────────────────────────────────────────────
 
@@ -277,22 +286,55 @@ async def _tool_search_messages(
     limit: int = 20,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Search messages across chats.
+    """Search messages by text query across chats.
 
-    Wraps ``src.agents.search_agent.resolve`` which resolves a contact
-    by fuzzy name matching.  A real production implementation would also
-    perform full-text search over the message store.
+    Resolves *contact* (fuzzy name match) to scope the search to a
+    single chat, then performs FTS5 full-text search over stored messages
+    via ``cross_chat_search``.
+
+    Runtime dependencies expected in **kwargs**:
+        session (:class:`sqlalchemy.ext.asyncio.AsyncSession`)
+        user (:class:`src.db.models.User`)
+        client (:class:`telethon.TelegramClient`, optional — for contact resolution)
     """
-    # Wires into existing search infrastructure:
-    #   provider = kwargs.get("provider")
-    #   contacts = kwargs.get("contacts", [])
-    #   return await search_resolve(provider, query, contacts)
-    return {
-        "ok": True,
-        "query": query,
-        "contact": contact,
-        "limit": limit,
-    }
+    session = kwargs["session"]
+    user = kwargs["user"]
+    client = kwargs.get("client")
+
+    # Resolve contact name → peer_id if specified
+    peer_id: int | None = None
+    if contact:
+        if client is None:
+            return {
+                "ok": False,
+                "error": "No Telegram client available for contact resolution",
+            }
+        try:
+            from src.core.contacts.contact_resolver import resolve as resolve_contact
+
+            candidates = await resolve_contact(client, user, contact, limit=1)
+            if candidates:
+                peer_id = candidates[0].peer_id
+        except Exception:
+            logger.exception(
+                "search_messages: contact resolution failed for %r", contact
+            )
+            return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
+
+    try:
+        from src.db.repo import cross_chat_search
+
+        results = await cross_chat_search(
+            session,
+            user,
+            query,
+            limit=limit,
+            peer_id=peer_id,
+        )
+        return {"ok": True, "results": results, "query": query}
+    except Exception:
+        logger.exception("search_messages: FTS search failed for %r", query)
+        return {"ok": False, "error": f"Search failed for '{query}'"}
 
 
 @tool(
@@ -308,22 +350,87 @@ async def _tool_search_messages(
 )
 async def _tool_summarize_chat(
     contact: str,
-    limit: int = 50,
+    limit: int = 100,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Summarise chat with a contact.
+    """Summarise recent conversation with a contact via LLM.
 
-    Wraps ``src.agents.summarizer_agent.summarize`` which calls an LLM
-    to produce a structured summary from raw message text.
+    Resolves *contact* to a peer, fetches recent messages, converts them
+    to a transcript, and calls ``summarizer_agent.summarize``.
+
+    Runtime dependencies expected in **kwargs**:
+        session (:class:`sqlalchemy.ext.asyncio.AsyncSession`)
+        user (:class:`src.db.models.User`)
+        client (:class:`telethon.TelegramClient`, optional — for contact resolution)
+        provider (LLM provider with ``chat()`` method)
     """
-    # provider = kwargs.get("provider")
-    # messages_text = kwargs.get("messages_text", "")
-    # return await summarizer_agent.summarize(provider, messages_text)
-    return {
-        "ok": True,
-        "contact": contact,
-        "limit": limit,
-    }
+    session = kwargs["session"]
+    user = kwargs["user"]
+    client = kwargs.get("client")
+    provider = kwargs.get("provider")
+
+    if provider is None:
+        return {"ok": False, "error": "No LLM provider available"}
+
+    # Resolve contact → peer_id
+    if client is None:
+        return {
+            "ok": False,
+            "error": "No Telegram client available for contact resolution",
+        }
+    try:
+        from src.core.contacts.contact_resolver import resolve as resolve_contact
+
+        candidates = await resolve_contact(client, user, contact, limit=1)
+    except Exception:
+        logger.exception("summarize_chat: contact resolution failed for %r", contact)
+        return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
+
+    if not candidates:
+        return {"ok": False, "error": f"Contact '{contact}' not found"}
+    peer_id = candidates[0].peer_id
+    display_name = candidates[0].display_name
+
+    # Fetch messages
+    try:
+        from src.db.repo import fetch_chat_messages
+
+        messages = await fetch_chat_messages(session, user, peer_id, limit=limit)
+    except Exception:
+        logger.exception("summarize_chat: fetch failed for peer_id=%s", peer_id)
+        return {"ok": False, "error": "Failed to fetch messages"}
+
+    if not messages:
+        return {
+            "ok": True,
+            "summary": None,
+            "contact": display_name,
+            "note": "No messages found",
+        }
+
+    # Convert to transcript text
+    try:
+        from src.core.contacts.chat_service import messages_to_transcript
+
+        text = messages_to_transcript(messages)
+    except Exception:
+        logger.exception("summarize_chat: transcript conversion failed")
+        return {"ok": False, "error": "Failed to convert messages to transcript"}
+
+    # Summarise via LLM
+    try:
+        from src.agents.summarizer_agent import summarize
+
+        result = await summarize(provider, text)
+        return {
+            "ok": True,
+            "summary": result.get("summary", ""),
+            "contact": display_name,
+            "message_count": len(messages),
+        }
+    except Exception:
+        logger.exception("summarize_chat: LLM summarization failed")
+        return {"ok": False, "error": "LLM summarization failed"}
 
 
 @tool(
@@ -343,20 +450,77 @@ async def _tool_draft_reply(
     style: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Draft a reply to an incoming message.
+    """Draft a reply to an incoming message from a contact via LLM.
 
-    Wraps ``src.agents.draft_agent.draft`` which calls an LLM with
-    context about the sender, conversation history, and optional style
-    hints.
+    Resolves *contact* to a peer, fetches recent conversation history
+    as context, and calls ``draft_agent.draft`` with optional style hint.
+
+    Runtime dependencies expected in **kwargs**:
+        session (:class:`sqlalchemy.ext.asyncio.AsyncSession`)
+        user (:class:`src.db.models.User`)
+        client (:class:`telethon.TelegramClient`, optional — for contact resolution)
+        provider (LLM provider with ``chat()`` method)
     """
-    # provider = kwargs.get("provider")
-    # return await draft_agent.draft(provider, contact, message, style_hint=style)
-    return {
-        "ok": True,
-        "contact": contact,
-        "message": message,
-        "style": style,
-    }
+    session = kwargs["session"]
+    user = kwargs["user"]
+    client = kwargs.get("client")
+    provider = kwargs.get("provider")
+
+    if provider is None:
+        return {"ok": False, "error": "No LLM provider available"}
+
+    # Resolve contact
+    if client is None:
+        return {
+            "ok": False,
+            "error": "No Telegram client available for contact resolution",
+        }
+    try:
+        from src.core.contacts.contact_resolver import resolve as resolve_contact
+
+        candidates = await resolve_contact(client, user, contact, limit=1)
+    except Exception:
+        logger.exception("draft_reply: contact resolution failed for %r", contact)
+        return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
+
+    if not candidates:
+        return {"ok": False, "error": f"Contact '{contact}' not found"}
+    peer_id = candidates[0].peer_id
+    sender_name = candidates[0].display_name
+
+    # Fetch history for context
+    history_text: str | None = None
+    try:
+        from src.db.repo import fetch_chat_messages
+        from src.core.contacts.chat_service import messages_to_transcript
+
+        history = await fetch_chat_messages(session, user, peer_id, limit=20)
+        if history:
+            history_text = messages_to_transcript(history)
+    except Exception:
+        logger.exception("draft_reply: history fetch failed for peer_id=%s", peer_id)
+        # Non-fatal: proceed without history
+
+    # Draft via LLM
+    try:
+        from src.agents.draft_agent import draft
+
+        result = await draft(
+            provider,
+            sender_name,
+            message,
+            history_text=history_text,
+            style_hint=style,
+        )
+        return {
+            "ok": True,
+            "draft": result.get("draft", ""),
+            "tone": result.get("tone", ""),
+            "contact": sender_name,
+        }
+    except Exception:
+        logger.exception("draft_reply: LLM drafting failed")
+        return {"ok": False, "error": "LLM draft generation failed"}
 
 
 @tool(
@@ -375,20 +539,63 @@ async def _tool_set_reminder(
     when: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Set a reminder (commitment).
+    """Create a reminder (commitment) with optional due date/time.
 
-    Wraps the project's commitment / reminder infrastructure
-    (``src.db.repo.add_commitment``, ``src.core.scheduling.reminders``).
+    Parses *when* via ``dateutil.parser`` (supports "tomorrow",
+    "in 2 hours", ISO-8601, etc.) and persists as a ``Commitment``
+    row via ``add_commitment``.
+
+    Runtime dependencies expected in **kwargs**:
+        session (:class:`sqlalchemy.ext.asyncio.AsyncSession`)
+        user (:class:`src.db.models.User`)
     """
-    # session = kwargs.get("session")
-    # user_id = kwargs.get("user_id")
-    # deadline = parse_datetime(when) if when else None
-    # await add_commitment(session, user_id=user_id, text=text, deadline_at=deadline)
-    return {
-        "ok": True,
-        "text": text,
-        "when": when,
-    }
+    session = kwargs["session"]
+    user = kwargs["user"]
+
+    # Parse deadline
+    deadline = None
+    if when:
+        try:
+            if _HAS_DATEUTIL and _dateparse is not None:
+                deadline = _dateparse(when)
+            else:
+                # Fallback: ISO-format only (e.g. "2026-05-25T14:00:00")
+                from datetime import datetime as _dt
+
+                s2 = when.strip().replace("Z", "+00:00")
+                deadline = _dt.fromisoformat(s2)
+
+            if deadline.tzinfo is None:
+                from datetime import timezone
+
+                deadline = deadline.replace(tzinfo=timezone.utc)
+        except Exception:
+            logger.exception("set_reminder: cannot parse date %r", when)
+            return {"ok": False, "error": f"Cannot parse date/time: {when}"}
+
+    # Store commitment
+    try:
+        from src.db.repo import add_commitment
+
+        c = await add_commitment(
+            session,
+            user_id=user.id,
+            peer_id=0,
+            peer_name="self",
+            message_id=0,
+            direction="mine",
+            text=text,
+            deadline_at=deadline,
+        )
+        return {
+            "ok": True,
+            "id": c.id,
+            "text": text,
+            "deadline": deadline.isoformat() if deadline else None,
+        }
+    except Exception:
+        logger.exception("set_reminder: failed to persist commitment")
+        return {"ok": False, "error": "Failed to save reminder"}
 
 
 @tool(
@@ -404,22 +611,57 @@ async def _tool_set_reminder(
 )
 async def _tool_list_contacts(
     query: str | None = None,
-    limit: int = 10,
+    limit: int = 20,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Search contacts by name.
+    """List or search the user's synced contacts.
 
-    Wraps ``src.core.contacts.contact_resolver.resolve`` which performs
-    fuzzy matching (via rapidfuzz) against the user's synced contact
-    list.
+    When *query* is provided, resolves via fuzzy matching
+    (``contact_resolver.resolve``).  When *query* is omitted, returns
+    contacts from the local database (``list_contacts`` in repo).
+
+    Runtime dependencies expected in **kwargs**:
+        session (:class:`sqlalchemy.ext.asyncio.AsyncSession`)
+        user (:class:`src.db.models.User`)
+        client (:class:`telethon.TelegramClient`, optional — for contact resolution)
     """
-    # client = kwargs.get("client")
-    # user = kwargs.get("user")
-    # candidates = await resolve(client, user, query or "", limit=limit)
-    # return {"contacts": [{"name": c.display_name, "peer_id": c.peer_id}
-    #                      for c in candidates]}
-    return {
-        "ok": True,
-        "query": query,
-        "limit": limit,
-    }
+    session = kwargs["session"]
+    user = kwargs["user"]
+    client = kwargs.get("client")
+
+    try:
+        if query:
+            if client is None:
+                return {
+                    "ok": False,
+                    "error": "No Telegram client available for contact search",
+                }
+            from src.core.contacts.contact_resolver import resolve as resolve_contact
+
+            candidates = await resolve_contact(client, user, query, limit=limit)
+            results = [
+                {
+                    "peer_id": c.peer_id,
+                    "name": c.display_name,
+                    "username": c.username,
+                    "score": c.score,
+                }
+                for c in candidates
+            ]
+        else:
+            from src.db.repo import list_contacts as db_list_contacts
+
+            contacts = await db_list_contacts(session, user)
+            results = [
+                {
+                    "peer_id": c.peer_id,
+                    "name": c.display_name,
+                    "username": c.username,
+                    "kind": c.peer_kind,
+                }
+                for c in contacts[:limit]
+            ]
+        return {"ok": True, "contacts": results, "count": len(results)}
+    except Exception:
+        logger.exception("list_contacts: failed for query=%r", query)
+        return {"ok": False, "error": "Failed to list contacts"}

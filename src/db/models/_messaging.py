@@ -18,9 +18,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from ._base import Base
+from ._base import Base, User
 
 
 class Message(Base):
@@ -220,3 +220,24 @@ class Folder(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
+
+
+class ConversationSummary(Base):
+    """Сжатые сводки диалогов — persist between restarts."""
+
+    __tablename__ = "conversation_summaries"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    last_peer_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_peer_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    summary_text: Mapped[str] = mapped_column(Text)
+    turn_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    # Relationship to User
+    user: Mapped["User"] = relationship("User", back_populates="conversation_summaries")

@@ -42,3 +42,6 @@ beautifulsoup4==4.13.5
 
 # Миграции схемы БД
 alembic>=1.13
+
+# Парсинг естественных дат (set_reminder)
+python-dateutil>=2.8.2,<3.0

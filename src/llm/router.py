@@ -25,6 +25,8 @@ from src.crypto import decrypt
 from src.db.models import User
 from src.db.repo import get_active_keys, get_api_keys, mark_key_failure, mark_key_used
 from src.db.session import get_session
+from collections.abc import AsyncGenerator
+
 from src.llm.base import ChatMessage, LLMProvider
 from src.llm.cloudflare_provider import CloudflareProvider
 from src.llm.gemini_provider import GeminiProvider
@@ -287,8 +289,110 @@ def _mask_key(key: str) -> str:
 
 
 async def _restore_cooldowns(slot_ids: list[int]) -> None:
-    """При рестарте все circuit breaker'ы начинают с CLOSED — не восстанавливаем кулдауны."""
-    pass
+    """Восстанавливает circuit breaker'ы для ключей в кулдауне после рестарта.
+
+    После перезапуска in-memory _KeyCircuitBreaker объекты теряются.
+    DB-поле cooldown_until переживает рестарт — используем его для восстановления
+    OPEN-состояния и экспоненциального backoff'а.
+
+    Принимает slot_ids от одного или нескольких провайдеров — запрашивает
+    все за один проход (единая DB-сессия).
+    """
+    if not slot_ids:
+        return
+
+    global _CIRCUIT_BREAKERS_LOCK
+    if _CIRCUIT_BREAKERS_LOCK is None:
+        _CIRCUIT_BREAKERS_LOCK = asyncio.Lock()
+
+    try:
+        from sqlalchemy import select
+        from src.db.models import LlmKeySlot
+
+        async with get_session() as session:
+            now_utc = datetime.now(timezone.utc)
+
+            # Запрашиваем конкретные слоты с активным кулдауном на уровне SQL
+            # (DateTime(timezone=True) гарантирует корректное сравнение для новых записей)
+            q = select(LlmKeySlot).where(
+                LlmKeySlot.id.in_(slot_ids),
+                LlmKeySlot.cooldown_until.is_not(None),
+                LlmKeySlot.cooldown_until > now_utc,
+            )
+            r = await session.execute(q)
+            all_candidates = list(r.scalars().all())
+
+            # Safety net: Python-фильтрация для legacy наивных дат,
+            # которые SQL-уровень может пропустить/недопустить при строковом сравнении
+            cooldown_slots: list[LlmKeySlot] = []
+            for slot in all_candidates:
+                if (
+                    slot.cooldown_until is not None
+                    and slot.cooldown_until.tzinfo is None
+                ):
+                    logger.debug(
+                        "Legacy naive datetime in cooldown_until for slot %d (provider=%s)",
+                        slot.id,
+                        slot.provider,
+                    )
+                cu = _ensure_utc(slot.cooldown_until)
+                if cu is not None and cu > now_utc:
+                    cooldown_slots.append(slot)
+
+            if not cooldown_slots:
+                return
+
+            now_mono = asyncio.get_running_loop().time()
+            restored_by_provider: dict[str, int] = {}
+
+            async with _CIRCUIT_BREAKERS_LOCK:
+                for slot in cooldown_slots:
+                    cu = _ensure_utc(slot.cooldown_until)
+                    if cu is None:
+                        continue
+                    cache_key = (slot.provider, str(slot.id))
+                    if cache_key in _CIRCUIT_BREAKERS:
+                        continue  # уже восстановлен (повторный вызов build_provider)
+
+                    remaining = (cu - now_utc).total_seconds()
+                    if remaining <= 0:
+                        continue
+
+                    cb = _KeyCircuitBreaker(
+                        failure_threshold=3,
+                        base_timeout=KEY_COOLDOWN_SECONDS,
+                    )
+
+                    # Подбираем _tripped_count: наименьшее значение,
+                    # при котором backoff >= оставшегося времени кулдауна.
+                    # Экспонента: base * 2^0 = 90s, 2^1 = 180s, 2^2 = 360s, …
+                    tripped = 0
+                    while (
+                        KEY_COOLDOWN_SECONDS * (2**tripped) < remaining and tripped < 10
+                    ):
+                        tripped += 1
+
+                    cb._state = _CircuitState.OPEN
+                    cb._failure_count = cb._failure_threshold
+                    cb._tripped_count = tripped
+                    cb._last_failure_time = max(
+                        0.0,
+                        now_mono - (KEY_COOLDOWN_SECONDS * (2**tripped) - remaining),
+                    )
+
+                    _CIRCUIT_BREAKERS[cache_key] = cb
+                    restored_by_provider[slot.provider] = (
+                        restored_by_provider.get(slot.provider, 0) + 1
+                    )
+
+            for provider_name, count in restored_by_provider.items():
+                logger.info(
+                    "Restored %d circuit breaker(s) for %s from DB cooldown",
+                    count,
+                    provider_name,
+                )
+    except Exception:
+        logger.exception("Failed to restore cooldowns from DB")
 
 
 # ─── MultiKey: обёртка для ротации ключей ─────────────────────────────
@@ -416,6 +520,8 @@ class MultiKeyProvider:
                                 "Failed to record provider success metric for %s",
                                 self.provider_name,
                             )
+                        # Round-robin: advance to the next key for load distribution
+                        self._idx = (idx + 1) % len(self._keys)
                         return result
             except Exception as exc:
                 if _is_retryable_llm_error(exc):
@@ -482,9 +588,134 @@ class MultiKeyProvider:
     async def _chat_with_retry(self, messages, *, heavy: bool = False) -> str:
         await self._semaphore.acquire()
         try:
-            return await self._try_with_retry(lambda p: p.chat(messages, heavy=heavy))
+            return await self._retry_inner(messages, heavy=heavy)
         finally:
             self._semaphore.release()
+
+    async def _retry_inner(self, messages, *, heavy: bool = False) -> str:
+        """Core retry logic WITHOUT semaphore acquisition.
+
+        Both chat_stream (which already holds the semaphore) and
+        _chat_with_retry (which acquires it) call this.
+        """
+        return await self._try_with_retry(lambda p: p.chat(messages, heavy=heavy))
+
+    async def chat_stream(
+        self, messages, *, heavy: bool = False
+    ) -> AsyncGenerator[str, None]:
+        """Stream chat output token by token with key rotation.
+        Falls back to regular chat() if no provider supports streaming."""
+        global _CIRCUIT_BREAKERS_LOCK
+        if _CIRCUIT_BREAKERS_LOCK is None:
+            _CIRCUIT_BREAKERS_LOCK = asyncio.Lock()
+        sem = await acquire_purpose_slot(self._current_purpose)
+        try:
+            await self._semaphore.acquire()
+            try:
+                start_time = asyncio.get_running_loop().time()
+                start_idx = self._idx
+                last_error: Exception | None = None
+                for attempt in range(len(self._keys)):
+                    idx = (start_idx + attempt) % len(self._keys)
+                    key = self._keys[idx]
+                    cache_key = (
+                        (self.provider_name, str(self._slot_ids[idx]))
+                        if self._slot_ids and idx < len(self._slot_ids)
+                        else (self.provider_name, key)
+                    )
+                    # Circuit breaker check — skip keys in cooldown
+                    async with _CIRCUIT_BREAKERS_LOCK:
+                        cb = _CIRCUIT_BREAKERS.get(cache_key)
+                    if cb is not None:
+                        now = asyncio.get_running_loop().time()
+                        _ = cb.try_half_open(now)
+                        if not cb.is_ready(now):
+                            continue
+                    provider = self._provider_class(key, **self._kwargs)
+                    try:
+                        total_text = ""
+                        async for token in provider.chat_stream(messages, heavy=heavy):
+                            total_text += token
+                            yield token
+                        # Stream completed successfully — record metrics
+                        # Circuit breaker: record success
+                        async with _CIRCUIT_BREAKERS_LOCK:
+                            cb = _CIRCUIT_BREAKERS.get(cache_key)
+                            if cb:
+                                cb.record_success()
+                                if cb.state == _CircuitState.CLOSED:
+                                    _CIRCUIT_BREAKERS.pop(cache_key, None)
+                        # DB: mark key as used (fresh session)
+                        if self._slot_ids:
+                            try:
+                                async with get_session() as fresh_s:
+                                    await mark_key_used(fresh_s, self._slot_ids[idx])
+                            except Exception:
+                                logger.exception(
+                                    "Failed to mark key slot %d as used",
+                                    self._slot_ids[idx],
+                                )
+                        # Adaptive Provider Selection: record success metrics
+                        latency = asyncio.get_running_loop().time() - start_time
+                        try:
+                            await _record_provider_success(self.provider_name, latency)
+                        except Exception:
+                            logger.exception(
+                                "Failed to record provider success metric for %s",
+                                self.provider_name,
+                            )
+                        self._idx = idx
+                        return
+                    except (AttributeError, NotImplementedError):
+                        continue
+                    except Exception as e:
+                        if _is_retryable_llm_error(e):
+                            # Circuit breaker: record failure
+                            async with _CIRCUIT_BREAKERS_LOCK:
+                                if cache_key not in _CIRCUIT_BREAKERS:
+                                    _CIRCUIT_BREAKERS[cache_key] = _KeyCircuitBreaker()
+                                _CIRCUIT_BREAKERS[cache_key].record_failure(
+                                    asyncio.get_running_loop().time()
+                                )
+                            last_error = e
+                            logger.warning(
+                                "Stream key %s failed: %s",
+                                _mask_key(key),
+                                str(e)[:200],
+                            )
+                            # DB: mark key slot as failed
+                            if self._slot_ids:
+                                try:
+                                    async with get_session() as fresh_s:
+                                        error_msg = (
+                                            f"{type(e).__name__}: {str(e).split(chr(10))[0]}"
+                                        )[:256]
+                                        await mark_key_failure(
+                                            fresh_s, self._slot_ids[idx], error_msg
+                                        )
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to mark key slot %d as failed",
+                                        self._slot_ids[idx],
+                                    )
+                            continue
+                        raise
+                    finally:
+                        await provider.close()
+                # All streaming attempts failed — record failure and fallback
+                if last_error:
+                    try:
+                        await _record_provider_failure(self.provider_name)
+                    except Exception:
+                        logger.exception(
+                            "Failed to record provider failure metric for %s",
+                            self.provider_name,
+                        )
+                yield await self._retry_inner(messages, heavy=heavy)
+            finally:
+                self._semaphore.release()
+        finally:
+            release_purpose_slot(sem)
 
     async def embed(self, text: str) -> list[float]:
         """Embed с защитой backpressure (background семафор)."""
@@ -569,6 +800,36 @@ class ProviderFallback:
                     str(exc)[:200],
                 )
         raise last_error or RuntimeError("All LLM providers failed")
+
+    async def chat_stream(
+        self, messages: list[ChatMessage], *, heavy: bool = False
+    ) -> AsyncGenerator[str, None]:
+        """Stream chat with adaptive provider fallback. Falls back to regular chat."""
+        now = asyncio.get_running_loop().time()
+        sorted_providers = sorted(
+            self.providers,
+            key=lambda p: _score_provider(p.provider_name, now),
+            reverse=True,
+        )
+        for provider in sorted_providers:
+            try:
+                async for token in provider.chat_stream(messages, heavy=heavy):
+                    yield token
+                return
+            except (AttributeError, NotImplementedError):
+                continue
+            except Exception as exc:
+                if not isinstance(exc, ExhaustedError) and not _is_retryable_llm_error(
+                    exc
+                ):
+                    raise
+                logger.warning(
+                    "LLM provider %s streaming failed, trying next: %s",
+                    provider.name,
+                    str(exc)[:200],
+                )
+        # All streaming failed — fallback to regular chat
+        yield await self.chat(messages, heavy=heavy)
 
     async def embed(self, text: str) -> list[float]:
         """Embed с fallback по цепочке провайдеров.
@@ -698,12 +959,14 @@ async def build_provider(
     # Попытка через новую систему LlmKeySlot
     try:
         providers: list[MultiKeyProvider] = []
+        all_slot_ids: list[int] = []
         for name in _provider_order(provider_name):
             slots = await get_active_keys(session, user, name, purpose)
             if not slots:
                 continue
             keys = [decrypt(s.key_enc) for s in slots]
             slot_ids = [s.id for s in slots]
+            all_slot_ids.extend(slot_ids)
             providers.append(
                 MultiKeyProvider(
                     name,
@@ -716,7 +979,8 @@ async def build_provider(
                     purpose=purpose,
                 )
             )
-            await _restore_cooldowns(slot_ids)
+        # Восстанавливаем cooldown за один проход по всем провайдерам
+        await _restore_cooldowns(all_slot_ids)
         if providers:
             if len(providers) > 1:
                 logger.info(
@@ -810,6 +1074,11 @@ class ExhaustedProvider:
         return False
 
     async def chat(self, messages: object, *, heavy: bool = False) -> str:
+        raise ExhaustedError(self._reason)
+
+    async def chat_stream(
+        self, messages: object, *, heavy: bool = False
+    ) -> AsyncGenerator[str, None]:
         raise ExhaustedError(self._reason)
 
     async def embed(self, text: str) -> list[float]:

@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import random
 import sys
 import time
 from pathlib import Path
@@ -47,6 +48,7 @@ from .free_text_pipeline import (
     execute_instant,
     execute_maestro,
 )
+from src.core.humanizer import record_humanizer_feedback, _pop_last_humanized
 from .rate_limiter import check_rate_limit
 
 
@@ -68,6 +70,22 @@ _active_tasks_lock = asyncio.Lock()
 _HEAVY_MODES = frozenset({"maestro", "analysis"})
 
 _MODE_NOTICE = "Обрабатываю предыдущий запрос. Если это срочно — просто напиши заново, я прерву тяжёлую задачу."
+
+
+_WAITING_MESSAGES = [
+    "⏳ Дай подумать…",
+    "🤔 Сейчас соображу…",
+    "💭 Уже думаю…",
+    "🔍 Смотрю в переписке…",
+    "📝 Анализирую…",
+    "⏳ Секунду…",
+    "🤖 Обрабатываю…",
+    "💡 Генерирую ответ…",
+]
+
+
+def _get_waiting_message() -> str:
+    return random.choice(_WAITING_MESSAGES)
 
 
 def start_voice_worker() -> asyncio.Task:
@@ -339,6 +357,129 @@ async def _process_text(
         )
         return
 
+    # ── Stage 0b: Memory correction detection (Feature 2) ────────────
+    from src.core.contacts.smart_reply import (
+        detect_memory_correction,
+        handle_memory_correction,
+    )
+
+    correction = detect_memory_correction(raw)
+    if correction:
+        response = await handle_memory_correction(correction, owner_telegram_id)
+
+        # ── Humanizer feedback loop ───────────────────────────────
+        # Если пользователь поправляет бота — последний humanized-ответ
+        # был отвергнут. Записываем фидбек.
+        last_humanized = _pop_last_humanized(owner_telegram_id)
+        if last_humanized:
+            record_humanizer_feedback(
+                user_id=owner_telegram_id,
+                original=last_humanized,
+                corrected=raw,
+                accepted=False,
+            )
+        # ── End feedback loop ─────────────────────────────────────
+
+        await message.answer(response)
+        _fire_record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="memory_correction",
+            intent_json={"intent": "memory_correction", "action": correction["action"]},
+            response_text=response,
+            success=True,
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
+        return
+
+    # ── Stage 0c: Contradiction detection ────────────────────────────
+    from src.core.memory.contradiction_detector import (
+        check_contradiction_response,
+        detect_contradiction,
+        store_pending_contradiction,
+    )
+
+    # Check if this message is a response to a pending contradiction question
+    cr_response = await check_contradiction_response(owner_telegram_id, raw)
+    if cr_response:
+        await message.answer(cr_response)
+        _fire_record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="contradiction_response",
+            intent_json={"intent": "contradiction_response"},
+            response_text=cr_response,
+            success=True,
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
+        return
+
+    # Check for new contradictions against stored facts
+    contradiction = await detect_contradiction(owner_telegram_id, raw)
+    if contradiction:
+        await store_pending_contradiction(owner_telegram_id, contradiction)
+        await message.answer(
+            f"🤔 {contradiction['suggestion']}\n"
+            f"(уверенность: {contradiction['confidence']:.0%})"
+        )
+        _fire_record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="contradiction",
+            intent_json={"intent": "contradiction"},
+            response_text=contradiction["suggestion"],
+            success=True,
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
+        return
+
+    # ── Stage 0d: Smart correction / cancellation detection ──────────
+    from src.bot.handlers.smart_correction import (
+        apply_correction,
+        detect_correction,
+    )
+
+    correction = await detect_correction(owner_telegram_id, raw)
+    if correction:
+        reply = await apply_correction(owner_telegram_id, correction)
+        await message.answer(reply)
+
+        # ── Learn from correction (Feature: Learning from Corrections) ──
+        try:
+            from src.core.intelligence.correction_learner import learn_correction
+
+            if correction["action"] == "cancel":
+                await learn_correction(
+                    owner_telegram_id,
+                    original_text="[cancelled]",
+                    corrected_text="",
+                    feedback_type="cancel",
+                )
+            elif correction["action"] == "replace":
+                new_text = correction.get("new_text", "")
+                is_fact = any(
+                    w in (new_text or "").lower() for w in ("факт", "помню", "знаю")
+                )
+                await learn_correction(
+                    owner_telegram_id,
+                    original_text=raw,
+                    corrected_text=new_text,
+                    feedback_type="fact" if is_fact else "style",
+                )
+        except Exception:
+            pass  # never break core flow
+
+        _fire_record_trajectory(
+            owner_telegram_id,
+            request_text=raw,
+            route_mode="smart_correction",
+            intent_json={"intent": "smart_correction", "action": correction["action"]},
+            response_text=reply,
+            success=True,
+            latency_ms=int((time.monotonic() - turn_started) * 1000),
+        )
+        return
+
     # Stage 1: Adaptive instructions
     if await check_instructions(raw, owner_telegram_id, message):
         return
@@ -493,7 +634,7 @@ async def _process_text(
         task = asyncio.create_task(_run_maestro_background())
         async with _active_tasks_lock:
             _active_tasks[owner_telegram_id] = task
-        await message.answer("⏳ Обрабатываю, сейчас вернусь…")
+        await message.answer(_get_waiting_message())
         return
 
     # Stage 9: Fallback — route_intent → _dispatch

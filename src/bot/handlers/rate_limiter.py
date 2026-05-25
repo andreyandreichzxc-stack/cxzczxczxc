@@ -106,6 +106,14 @@ def _cleanup_stale(now: float) -> None:
                 del _last_request[uid]
                 _locks.pop(uid, None)
 
+    # Cleanup _request_history: remove entries with no recent timestamps
+    for uid in list(_request_history.keys()):
+        history = _request_history[uid]
+        # Remove timestamps older than hard TTL
+        _request_history[uid] = [t for t in history if now - t < _HARD_TTL]
+        if not _request_history[uid]:
+            del _request_history[uid]
+
 
 def _cleanup_locks(now: float) -> None:
     """Удалить блокировки, которые никто не держит и не использовались давно."""
