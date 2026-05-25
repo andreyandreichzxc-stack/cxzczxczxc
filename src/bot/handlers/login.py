@@ -100,7 +100,7 @@ async def step_api_id(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Отлично. Теперь введи <b>api_hash</b> "
         f"(по умолчанию <code>{settings.api_hash[:4]}••••{settings.api_hash[-4:]}</code>).\n"
-        "Если подходит — просто отправь его или введи свой."
+        "Напиши <b>1</b> или <b>дефолт</b> — я возьму стандартный. Или введи свой."
     )
 
 
@@ -110,6 +110,8 @@ async def step_api_hash(message: Message, state: FSMContext) -> None:
     # Auto-accept default api_hash if user presses Enter OR types keyword
     if not text or text.lower() in (
         "дефолтный",
+        "дефолт",
+        "1",
         "default",
         "стандартный",
         "да",
