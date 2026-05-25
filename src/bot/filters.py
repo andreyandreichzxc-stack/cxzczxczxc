@@ -20,11 +20,25 @@ async def is_onboarded(tg_id: int) -> bool:
       - есть хотя бы один LLM-ключ (LlmKeySlot)
       - часовой пояс отличается от UTC (или "Europe/Moscow" и т.п.)
     """
-    from src.db.repo import get_or_create_user
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from src.db.models import User
     from src.db.session import get_session
 
     async with get_session() as session:
-        owner = await get_or_create_user(session, tg_id)
+        stmt = (
+            select(User)
+            .where(User.telegram_id == tg_id)
+            .options(
+                selectinload(User.session),
+                selectinload(User.key_slots),
+                selectinload(User.settings),
+            )
+        )
+        owner = (await session.execute(stmt)).unique().scalar_one_or_none()
+        if owner is None:
+            return False
         has_session = owner.session is not None
         has_llm_key = len(owner.key_slots) > 0
         has_tz = owner.settings.timezone not in (None, "", "UTC", "Etc/UTC")
@@ -40,11 +54,26 @@ async def get_onboarding_phase(tg_id: int) -> int:
       3 — нет часового пояса / синхронизации (всё разрешено, но с подсказкой /sync)
       4 — онбординг завершён
     """
-    from src.db.repo import get_or_create_user
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from src.db.models import User
     from src.db.session import get_session
 
     async with get_session() as session:
-        owner = await get_or_create_user(session, tg_id)
+        stmt = (
+            select(User)
+            .where(User.telegram_id == tg_id)
+            .options(
+                selectinload(User.session),
+                selectinload(User.key_slots),
+                selectinload(User.settings),
+            )
+        )
+        owner = (await session.execute(stmt)).unique().scalar_one_or_none()
+        if owner is None:
+            return 1  # незнакомец — фаза 1
+
         has_session = owner.session is not None
         has_llm_key = len(owner.key_slots) > 0
         has_tz = owner.settings.timezone not in (None, "", "UTC", "Etc/UTC")

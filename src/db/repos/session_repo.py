@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.db.models import (
     AdaptivePersona,
@@ -57,7 +58,9 @@ async def get_or_create_user(
         cached = await cache_get(f"user:{telegram_id}")
         if cached is not None:
             # cached is user.id (int) — retrieve fresh session-attached object
-            user = await session.get(User, cached)
+            user = await session.get(
+                User, cached, options=[selectinload(User.key_slots)]
+            )
             if user is not None:
                 return user
     lock = _get_user_lock(
@@ -65,7 +68,9 @@ async def get_or_create_user(
     )  # отрицательный, чтобы не пересекаться с user.id
     async with lock:
         result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id)
+            select(User)
+            .where(User.telegram_id == telegram_id)
+            .options(selectinload(User.key_slots))
         )
         user = result.scalar_one_or_none()
         if user is None:
