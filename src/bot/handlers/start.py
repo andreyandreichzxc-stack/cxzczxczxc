@@ -449,7 +449,7 @@ async def step_onboarding_llm_key_v2(message: Message, state: FSMContext) -> Non
 
     await state.set_state(OnboardingStates.waiting_llm_key)  # остаёмся в этом стейте
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Добавить ещё ключ", callback_data="onb:provider:goback")
+    kb.button(text="➕ Добавить ещё ключ", callback_data="onb:goback")
     kb.button(text="✅ Закончить", callback_data="onb:done:keys")
     kb.adjust(2)
     await message.answer(
@@ -459,7 +459,7 @@ async def step_onboarding_llm_key_v2(message: Message, state: FSMContext) -> Non
     )
 
 
-@router.callback_query(F.data == "onb:provider:goback")
+@router.callback_query(F.data == "onb:goback")
 async def cb_onboarding_more_keys(call: CallbackQuery, state: FSMContext) -> None:
     """Пользователь хочет добавить ещё ключей — возвращаем к выбору провайдера."""
     await call.answer()
