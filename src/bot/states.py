@@ -30,6 +30,10 @@ class SettingsStates(StatesGroup):
     waiting_mimo_key = State()
     waiting_groq_key = State()
     waiting_custom_model_name = State()
+    waiting_custom_name = State()
+    waiting_custom_endpoint = State()
+    waiting_custom_key = State()
+    waiting_custom_models = State()
 
 
 class NewsTopicStates(StatesGroup):

@@ -24,6 +24,7 @@ from src.core.intelligence.adaptive_persona import (
     reset_persona_to_snapshot,
 )
 from src.db.repo import (
+    add_key_slot,
     get_api_key,
     get_or_create_user,
     get_persona,
@@ -42,6 +43,7 @@ from src.llm.groq_provider import GroqProvider
 from src.llm.mimo_provider import MiMoProvider
 from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
+from src.llm.custom_provider import CustomProvider
 
 
 logger = logging.getLogger(__name__)
@@ -141,6 +143,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         grok_key = await get_api_key(session, owner, "grok")
         mimo_key = await get_api_key(session, owner, "mimo")
         groq_key = await get_api_key(session, owner, "groq")
+        custom_key = await get_api_key(session, owner, "custom")
 
         # ── Extract ORM values to local vars (session-safe) ──────────
         _tz = s.timezone
@@ -168,17 +171,15 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
     text = (
         "⚙ <b>Настройки</b>\n\n"
         f"🌍 Часовой пояс: <b>{tz_short(_tz)}</b>\n"
-        f"🔄 Авто-ответ: {_check(_auto_reply_enabled)} (кулдаун {_auto_reply_cooldown_min}м)\n"
-        f"🔄 Авто-синк: {_check(_auto_sync_enabled)} (каждые {_auto_sync_interval_sec}с)\n"
+        f"🔄 Авто: ответ {_check(_auto_reply_enabled)} ({_auto_reply_cooldown_min}м) · синк {_check(_auto_sync_enabled)} ({_auto_sync_interval_sec}с)\n"
         f"🧠 Авто-память: {_check(_auto_extract_memories)}\n"
         f"⭐ Избранное: {_check(_include_saved_messages)}\n"
-        f"☀ Дайджест: {_check(_digest_enabled)} ({_digest_time})\n"
+        f"☀ Дайджест: {_check(_digest_enabled)} ({_digest_time}) · smart: {_check(_smart_digest_enabled)} ({_smart_digest_interval_min}м)\n"
         f"⏰ Напоминания: {_check(_reminders_enabled)} (за {_reminder_lead_hours}ч; просрочки {_check(_reminder_overdue_enabled)})\n"
         f"📰 Новости: {_check(_news_enabled)} (окно {_news_window_hours}ч)\n"
         f"🛡 Игнорировать архив: {_check(_ignore_archived)}\n"
-        f"📊 Smart дайджест: {_check(_smart_digest_enabled)} (каждые {_smart_digest_interval_min}м)\n"
         f"🧠 LLM: <b>{_llm_provider}</b> · {'тяжёлая' if _use_heavy_model else 'лёгкая'} · tr: {_transcription_mode}\n"
-        f"🔑 Ключи: OpenAI {_check(bool(openai_key))} · Gemini {_check(bool(gemini_key))} · Mistral {_check(bool(mistral_key))} · DeepSeek {_check(bool(deepseek_key))} · Cloudflare {_check(bool(cloudflare_key))} · Grok {_check(bool(grok_key))} · MiMo {_check(bool(mimo_key))} · Groq {_check(bool(groq_key))}\n\n"
+        f"🔑 Ключи: OpenAI {_check(bool(openai_key))} · Gemini {_check(bool(gemini_key))} · Mistral {_check(bool(mistral_key))} · DeepSeek {_check(bool(deepseek_key))} · Cloudflare {_check(bool(cloudflare_key))} · Grok {_check(bool(grok_key))} · MiMo {_check(bool(mimo_key))} · Groq {_check(bool(groq_key))} · Свой {_check(bool(custom_key))}\n\n"
         "<i>Тапни раздел, чтобы открыть его настройки и описание.</i>"
     )
     kb = InlineKeyboardBuilder()
@@ -556,6 +557,7 @@ async def _render_section(
         grok_key = await get_api_key(session, owner, "grok")
         mimo_key = await get_api_key(session, owner, "mimo")
         groq_key = await get_api_key(session, owner, "groq")
+        custom_key = await get_api_key(session, owner, "custom")
 
         kb = InlineKeyboardBuilder()
 
@@ -859,31 +861,30 @@ async def _render_section(
                 overrides = {}
 
             task_labels = {
-                "maestro": "Maestro (оркестрация)",
-                "draft": "Черновики",
-                "memory": "Память",
-                "search": "Поиск",
-                "stt": "Распознавание речи",
-                "humanize": "Очеловечивание",
-                "classify": "Классификация",
-                "summarize": "Саммари",
-                "skills": "Навыки",
-                "background": "Фоновые задачи",
-                "default": "Обычный чат",
+                "maestro": "🎭 Maestro (оркестрация)",
+                "draft": "✍️ Черновики",
+                "memory": "🧠 Память",
+                "search": "🔍 Поиск",
+                "stt": "🎤 Распознавание речи",
+                "humanize": "✨ Хуманайзер",
+                "classify": "🏷 Классификация",
+                "summarize": "📝 Саммари",
+                "skills": "🛠 Навыки",
+                "background": "🌙 Фоновые задачи",
+                "default": "💬 Обычный чат",
             }
 
             lines = ["🧠 <b>Модели для задач</b>", ""]
             for task_type, label in task_labels.items():
                 override = overrides.get(task_type)
-                if override:
-                    lines.append(f"  {label}: <code>{override}</code> ✏")
-                else:
-                    lines.append(f"  {label}: <i>по умолчанию</i>")
-
+                model_str = (
+                    f"<code>{override}</code>" if override else "<i>по умолчанию</i>"
+                )
+                lines.append(f"{label}: {model_str}")
             lines.append("")
             lines.append(
-                "<i>Нажми на задачу — выбери модель. "
-                "Имеет приоритет над провайдером.</i>"
+                "<i>Нажми на задачу, чтобы выбрать модель. "
+                "Переопределения имеют приоритет над LLM-провайдером.</i>"
             )
             text = "\n".join(lines)
 
@@ -905,17 +906,17 @@ async def _render_section(
             task_type = section.split(":", 1)[1]
 
             task_labels = {
-                "maestro": "Maestro (оркестрация)",
-                "draft": "Черновики",
-                "memory": "Память",
-                "search": "Поиск",
-                "stt": "Распознавание речи",
-                "humanize": "Очеловечивание",
-                "classify": "Классификация",
-                "summarize": "Саммари",
-                "skills": "Навыки",
-                "background": "Фоновые задачи",
-                "default": "Обычный чат",
+                "maestro": "🎭 Maestro (оркестрация)",
+                "draft": "✍️ Черновики",
+                "memory": "🧠 Память",
+                "search": "🔍 Поиск",
+                "stt": "🎤 Распознавание речи",
+                "humanize": "✨ Хуманайзер",
+                "classify": "🏷 Классификация",
+                "summarize": "📝 Саммари",
+                "skills": "🛠 Навыки",
+                "background": "🌙 Фоновые задачи",
+                "default": "💬 Обычный чат",
             }
             task_label = task_labels.get(task_type, task_type)
 
@@ -926,11 +927,35 @@ async def _render_section(
 
             current = overrides.get(task_type)
 
-            # Получаем доступные модели из каталога текущего провайдера
+            # Собираем доступные модели из ВСЕХ ключей пользователя
+            slots = await list_key_slots(session, owner)
+            provider_models: dict[str, set[str]] = {}
+            for slot in slots:
+                if not slot.enabled:
+                    continue
+                if slot.provider not in provider_models:
+                    provider_models[slot.provider] = set()
+                if slot.model:
+                    provider_models[slot.provider].add(slot.model)
+
             from src.llm.provider_catalog import get_provider
 
-            provider_info = get_provider(s.llm_provider)
-            available_models = provider_info.models if provider_info else []
+            available_models: list[str] = []
+            for provider, models in provider_models.items():
+                if models:
+                    available_models.extend(sorted(models))
+                else:
+                    pi = get_provider(provider)
+                    if pi:
+                        available_models.extend(pi.models)
+
+            # Убираем дубли и сортируем
+            available_models = sorted(set(available_models))
+
+            # Если ничего нет — показываем каталог основного провайдера
+            if not available_models:
+                pi = get_provider(s.llm_provider)
+                available_models = pi.models if pi else []
 
             lines = [
                 f"🧠 <b>Модель для: {task_label}</b>",
@@ -1126,7 +1151,8 @@ async def _render_section(
                 f"Cloudflare: {_check(bool(cloudflare_key))}\n"
                 f"Grok: {_check(bool(grok_key))}\n"
                 f"MiMo: {_check(bool(mimo_key))}\n"
-                f"Groq: {_check(bool(groq_key))}"
+                f"Groq: {_check(bool(groq_key))}\n"
+                f"Свой: {_check(bool(custom_key))}"
             )
             kb.row(
                 InlineKeyboardButton(
@@ -1160,6 +1186,11 @@ async def _render_section(
             kb.row(
                 InlineKeyboardButton(
                     text="🔑 Groq key", callback_data="set:input:groq_key"
+                ),
+            )
+            kb.row(
+                InlineKeyboardButton(
+                    text="➕ Свой провайдер", callback_data="set:input:custom_name"
                 ),
             )
             kb.row(*_back_row())
@@ -1508,6 +1539,17 @@ async def cb_input_groq(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "set:input:custom_name")
+async def cb_input_custom_name(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingsStates.waiting_custom_name)
+    await callback.message.answer(
+        "➕ <b>Свой провайдер</b>\n\n"
+        "Шаг 1/4: Пришли название провайдера (например: <code>Local LLM</code>).\n"
+        "/cancel — отмена."
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "set:input:digest_time")
 async def cb_input_digest(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_digest_time)
@@ -1603,7 +1645,7 @@ async def cb_model_reset_all(callback: CallbackQuery) -> None:
         owner.settings.model_overrides = None
         await session.flush()
     await callback.answer("🗑 Все переопределения моделей сброшены")
-    await _refresh_section(callback, "models")
+    await _refresh_section(callback, "models_brain")
 
 
 @router.callback_query(F.data.startswith("set:model:set:"))
@@ -1657,7 +1699,7 @@ async def cb_model_del(callback: CallbackQuery) -> None:
         )
         await session.flush()
     await callback.answer(f"🗑 Переопределение для {task_type} удалено")
-    await _refresh_section(callback, "models")
+    await _refresh_section(callback, "models_brain")
 
 
 @router.callback_query(F.data.startswith("set:model:custom:"))
@@ -1795,6 +1837,7 @@ async def step_openai_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "openai", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "openai")
+    await state.clear()
     count = len(parts)
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Ещё ключ", callback_data="set:input:openai_key")
@@ -1864,6 +1907,7 @@ async def step_mistral_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "mistral", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "mistral")
+    await state.clear()
     count = len(parts)
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Ещё ключ", callback_data="set:input:mistral_key")
@@ -1900,6 +1944,7 @@ async def step_cloudflare_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "cloudflare", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "cloudflare")
+    await state.clear()
     count = len(parts)
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Ещё ключ", callback_data="set:input:cloudflare_key")
@@ -1934,6 +1979,7 @@ async def step_deepseek_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "deepseek", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "deepseek")
+    await state.clear()
     count = len(parts)
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Ещё ключ", callback_data="set:input:deepseek_key")
@@ -1968,6 +2014,7 @@ async def step_grok_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "grok", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "grok")
+    await state.clear()
     count = len(parts)
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Ещё ключ", callback_data="set:input:grok_key")
@@ -2002,6 +2049,7 @@ async def step_mimo_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "mimo", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "mimo")
+    await state.clear()
     count = len(parts)
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Ещё ключ", callback_data="set:input:mimo_key")
@@ -2036,6 +2084,7 @@ async def step_groq_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "groq", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "groq")
+    await state.clear()
     count = len(parts)
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Ещё ключ", callback_data="set:input:groq_key")
@@ -2043,6 +2092,123 @@ async def step_groq_key(message: Message, state: FSMContext) -> None:
     kb.adjust(2)
     await message.answer(
         f"✅ Сохранено Groq ключей: {count}.\n🔑 В базе Groq ключей: {total}.\n\n"
+        "Добавить ещё?",
+        reply_markup=kb.as_markup(),
+    )
+
+
+# ── Custom provider FSM (4 шага) ──
+
+
+@router.message(SettingsStates.waiting_custom_name)
+async def step_custom_name(message: Message, state: FSMContext) -> None:
+    """Шаг 1/4: название провайдера."""
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer("Введи название. /cancel — отмена.")
+        return
+    await state.update_data(custom_name=name)
+    await state.set_state(SettingsStates.waiting_custom_endpoint)
+    await message.answer(
+        f"✅ Название: <b>{sanitize_html(name)}</b>\n\n"
+        "Шаг 2/4: Пришли endpoint (базовый URL API).\n"
+        "Например: <code>https://api.openai.com/v1</code>\n"
+        "/cancel — отмена."
+    )
+
+
+@router.message(SettingsStates.waiting_custom_endpoint)
+async def step_custom_endpoint(message: Message, state: FSMContext) -> None:
+    """Шаг 2/4: endpoint."""
+    endpoint = (message.text or "").strip()
+    if not endpoint:
+        await message.answer("Введи URL. /cancel — отмена.")
+        return
+    if not endpoint.startswith("https://") and not endpoint.startswith("http://"):
+        await message.answer("❌ URL должен начинаться с https:// или http://")
+        return
+    await state.update_data(custom_endpoint=endpoint)
+    await state.set_state(SettingsStates.waiting_custom_key)
+    await message.answer(
+        f"✅ Endpoint: <code>{sanitize_html(endpoint)}</code>\n\n"
+        "Шаг 3/4: Пришли API-ключ.\n"
+        "💡 Можно несколько ключей через запятую.\n"
+        "/cancel — отмена."
+    )
+
+
+@router.message(SettingsStates.waiting_custom_key)
+async def step_custom_key(message: Message, state: FSMContext) -> None:
+    """Шаг 3/4: API-ключ + валидация."""
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Пустой ключ. Повтори или /cancel.")
+        return
+    parts = [k.strip() for k in raw.split(",") if k.strip()]
+    if not parts:
+        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
+        return
+    data = await state.get_data()
+    endpoint = data.get("custom_endpoint", "")
+    try:
+        await message.delete()
+    except Exception:
+        logger.exception("failed to delete message with custom key")
+    try:
+        valid = await CustomProvider(parts[0], endpoint=endpoint).validate_key()
+    except Exception:
+        valid = False
+    if not valid:
+        await message.answer(
+            "❌ Ключ не работает или endpoint недоступен. Повтори или /cancel."
+        )
+        return
+    await state.update_data(custom_key=",".join(parts))
+    await state.set_state(SettingsStates.waiting_custom_models)
+    await message.answer(
+        "✅ Ключ работает!\n\n"
+        "Шаг 4/4: Пришли модели через запятую.\n"
+        "Например: <code>gpt-4, gpt-3.5-turbo, my-model</code>\n"
+        "💡 Каждая модель будет доступна для всех задач.\n"
+        "/cancel — отмена."
+    )
+
+
+@router.message(SettingsStates.waiting_custom_models)
+async def step_custom_models(message: Message, state: FSMContext) -> None:
+    """Шаг 4/4: модели — создаёт слоты в БД."""
+    raw_models = (message.text or "").strip()
+    if not raw_models:
+        await message.answer("Введи хотя бы одну модель. /cancel — отмена.")
+        return
+    models = [m.strip() for m in raw_models.split(",") if m.strip()]
+    data = await state.get_data()
+    name = data.get("custom_name", "custom")
+    endpoint = data.get("custom_endpoint", "")
+    key = data.get("custom_key", "")
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        for model in models:
+            await add_key_slot(
+                session,
+                owner,
+                provider="custom",
+                purpose="chat_light",
+                model=model,
+                label=f"{name}:{model}",
+                endpoint=endpoint,
+                key=key,
+            )
+        total = await _count_slots_for_provider(session, owner, "custom")
+    await state.clear()
+    count = len(models)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Ещё провайдер", callback_data="set:input:custom_name")
+    kb.button(text="✅ Назад", callback_data="set:done:key")
+    kb.adjust(2)
+    await message.answer(
+        f"✅ Провайдер <b>{sanitize_html(name)}</b> добавлен!\n"
+        f"Моделей: {count} · Всего custom ключей: {total}.\n\n"
         "Добавить ещё?",
         reply_markup=kb.as_markup(),
     )
@@ -2284,3 +2450,14 @@ async def cb_persona_reset(callback: CallbackQuery) -> None:
     else:
         await callback.answer("Нет сохранённого снапшота для сброса", show_alert=True)
     await _refresh_section(callback, "personality")
+
+
+# ---------- /cancel для состояний настроек ----------
+
+
+@router.message(Command("cancel"), F.state.in_(SettingsStates))
+async def cancel_settings_state(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    text, kb = await _render_menu(message.from_user.id)
+    await message.answer("🚫 Отменено.", reply_markup=kb)
+    await message.answer(text, reply_markup=kb)
