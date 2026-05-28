@@ -193,8 +193,25 @@ async def _voice_worker() -> None:
                         await _process_text(text, message, None, userbot_manager)
                     except Exception:
                         logger.exception("Failed to process transcribed text in worker")
-                    finally:
-                        _cleanup_voice_file(voice_path)
+
+                    # ── Сохраняем транскрибированный текст в память ──
+                    try:
+                        from src.core.memory.session_recorder import record_turn
+
+                        uid = message.from_user.id if message.from_user else None
+                        if uid is not None:
+                            async with get_session() as rec_session:
+                                await record_turn(rec_session, uid, "user", text)
+                                await record_turn(
+                                    rec_session, uid, "assistant", "(ответ отправлен)"
+                                )
+                    except Exception:
+                        logger.warning(
+                            "Failed to record voice transcription turn for user %s",
+                            message.from_user.id if message.from_user else "unknown",
+                        )
+
+                    _cleanup_voice_file(voice_path)
 
                 except asyncio.CancelledError:
                     raise  # propagate to outer handler for clean shutdown
