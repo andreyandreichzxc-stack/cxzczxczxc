@@ -23,8 +23,16 @@ from src.db.models._memory import Memory
 from src.db.repo import add_key_slot, get_or_create_user, upsert_api_key
 from src.db.session import get_session
 from src.core.infra.timeutil import TZ_PRESETS, is_valid_tz, tz_short
+from src.llm.anthropic_provider import AnthropicProvider
+from src.llm.cloudflare_provider import CloudflareProvider
+from src.llm.deepseek_provider import DeepSeekProvider
 from src.llm.gemini_provider import GeminiProvider
+from src.llm.grok_provider import GrokProvider
+from src.llm.groq_provider import GroqProvider
+from src.llm.mimo_provider import MiMoProvider
+from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
+from src.llm.openrouter_provider import OpenRouterProvider
 
 logger = logging.getLogger(__name__)
 
@@ -703,25 +711,23 @@ def _key_hint_for_provider(provider: str) -> str:
 async def _validate_key_v2(provider: str, key: str) -> tuple[bool, str | None]:
     """Валидирует ключ через провайдера. Возвращает (valid, error_hint)."""
     try:
-        providers_map = {
-            "openai": ("src.llm.openai_provider", "OpenAIProvider"),
-            "gemini": ("src.llm.gemini_provider", "GeminiProvider"),
-            "mistral": ("src.llm.mistral_provider", "MistralProvider"),
-            "cloudflare": ("src.llm.cloudflare_provider", "CloudflareProvider"),
-            "openrouter": ("src.llm.openrouter_provider", "OpenRouterProvider"),
-            "anthropic": ("src.llm.anthropic_provider", "AnthropicProvider"),
-            "deepseek": ("src.llm.deepseek_provider", "DeepSeekProvider"),
-            "grok": ("src.llm.grok_provider", "GrokProvider"),
-            "mimo": ("src.llm.mimo_provider", "MiMoProvider"),
-            "groq": ("src.llm.groq_provider", "GroqProvider"),
-        }
-        if provider not in providers_map:
+        _provider_cls = {
+            "openai": OpenAIProvider,
+            "gemini": GeminiProvider,
+            "mistral": MistralProvider,
+            "cloudflare": CloudflareProvider,
+            "openrouter": OpenRouterProvider,
+            "anthropic": AnthropicProvider,
+            "deepseek": DeepSeekProvider,
+            "grok": GrokProvider,
+            "mimo": MiMoProvider,
+            "groq": GroqProvider,
+        }.get(provider)
+
+        if _provider_cls is None:
             return (False, f"Неизвестный провайдер: {provider}")
 
-        mod_name, class_name = providers_map[provider]
-        mod = __import__(mod_name, fromlist=[class_name])
-        provider_cls = getattr(mod, class_name)
-        return (await provider_cls(key).validate_key(), None)
+        return (await _provider_cls(key).validate_key(), None)
     except Exception as e:
         err_str = str(e).lower()
         if any(

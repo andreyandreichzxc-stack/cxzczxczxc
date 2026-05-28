@@ -3,6 +3,9 @@
 Модели: grok-4.3 (latest), grok-4.20-0309-reasoning, grok-4.20-0309-non-reasoning.
 Base URL: https://api.x.ai/v1
 API docs: https://docs.x.ai/docs
+
+⚠️ xAI Grok не поддерживает embeddings. Провайдер использует OpenAICompatBaseMixin
+(только chat + validate + list_models). Embeddings берутся из других провайдеров через fallback-цепочку.
 """
 
 import httpx
@@ -10,7 +13,7 @@ from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
 from src.config import LLMDefaults
-from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin
+from src.llm._openai_compat_mixin import OpenAICompatBaseMixin
 from src.llm._ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
@@ -18,8 +21,8 @@ from src.llm.base import ChatMessage
 GROK_BASE_URL = "https://api.x.ai/v1"
 
 
-class GrokProvider(OpenAICompatEmbedMixin):
-    """Провайдер для Grok (xAI) — OpenAI-совместимый API."""
+class GrokProvider(OpenAICompatBaseMixin):
+    """Провайдер для Grok (xAI) — OpenAI-совместимый API. Без embeddings."""
 
     name = "grok"
 
@@ -34,11 +37,6 @@ class GrokProvider(OpenAICompatEmbedMixin):
         )
         self._client = AsyncOpenAI(**kwargs)
         self._model = model
-        self._embed_model = (
-            LLMDefaults.GROK_EMBED
-            if hasattr(LLMDefaults, "GROK_EMBED")
-            else "text-embedding-3-small"
-        )
 
     def _resolve_model(self, heavy: bool) -> str:
         return self._model or (
