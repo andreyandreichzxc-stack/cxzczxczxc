@@ -41,6 +41,10 @@ PyYAML==6.0.2
 requests==2.32.5
 beautifulsoup4==4.13.5
 
+# System monitoring & browser stealth
+psutil==7.2.2
+playwright==1.59.0
+
 # Миграции схемы БД
 alembic>=1.13
 
