@@ -83,6 +83,8 @@ async def main() -> None:
     register_default_gates()
     gates.run_all()
 
+    from src.core.scheduling.notification_queue import notification_queue
+
     # Notify owner about missing dependencies with install hints
     _missing = gates.missing_install_hints
     if _missing:
@@ -90,8 +92,6 @@ async def main() -> None:
         for m in _missing:
             _msgs.append(f"• {m['description']}: `{m['install_hint']}`")
         _msgs.append("\nПроверь `/gates` для полной картины.")
-        # Fire-and-forget via notification queue
-        from src.core.scheduling.notification_queue import notification_queue
 
         await notification_queue.enqueue(
             topic="system",
