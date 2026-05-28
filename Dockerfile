@@ -53,6 +53,11 @@ WORKDIR /app
 # Copy virtual env from builder (all pip packages)
 COPY --from=builder /venv /venv
 
+# Install Playwright Chromium browser + system deps
+ENV PLAYWRIGHT_BROWSERS_PATH=/venv/playwright-browsers
+RUN playwright install-deps chromium \
+    && playwright install chromium
+
 # Copy application code
 COPY src/ ./src/
 COPY skills/ ./skills/
