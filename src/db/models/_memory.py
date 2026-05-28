@@ -131,8 +131,8 @@ class MemoryLink(Base):
     )
     weight: Mapped[float] = mapped_column(Float, default=0.5)  # 0.0-1.0 сила связи
     relation_type: Mapped[str | None] = mapped_column(
-        String(16), nullable=True
-    )  # cause/effect/contradicts/supports/continues
+        String(32), nullable=True
+    )  # cause/effect/contradicts/supports/continues/co_temporal/co_entity/preceded
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

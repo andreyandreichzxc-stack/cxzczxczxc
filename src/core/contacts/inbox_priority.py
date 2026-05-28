@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timezone
 
 from src.core.infra.text_sanitizer import sanitize_html
+from sqlalchemy import func, select, desc
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +20,10 @@ async def rank_inbox(owner_telegram_id: int, limit: int = 10) -> list[dict]:
     from src.db.session import get_session
     from src.db.repo import (
         get_or_create_user,
-        get_contact,
         list_active_conversations,
         list_open_commitments,
     )
-    from sqlalchemy import select, desc
-    from src.db.models import Message
+    from src.db.models import Contact, Message
 
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
@@ -38,6 +37,59 @@ async def rank_inbox(owner_telegram_id: int, limit: int = 10) -> list[dict]:
         # Get open commitments for urgency boost
         commitments = await list_open_commitments(session, owner)
         commitment_peer_ids = {c.peer_id for c in commitments}
+
+        # ── Batch load contacts ────────────────────────────────────
+        peer_ids = [c.peer_id for c in convs]
+        if peer_ids:
+            contacts_r = await session.execute(
+                select(Contact).where(
+                    Contact.peer_id.in_(peer_ids),
+                    Contact.user_id == owner.id,
+                )
+            )
+            contacts_by_peer = {c.peer_id: c for c in contacts_r.scalars().all()}
+        else:
+            contacts_by_peer = {}
+
+        # ── Batch load health data ─────────────────────────────────
+        if peer_ids:
+            # Max message date per peer
+            max_date_r = await session.execute(
+                select(Message.peer_id, func.max(Message.date).label("max_date"))
+                .where(
+                    Message.user_id == owner.id,
+                    Message.peer_id.in_(peer_ids),
+                )
+                .group_by(Message.peer_id)
+            )
+            max_dates = {r[0]: r[1] for r in max_date_r.all()}
+
+            # Total message count per peer
+            count_r = await session.execute(
+                select(Message.peer_id, func.count().label("cnt"))
+                .where(
+                    Message.user_id == owner.id,
+                    Message.peer_id.in_(peer_ids),
+                )
+                .group_by(Message.peer_id)
+            )
+            msg_counts = {r[0]: r[1] for r in count_r.all()}
+
+            # Outgoing message count per peer
+            out_r = await session.execute(
+                select(Message.peer_id, func.count().label("cnt"))
+                .where(
+                    Message.user_id == owner.id,
+                    Message.peer_id.in_(peer_ids),
+                    Message.is_outgoing.is_(True),
+                )
+                .group_by(Message.peer_id)
+            )
+            outgoing_counts = {r[0]: r[1] for r in out_r.all()}
+        else:
+            max_dates = {}
+            msg_counts = {}
+            outgoing_counts = {}
 
         ranked = []
 
@@ -77,7 +129,7 @@ async def rank_inbox(owner_telegram_id: int, limit: int = 10) -> list[dict]:
                 .where(
                     Message.user_id == owner.id,
                     Message.peer_id == c.peer_id,
-                    Message.is_outgoing == False,
+                    Message.is_outgoing.is_(False),
                 )
                 .order_by(desc(Message.date))
                 .limit(1)
@@ -100,13 +152,38 @@ async def rank_inbox(owner_telegram_id: int, limit: int = 10) -> list[dict]:
                 priority += 2.0
                 reasons.append("открытое обязательство")
 
-            # 3. Contact health: lower health = higher priority
+            # 3. Contact health: lower health = higher priority (computed from batched data)
             health_score = 100
             try:
-                from src.core.contacts.health_score import get_contact_health
+                peer_id = c.peer_id
+                max_date = max_dates.get(peer_id)
+                msg_count = msg_counts.get(peer_id, 0)
+                outgoing = outgoing_counts.get(peer_id, 0)
 
-                health = await get_contact_health(owner_telegram_id, c.peer_id)
-                health_score = health.get("score", 100)
+                if max_date:
+                    if max_date.tzinfo is None:
+                        max_date = max_date.replace(tzinfo=timezone.utc)
+                    days_gap = (datetime.now(timezone.utc) - max_date).days
+                else:
+                    days_gap = 365
+
+                open_count = 1 if peer_id in commitment_peer_ids else 0
+                reply_ratio = outgoing / max(msg_count, 1)
+
+                score_val = 100.0
+                score_val -= min(days_gap / 7 * 10, 60)
+                score_val -= min(open_count * 5, 20)
+                if msg_count < 10:
+                    score_val -= 10
+                if 0.3 <= reply_ratio <= 0.7:
+                    score_val += 10
+                elif reply_ratio > 0.9:
+                    score_val -= 15
+                elif reply_ratio < 0.1 and msg_count > 5:
+                    score_val -= 20
+
+                health_score = max(0, min(100, round(score_val)))
+
                 if health_score < 50:
                     priority += 2.0
                     reasons.append(f"здоровье {health_score}")
@@ -138,8 +215,8 @@ async def rank_inbox(owner_telegram_id: int, limit: int = 10) -> list[dict]:
                     priority += 1.5
                     reasons.append("срочное сообщение")
 
-            # Get contact name
-            contact = await get_contact(session, owner, c.peer_id)
+            # Get contact name (from batch-loaded dict)
+            contact = contacts_by_peer.get(c.peer_id)
             peer_name = contact.display_name if contact else str(c.peer_id)
 
             # Determine urgency label

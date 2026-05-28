@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
+from sqlalchemy import func as sa_func
 
 from src.config import settings
 from src.core.scheduling.notification_queue import notification_queue
@@ -13,7 +14,7 @@ from src.core.infra.timeutil import fmt_local, now_in_tz
 from src.db.models import AutoReplyLog, Commitment, Message, User
 from src.db.repo import get_or_create_user, list_open_commitments
 from src.db.session import get_session
-from src.llm.base import ChatMessage
+from src.llm.base import ChatMessage, TaskType
 from src.llm.router import build_provider
 
 
@@ -55,23 +56,35 @@ async def _gather_payload(owner: User) -> dict:
             by_peer.setdefault(m.peer_id, []).append(m)
 
         waiting: list[tuple[int, str | None, str]] = []
-        for peer_id, msgs in by_peer.items():
-            last_in = max(msgs, key=lambda x: x.date)
-            my_after = await session.execute(
-                select(Message)
+        if by_peer:
+            peer_ids = list(by_peer.keys())
+            # Batch: get last outgoing message date per peer in one query
+            subq = (
+                select(
+                    Message.peer_id,
+                    sa_func.max(Message.date).label("last_out_date"),
+                )
                 .where(
                     Message.user_id == owner.id,
-                    Message.peer_id == peer_id,
+                    Message.peer_id.in_(peer_ids),
                     Message.is_outgoing.is_(True),
-                    Message.date > last_in.date,
                 )
-                .limit(1)
+                .group_by(Message.peer_id)
             )
-            if my_after.scalar_one_or_none() is None:
-                snippet = (
-                    last_in.transcript or last_in.text or last_in.extracted_text or ""
-                )[:200]
-                waiting.append((peer_id, last_in.sender_name, snippet))
+            result = await session.execute(subq)
+            last_outgoing = {row.peer_id: row.last_out_date for row in result}
+
+            for peer_id, msgs in by_peer.items():
+                last_in = max(msgs, key=lambda x: x.date)
+                last_out = last_outgoing.get(peer_id)
+                if last_out is None or last_out <= last_in.date:
+                    snippet = (
+                        last_in.transcript
+                        or last_in.text
+                        or last_in.extracted_text
+                        or ""
+                    )[:200]
+                    waiting.append((peer_id, last_in.sender_name, snippet))
 
         mine = await list_open_commitments(session, owner, direction="mine")
         theirs = await list_open_commitments(session, owner, direction="theirs")
@@ -134,8 +147,7 @@ def _payload_to_text(payload: dict, tz_name: str) -> str:
 async def build_digest(owner_telegram_id: int) -> str:
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_telegram_id)
-        provider = await build_provider(session, owner)
-        heavy = owner.settings.use_heavy_model
+        provider = await build_provider(session, owner, task_type=TaskType.SUMMARIZE)
         tz_name = owner.settings.timezone
 
     if provider is None:
@@ -151,7 +163,7 @@ async def build_digest(owner_telegram_id: int) -> str:
             ChatMessage(role="system", content=DIGEST_SYSTEM),
             ChatMessage(role="user", content=raw_text),
         ],
-        heavy=heavy,
+        task_type=TaskType.SUMMARIZE,
     )
     return sanitize_html(response)
 

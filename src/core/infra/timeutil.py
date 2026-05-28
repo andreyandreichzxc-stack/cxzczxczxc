@@ -69,6 +69,19 @@ def fmt_local(
     return local.strftime(fmt)
 
 
+def ensure_utc(dt: datetime | None) -> datetime | None:
+    """Приводит naive datetime к UTC-aware.
+
+    SQLite с DateTime(timezone=True) возвращает aware datetime для новых записей,
+    но старые записи без TZ в ISO-строке приходят как naive.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def tz_short(tz_name: str | None) -> str:
     tz = parse_tz(tz_name)
     offset = datetime.now(tz).utcoffset()

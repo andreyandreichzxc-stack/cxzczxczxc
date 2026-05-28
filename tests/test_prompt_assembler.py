@@ -158,6 +158,28 @@ class TestTier3Volatile:
         result = assembler._tier3_volatile(ctx)
         assert "глубокие воспоминания" in result
 
+    def test_tier3_includes_memory_context_for_maestro(self, assembler):
+        ctx = AssemblyContext(
+            target="maestro",
+            user_id=12345,
+            memory_context="<recall_context>critical fact</recall_context>",
+        )
+
+        result = assembler._tier3_volatile(ctx)
+
+        assert "<recall_context>critical fact</recall_context>" in result
+
+    def test_tier3_includes_self_profile_for_maestro(self, assembler):
+        ctx = AssemblyContext(
+            target="maestro",
+            user_id=12345,
+            self_profile="[self-profile] owner prefers concise answers",
+        )
+
+        result = assembler._tier3_volatile(ctx)
+
+        assert "[self-profile] owner prefers concise answers" in result
+
     def test_tier3_includes_rag_context(self, assembler, minimal_ctx):
         """rag_context попадает в volatile секцию."""
         ctx = AssemblyContext(
@@ -306,3 +328,22 @@ class TestTruncationPriority:
         assert TRUNCATION_PRIORITY[2] == "conversation_history"
         assert TRUNCATION_PRIORITY[3] == "deep_memory"
         assert len(TRUNCATION_PRIORITY) == 4
+
+
+def test_context_engine_register_is_idempotent_by_provider_name():
+    from src.core.context.engine import ContextEngine
+
+    class DummyProvider:
+        name = "dummy"
+
+        async def get_context(self, query, *, telegram_id, contact_id=None, limit=8):
+            return []
+
+    engine = ContextEngine()
+    provider = DummyProvider()
+
+    engine.register(provider)
+    engine.register(provider)
+    engine.register(DummyProvider())
+
+    assert engine.providers == ["dummy"]

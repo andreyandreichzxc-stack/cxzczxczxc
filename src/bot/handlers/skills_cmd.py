@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
@@ -13,9 +15,13 @@ from src.db.repo import (
     upsert_skill,
 )
 from src.db.session import get_session
+from src.core.intelligence.skill_editor import bump_version
+from src.core.context_cache import invalidate as cache_invalidate
 
 router = Router(name="skills_cmd")
 router.message.filter(OwnerOnly())
+
+logger = logging.getLogger(__name__)
 
 
 @router.message(Command("skills"))
@@ -106,8 +112,11 @@ async def cmd_skills(message: Message, command: CommandObject) -> None:
                     )
                     break
             await message.answer(
-                f"<b>{skill.name}</b>\n"
-                f"enabled={skill.enabled} · status={skill.review_status}\n\n"
+                f"<b>{skill.name}</b> v{skill.version or '1.0.0'}\n"
+                f"enabled={skill.enabled} · status={skill.review_status}\n"
+                f"validation: {'%.0f%%' % (skill.validation_score * 100) if skill.validation_score is not None else '—'}\n"
+                f"edits: {len(skill.edit_history_json or [])} · "
+                f"rejected: {len(skill.rejected_edits_json or [])}\n\n"
                 f"{skill.description or ''}"
                 f"{yaml_info}\n\n"
                 f"<pre>{skill.body[:3000]}</pre>"
@@ -126,6 +135,46 @@ async def cmd_skills(message: Message, command: CommandObject) -> None:
             await message.answer("Skill включен." if skill else "Skill не найден.")
             return
 
+        if parts and parts[0] == "rollback" and len(parts) > 1:
+            try:
+                skill = await get_skill_by_name(session, owner, parts[1])
+                if not skill:
+                    await message.answer("Skill не найден.")
+                    return
+                if skill.best_body is None:
+                    await message.answer(
+                        "Нет сохранённой стабильной версии для отката."
+                    )
+                    return
+
+                from datetime import datetime, timezone
+
+                old_version = skill.version or "1.0.0"
+                skill.body = skill.best_body
+                skill.validation_score = None
+                new_version = bump_version(old_version, "minor")
+                skill.version = new_version
+
+                history = list(skill.edit_history_json or [])
+                history.append(
+                    {
+                        "op": "rollback",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "reason": "Manual rollback to best_body",
+                    }
+                )
+                skill.edit_history_json = history
+
+                await session.flush()
+                await cache_invalidate(f"skills:{owner.telegram_id}:")
+                await message.answer(
+                    f"✅ Skill <b>{skill.name}</b> откачен к стабильной версии v{new_version}."
+                )
+            except Exception as e:
+                logger.exception("Rollback failed for skill %r", parts[1])
+                await message.answer(f"⚠️ Ошибка отката: {e}")
+            return
+
         skills = await list_skills(session, owner, limit=30)
 
     if not skills:
@@ -135,9 +184,17 @@ async def cmd_skills(message: Message, command: CommandObject) -> None:
     lines = ["<b>Skills</b>"]
     for skill in skills:
         state = "on" if skill.enabled else "off"
+        ver = skill.version or "1.0.0"
+        score = (
+            "%.0f%%" % (skill.validation_score * 100)
+            if skill.validation_score is not None
+            else "—"
+        )
+        edits = len(skill.edit_history_json or [])
         lines.append(
-            f"• <b>{skill.name}</b> · {state} · {skill.review_status} · "
-            f"ok:{skill.success_count} err:{skill.failure_count}"
+            f"• <b>{skill.name}</b> v{ver} · {state} · {skill.review_status} · "
+            f"ok:{skill.success_count} err:{skill.failure_count} · "
+            f"score:{score} edits:{edits}"
         )
     lines.append(
         "\n<code>/skills show name</code> · "

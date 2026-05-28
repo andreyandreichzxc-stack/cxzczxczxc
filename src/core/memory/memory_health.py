@@ -2,10 +2,23 @@
 
 import logging
 from datetime import datetime, timedelta, timezone
+from sqlalchemy import func, select
 from src.db.session import get_session
 from src.db.repo import get_or_create_user, list_memories, list_contacts
+from src.db.models import MemoryLink
+from src.db.repos.memory_repo import get_graph_stats
+from src.core.memory.temporal_layers import compute_retention
 
 logger = logging.getLogger(__name__)
+
+
+def _ru_plural(count: int, one: str, few: str, many: str) -> str:
+    """Возвращает русское окончание для числительных."""
+    if count % 10 == 1 and count % 100 != 11:
+        return one
+    if 2 <= count % 10 <= 4 and (count % 100 < 10 or count % 100 >= 20):
+        return few
+    return many
 
 
 async def calculate_health_score(owner_id: int) -> dict:
@@ -106,13 +119,59 @@ async def calculate_health_score(owner_id: int) -> dict:
                 f"🟡 Теги: {len(tagged)}/{len(active)} фактов протегировано ({tag_ratio * 100:.0f}%)"
             )
 
+        # 6. Retention Score (средняя Ebbinghaus retention активных фактов) × 100
+        retention_values = [compute_retention(m, now) for m in active]
+        avg_retention = (
+            sum(retention_values) / len(retention_values) if retention_values else 0
+        )
+        retention_score = avg_retention * 100
+        if retention_score < 30:
+            diagnostics.append(
+                f"🔴 Retention: {avg_retention:.2f} — факты быстро забываются"
+            )
+        elif retention_score < 60:
+            diagnostics.append(
+                f"🟡 Retention: {avg_retention:.2f} — средняя сохранность"
+            )
+        else:
+            diagnostics.append(
+                f"🟢 Retention: {avg_retention:.2f} — хорошая сохранность"
+            )
+
+        # 7. Contradictions warning
+        contrad = await session.execute(
+            select(func.count())
+            .select_from(MemoryLink)
+            .where(
+                MemoryLink.user_id == owner.id,
+                MemoryLink.relation_type == "contradicts",
+            )
+        )
+        contradictions_count: int = contrad.scalar() or 0
+        if contradictions_count > 0:
+            diagnostics.append(
+                f"⚠️ {contradictions_count} противоречи{_ru_plural(contradictions_count, 'й', 'я', 'й')} обнаружено в памяти"
+            )
+
+        # 8. Graph connectivity indicator
+        try:
+            graph_stats = await get_graph_stats(session, owner.id)
+            if graph_stats["node_count"] > 0:
+                diagnostics.append(
+                    f"🔗 Граф: {graph_stats['node_count']} узлов, {graph_stats['total_edges']} рёбер, "
+                    f"средняя степень {graph_stats['avg_degree']}"
+                )
+        except Exception:
+            logger.debug("get_graph_stats unavailable, skipping graph indicator")
+
         # Композитный score: среднее взвешенное
         weights = {
-            "confidence": 0.35,
-            "coverage": 0.25,
-            "freshness": 0.25,
+            "confidence": 0.30,
+            "coverage": 0.20,
+            "freshness": 0.20,
             "structure": 0.10,
             "tags": 0.05,
+            "retention": 0.15,
         }
         composite = (
             weights["confidence"] * confidence_score
@@ -120,6 +179,7 @@ async def calculate_health_score(owner_id: int) -> dict:
             + weights["freshness"] * freshness_score
             + weights["structure"] * structure_score
             + weights["tags"] * tag_score
+            + weights["retention"] * retention_score
         )
 
         # Определяем уровень
@@ -146,6 +206,7 @@ async def calculate_health_score(owner_id: int) -> dict:
             "freshness_score": round(freshness_score, 1),
             "structure_score": round(structure_score, 1),
             "tag_score": round(tag_score, 1),
+            "retention_score": round(retention_score, 1),
             "total_facts": len(active),
             "total_contacts": all_contacts,
             "contacts_with_facts": len(contacts_with_facts),
@@ -176,6 +237,7 @@ def format_health(health: dict) -> str:
         f"  ⏳ Свежесть: {health['freshness_score']}/100",
         f"  💡 Структура: {health['structure_score']}/100",
         f"  🏷 Теги: {health['tag_score']}/100",
+        f"  🧠 Retention: {health['retention_score']}/100",
         f"  📝 Всего фактов: {health['total_facts']}",
     ]
 

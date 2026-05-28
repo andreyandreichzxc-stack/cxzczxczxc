@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from src.llm.base import ChatMessage
@@ -23,7 +25,9 @@ class FakeProvider:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
 
-    async def chat(self, messages, *, heavy: bool = False) -> str:
+    async def chat(
+        self, messages, *, heavy: bool = False, task_type: str = "default"
+    ) -> str:
         self.calls.append(self.api_key)
         if self.api_key.startswith("bad"):
             raise CapacityError("Service tier capacity exceeded for this model")
@@ -45,12 +49,31 @@ class FakeProvider:
         pass
 
 
+class SlowProvider(FakeProvider):
+    entered: list[str] = []
+    release: asyncio.Event | None = None
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.entered = []
+        cls.release = None
+
+    async def chat(
+        self, messages, *, heavy: bool = False, task_type: str = "default"
+    ) -> str:
+        self.entered.append(self.api_key)
+        assert self.release is not None
+        await self.release.wait()
+        return f"ok:{self.api_key}"
+
+
 @pytest.fixture(autouse=True)
 def _cleanup_fake_providers():
     """Очистить shared mutable state после каждого теста."""
     FakeProvider.clear_calls()
     ExhaustingProvider.clear_calls()
     GoodProvider.clear_calls()
+    SlowProvider.reset()
     yield
 
 
@@ -98,6 +121,24 @@ async def test_provider_fallback_keeps_embeddings_on_primary_provider():
     assert FakeProvider.calls == ["embed:good-primary"]
 
 
+@pytest.mark.asyncio
+async def test_multikey_reserves_distinct_start_indices_for_concurrent_calls():
+    provider = MultiKeyProvider("slow", SlowProvider, ["k1", "k2", "k3"])
+    SlowProvider.release = asyncio.Event()
+
+    tasks = [
+        asyncio.create_task(provider.chat([ChatMessage(role="user", content="hi")]))
+        for _ in range(2)
+    ]
+    for _ in range(100):
+        if len(SlowProvider.entered) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    assert SlowProvider.entered == ["k1", "k2"]
+    SlowProvider.release.set()
+    await asyncio.gather(*tasks)
+
+
 # ---------------------------------------------------------------------------
 # ExhaustedError fallback — primary exhausted → secondary used
 # ---------------------------------------------------------------------------
@@ -115,7 +156,9 @@ class ExhaustingProvider:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
 
-    async def chat(self, messages, *, heavy: bool = False) -> str:
+    async def chat(
+        self, messages, *, heavy: bool = False, task_type: str = "default"
+    ) -> str:
         self.calls.append(self.api_key)
         raise ExhaustedError(f"All keys for {self.api_key} exhausted")
 
@@ -135,7 +178,9 @@ class GoodProvider:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
 
-    async def chat(self, messages, *, heavy: bool = False) -> str:
+    async def chat(
+        self, messages, *, heavy: bool = False, task_type: str = "default"
+    ) -> str:
         self.calls.append(self.api_key)
         return f"ok:{self.api_key}"
 

@@ -68,7 +68,8 @@ _VALID_METHODS = frozenset({"GET", "POST", "PUT", "DELETE"})
         "blocked."
     ),
     category="system",
-    risk="medium",
+    risk="high",
+    requires_confirmation=True,
     params={
         "method": "str — HTTP method: GET, POST, PUT, DELETE",
         "url": "str — full URL to call (must be http:// or https://)",
@@ -242,64 +243,24 @@ def _check_ssrf(url: str) -> dict[str, Any] | None:
         }
 
     # Resolve DNS first — prevents rebinding attacks
+    # Uses getaddrinfo for full IPv4 + IPv6 support
     try:
-        ip = socket.gethostbyname(hostname)
+        addrinfo = socket.getaddrinfo(hostname, None)
     except socket.gaierror:
         return {"error": f"SSRF protection: cannot resolve hostname {hostname!r}."}
 
-    # Check resolved IP against blocklist
-    if ip in _SSRF_BLOCKED_HOSTS:
-        return {
-            "error": (
-                f"SSRF protection: requests to {hostname!r} (resolved to {ip!r}) "
-                f"are not allowed."
-            )
-        }
-
-    # 127.x.x.x range (common loopback)
-    if ip.startswith("127.") or ip == "255.255.255.255":
-        return {
-            "error": (
-                f"SSRF protection: requests to {hostname!r} (resolved to {ip!r}) "
-                f"are not allowed."
-            )
-        }
-
-    # Use ipaddress module for thorough checking
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return {"error": f"SSRF protection: invalid IP {ip!r} for {hostname!r}."}
-
-    if addr.version == 4:
-        if addr.is_private or addr.is_loopback or addr.is_link_local:
-            return {
-                "error": (
-                    f"SSRF protection: requests to {hostname!r} "
-                    f"(resolved to private IP {ip!r}) are not allowed."
-                )
-            }
-    elif addr.version == 6:
-        if addr.is_private or addr.is_loopback or addr.is_link_local:
-            return {
-                "error": (
-                    f"SSRF protection: requests to {hostname!r} "
-                    f"(resolved to private IPv6 {ip!r}) are not allowed."
-                )
-            }
-        # Check IPv4-mapped IPv6 addresses
+    for family, _, _, _, sockaddr in addrinfo:
+        ip = sockaddr[0]
         try:
-            v6 = ipaddress.IPv6Address(ip)
-            if v6.ipv4_mapped:
-                mapped = v6.ipv4_mapped
-                if mapped.is_private or mapped.is_loopback:
-                    return {
-                        "error": (
-                            f"SSRF protection: requests to {hostname!r} "
-                            f"(resolved to mapped IPv4 {mapped}) are not allowed."
-                        )
-                    }
-        except (ValueError, AttributeError):
-            pass
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if addr.is_private or addr.is_loopback or addr.is_link_local:
+            return {
+                "error": (
+                    f"SSRF protection: requests to {hostname!r} "
+                    f"(resolved to {ip!r}) are not allowed."
+                )
+            }
 
     return None

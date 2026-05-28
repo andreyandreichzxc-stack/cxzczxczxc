@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from src.config import PROJECT_ROOT, settings
+from src.core.security.prompt_injection_scanner import safe_read_context_file
 
 if TYPE_CHECKING:
     from qdrant_client import QdrantClient
@@ -98,10 +99,12 @@ def get_contact_context(contact_name: str) -> str | None:
     """Read data/contexts/{name}.md and return content, or None."""
     path = CONTEXTS_DIR / f"{contact_name.lower()}.md"
     if path.exists():
-        text = path.read_text(encoding="utf-8")
-        if not text.strip():
+        content = safe_read_context_file(str(path), max_chars=_MAX_CONTEXT_CHARS)
+        if content is None:
             return None
-        return text[:_MAX_CONTEXT_CHARS]
+        if not content.strip():
+            return None
+        return content
     return None
 
 
@@ -136,17 +139,14 @@ def find_relevant_contexts(user_message: str) -> dict[str, str]:
             if not pattern.search(user_message):
                 continue
 
-            # Read content (capped)
-            try:
-                text = md_file.read_text(encoding="utf-8")
-            except Exception:
-                logger.warning("Failed to read context file: %s", md_file)
+            # Read content (capped, with injection scanning)
+            content = safe_read_context_file(str(md_file), max_chars=_MAX_CONTEXT_CHARS)
+            if content is None:
+                continue
+            if not content.strip():
                 continue
 
-            if not text.strip():
-                continue
-
-            result[contact_name] = text[:_MAX_CONTEXT_CHARS]
+            result[contact_name] = content
     except PermissionError:
         logger.warning("Permission denied reading contexts directory")
     except OSError:
@@ -176,10 +176,12 @@ def get_context(key: str) -> str | None:
     safe_k = key.lower().replace(" ", "-")[:64]
     path = CONTEXTS_DIR / f"{safe_k}.md"
     if path.exists():
-        text = path.read_text(encoding="utf-8")
-        if not text.strip():
+        content = safe_read_context_file(str(path), max_chars=_MAX_CONTEXT_CHARS)
+        if content is None:
             return None
-        return text[:_MAX_CONTEXT_CHARS]
+        if not content.strip():
+            return None
+        return content
     return None
 
 
@@ -296,21 +298,20 @@ def search_in_contexts(query: str, limit: int = 5) -> list[dict]:
             except Exception:
                 pass
 
-    # ── Fallback: substring search ──────────────────────────────────
+    # ── Fallback: substring search (with injection scanning) ───────
     results: list[dict] = []
     ql = query.lower()
     for md_file in CONTEXTS_DIR.iterdir():
         if md_file.suffix != ".md":
             continue
-        try:
-            text = md_file.read_text(encoding="utf-8")
-        except Exception:
+        content = safe_read_context_file(str(md_file))
+        if content is None:
             continue
-        pos = text.lower().find(ql)
+        pos = content.lower().find(ql)
         if pos >= 0:
             start = max(0, pos - 40)
-            end = min(len(text), pos + len(query) + 80)
-            snippet = text[start:end].strip()
+            end = min(len(content), pos + len(query) + 80)
+            snippet = content[start:end].strip()
             results.append({"key": md_file.stem, "snippet": snippet, "rank": 0.0})
             if len(results) >= limit:
                 break
@@ -371,10 +372,8 @@ def index_contexts_to_fts() -> int:
             key = md_file.stem
             if not key:
                 continue
-            try:
-                content = md_file.read_text(encoding="utf-8")
-            except Exception:
-                logger.warning("Failed to read context file: %s", md_file)
+            content = safe_read_context_file(str(md_file), max_chars=10000)
+            if content is None:
                 continue
             conn.execute(
                 "INSERT INTO contexts_fts(key, content) VALUES (?, ?)",
@@ -651,9 +650,8 @@ async def rebuild_semantic_index(provider) -> int:
     for md_file in sorted(CONTEXTS_DIR.iterdir()):
         if md_file.suffix != ".md" or not md_file.stem:
             continue
-        try:
-            content = md_file.read_text(encoding="utf-8")
-        except Exception:
+        content = safe_read_context_file(str(md_file), max_chars=10000)
+        if content is None:
             continue
         if await index_context_for_semantic(md_file.stem, content, provider):
             count += 1
@@ -677,13 +675,14 @@ def _schedule_semantic_index(key: str, content: str) -> None:
 async def _index_with_provider(key: str, content: str) -> None:
     """Lazy-load a provider and index the context file."""
     try:
+        from src.llm.base import TaskType
         from src.llm.router import build_provider
         from src.db.repo import get_or_create_user
         from src.db.session import get_session
 
         async with get_session() as session:
             owner = await get_or_create_user(session, settings.owner_telegram_id)
-            provider = await build_provider(session, owner)
+            provider = await build_provider(session, owner, task_type=TaskType.SEARCH)
             if provider:
                 await index_context_for_semantic(key, content, provider)
     except Exception:

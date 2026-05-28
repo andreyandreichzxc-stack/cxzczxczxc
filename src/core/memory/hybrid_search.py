@@ -14,19 +14,22 @@ from __future__ import annotations
 
 import logging
 
+from src.config import settings
+
 logger = logging.getLogger(__name__)
 
 # RRF smoothing constant — standard value from the literature (Cormack et al. 2009)
-RRF_K: int = 60
+RRF_K: int = settings.recall_rrf_k
 
 
 def reciprocal_rank_fusion(
     vector_results: list[tuple[int, float]] | None = None,
     keyword_results: list[tuple[int, float]] | None = None,
+    graph_results: list[tuple[int, float]] | None = None,
     *,
     k: int = RRF_K,
 ) -> list[tuple[int, float]]:
-    """Combine two ranked result lists via Reciprocal Rank Fusion.
+    """Combine two or three ranked result lists via Reciprocal Rank Fusion.
 
     Each input is a list of (id, score) tuples, sorted by relevance
     (best first). The score is used as a weight multiplier in RRF so that
@@ -35,6 +38,7 @@ def reciprocal_rank_fusion(
     Args:
         vector_results: Ranked list of (memory_id, cosine_score) from Qdrant.
         keyword_results: Ranked list of (memory_id, bm25_score) from FTS5.
+        graph_results: Ranked list of (memory_id, proximity_score) from BFS graph.
         k: RRF smoothing constant (default 60).
 
     Returns:
@@ -42,7 +46,7 @@ def reciprocal_rank_fusion(
     """
     scores: dict[int, float] = {}
 
-    for ranking in (vector_results, keyword_results):
+    for ranking in (vector_results, keyword_results, graph_results):
         if not ranking:
             continue
         for rank_i, (mem_id, score) in enumerate(ranking, start=1):

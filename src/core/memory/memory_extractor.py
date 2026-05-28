@@ -10,7 +10,7 @@ import re
 
 from src.core.contacts.chat_service import message_to_text
 from src.db.models import Contact, Message
-from src.llm.base import ChatMessage, LLMProvider
+from src.llm.base import ChatMessage, LLMProvider, TaskType
 
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ async def extract_and_save_memories(
                 ChatMessage(role="system", content=MEMORIES_SYSTEM),
                 ChatMessage(role="user", content=user_prompt),
             ],
-            heavy=False,
+            task_type=TaskType.MEMORY,
         )
     except (ConnectionError, OSError, ValueError):
         logger.exception("Memory extraction LLM call failed")
@@ -193,8 +193,7 @@ async def extract_and_save_memories(
             vf["embedding"] = embeddings[idx]
 
     # --- Ставим в очередь на фоновое сохранение ---
-    # (lazy import — избегаем циклической зависимости на уровне модулей)
-    from src.core.memory.memory_queue import enqueue, MemoryJob
+    from src.core.memory._queue_core import enqueue, MemoryJob
 
     await enqueue(
         MemoryJob(

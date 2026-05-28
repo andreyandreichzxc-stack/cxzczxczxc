@@ -19,7 +19,7 @@ from sqlalchemy import select, desc
 from src.db.models import Message
 from src.db.repo import get_or_create_user, get_persona, update_persona
 from src.db.session import get_session
-from src.llm.base import ChatMessage
+from src.llm.base import ChatMessage, TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -112,48 +112,48 @@ async def analyze_user_style(owner_id: int) -> dict:
         directness = "средняя"
 
         user = await get_or_create_user(session, owner_id)
-        heavy = user and user.settings and user.settings.use_heavy_model
 
-        if heavy:
-            try:
-                from src.llm.router import build_provider
+        try:
+            from src.llm.router import build_provider
 
-                provider = await build_provider(session, user, purpose="style")
-                if provider:
-                    sample = "\n---\n".join(texts[:20])
-                    prompt = (
-                        "Проанализируй стиль сообщений пользователя. "
-                        "Определи тональность и прямоту на основе этих сообщений. "
-                        "Верни ТОЛЬКО JSON (без markdown‑обёртки): "
-                        '{"tone": "<ироничный|деловой|дружеский|резкий|нейтральный>", '
-                        '"directness": "<высокая|средняя|низкая>", '
-                        '"wordiness": "<коротко|нейтрально|развёрнуто>"}\n\n'
-                        f"Сообщения:\n{sample}"
-                    )
-                    raw = await provider.chat(
-                        [ChatMessage(role="user", content=prompt)],
-                    )
-                    raw = raw.strip()
-                    # убираем markdown‑обёртку если есть
-                    m = re.search(r"\{[\s\S]*\}", raw)
-                    if m:
-                        parsed = json.loads(m.group(0))
-                        tone = parsed.get("tone", tone)
-                        directness = parsed.get("directness", directness)
-                    logger.debug(
-                        "LLM style classification for owner %d: tone=%s directness=%s",
-                        owner_id,
-                        tone,
-                        directness,
-                    )
-            except Exception:
-                logger.debug(
-                    "LLM style classification failed for owner %d, using heuristic",
-                    owner_id,
-                    exc_info=True,
+            provider = await build_provider(
+                session, user, purpose="style", task_type=TaskType.CLASSIFY
+            )
+            if provider:
+                sample = "\n---\n".join(texts[:20])
+                prompt = (
+                    "Проанализируй стиль сообщений пользователя. "
+                    "Определи тональность и прямоту на основе этих сообщений. "
+                    "Верни ТОЛЬКО JSON (без markdown‑обёртки): "
+                    '{"tone": "<ироничный|деловой|дружеский|резкий|нейтральный>", '
+                    '"directness": "<высокая|средняя|низкая>", '
+                    '"wordiness": "<коротко|нейтрально|развёрнуто>"}\n\n'
+                    f"Сообщения:\n{sample}"
                 )
-        else:
-            # эвристический тон
+                raw = await provider.chat(
+                    [ChatMessage(role="user", content=prompt)],
+                    task_type=TaskType.CLASSIFY,
+                )
+                raw = raw.strip()
+                # убираем markdown‑обёртку если есть
+                m = re.search(r"\{[\s\S]*\}", raw)
+                if m:
+                    parsed = json.loads(m.group(0))
+                    tone = parsed.get("tone", tone)
+                    directness = parsed.get("directness", directness)
+                logger.debug(
+                    "LLM style classification for owner %d: tone=%s directness=%s",
+                    owner_id,
+                    tone,
+                    directness,
+                )
+        except Exception:
+            logger.debug(
+                "LLM style classification failed for owner %d, using heuristic",
+                owner_id,
+                exc_info=True,
+            )
+            # эвристический тон (fallback)
             if avg_len < 20:
                 tone = "коротко"
             elif avg_len < 60:

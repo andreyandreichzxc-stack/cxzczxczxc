@@ -1,7 +1,10 @@
+import json
 import logging
 from datetime import datetime, timezone
 
-from src.llm.router import _ensure_utc
+from sqlalchemy import select
+
+from src.core.infra.timeutil import ensure_utc as _ensure_utc
 
 from aiogram import F, Router
 from aiogram.filters import BaseFilter, Command, CommandObject
@@ -11,6 +14,14 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from src.llm.provider_catalog import (
+    LLM_PROVIDERS,
+    STT_PROVIDERS,
+    get_provider,
+    get_providers_by_category,
 )
 
 from src.bot.filters import OwnerOnly
@@ -22,13 +33,14 @@ from src.core.memory.memory_fuel import (
     get_fuel_stats,
 )
 from src.core.memory.memory_neighbors import format_neighbors, get_neighbors
-from src.db.models import Commitment, LlmKeySlot, Memory, MemoryCandidate
+from src.db.models import Commitment, LlmKeySlot, Memory, MemoryCandidate, MemoryLink
 from src.db.repo import (
     add_commitment,
     add_key_slot,
     add_memory,
     delete_memory,
     get_commitment_by_source_memory,
+    get_graph_stats,
     get_memory_stats,
     get_or_create_user,
     get_persona,
@@ -50,6 +62,12 @@ router.callback_query.filter(OwnerOnly())
 # ─── /keys import: очередь ожидающих импорта (без FSM) ────────────────
 
 _PENDING_IMPORTS: dict[int, str] = {}  # user_id → purpose
+
+# ─── /keys add: очередь интерактивного выбора модели (inline-клавиатура) ──
+
+_PENDING_KEY_ENTRIES: dict[
+    int, dict
+] = {}  # user_id → {provider, model, model_pending, category}
 
 # ─── /keys import helpers ─────────────────────────────────────────────
 
@@ -110,20 +128,52 @@ async def _detect_provider(key: str) -> str | None:
 async def _do_import_keys(
     message: Message, keys_text: str, purpose: str = "main"
 ) -> None:
-    """Парсит и импортирует ключи с автоопределением провайдера."""
+    """Парсит и импортирует ключи с автоопределением провайдера.
+
+    Поддерживает форматы:
+      - api_key                         → автоопределение провайдера
+      - provider:api_key                → указан провайдер, без endpoint
+      - provider:api_key:endpoint       → указан провайдер и кастомный base_url
+      - provider:api_key:endpoint:model → указан провайдер, endpoint и модель
+    """
     from src.llm.router import _provider_class_for
     from src.crypto import decrypt
 
+    # Собираем имена всех провайдеров из каталога + legacy
+    _catalog_names = {p.name for p in LLM_PROVIDERS + STT_PROVIDERS}
+    _all_known = _catalog_names | set(_PROVIDER_ORDER)
+
     lines = keys_text.strip().split("\n")
-    raw_keys = []
+    raw_entries: list[
+        tuple[str | None, str, str | None, str | None]
+    ] = (  # (provider, key, endpoint, model)
+        []
+    )
     for line in lines:
         line = line.strip()
         # Пропускаем комментарии и пустые строки
         if not line or line.startswith("#"):
             continue
-        raw_keys.append(line)
+        # Разбираем format: provider:key[:endpoint[:model]]
+        parts = line.split(":", 3)
+        first = parts[0].lower() if parts else ""
+        if first in _all_known and len(parts) >= 2:
+            if len(parts) == 4:
+                raw_entries.append((first, parts[1], parts[2], parts[3]))
+            elif len(parts) == 3:
+                # Может быть provider:key:endpoint или provider:key:model
+                # Если часть 2 похожа на URL — endpoint, иначе model
+                p = get_provider(first)
+                if p and p.models and parts[2] in p.models:
+                    raw_entries.append((first, parts[1], None, parts[2]))
+                else:
+                    raw_entries.append((first, parts[1], parts[2], None))
+            else:
+                raw_entries.append((first, parts[1], None, None))
+        else:
+            raw_entries.append((None, line, None, None))
 
-    if not raw_keys:
+    if not raw_entries:
         await message.answer("❌ Не найдено ни одного ключа в сообщении.")
         return
 
@@ -137,13 +187,21 @@ async def _do_import_keys(
     by_provider: dict[str, int] = {}
     total_found = 0
 
-    for i, api_key in enumerate(raw_keys):
-        detected = await _detect_provider(api_key)
+    for i, (explicit_provider, api_key, endpoint, explicit_model) in enumerate(
+        raw_entries
+    ):
+        if explicit_provider:
+            detected = explicit_provider
+        else:
+            detected = await _detect_provider(api_key)
         if not detected:
             results.append(f"  ❓ ключ #{i + 1} — провайдер не определён")
             continue
 
         by_provider[detected] = by_provider.get(detected, 0) + 1
+
+        p = get_provider(detected)
+        category = p.category if p else "llm"
 
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
@@ -155,6 +213,9 @@ async def _do_import_keys(
                 purpose=purpose,
                 label=f"{detected}/{purpose}",
                 priority=i,
+                endpoint=endpoint,
+                model=explicit_model,
+                category=category,
             )
 
         if not is_new:
@@ -168,7 +229,7 @@ async def _do_import_keys(
         try:
             key = decrypt(slot.key_enc)
             prov_class = _provider_class_for(detected)
-            prov = prov_class(key)
+            prov = prov_class(key, base_url=endpoint) if endpoint else prov_class(key)
             valid = await prov.validate_key()
             if not valid:
                 async with get_session() as session:
@@ -193,17 +254,73 @@ async def _do_import_keys(
         header += "Найдено: " + ", ".join(
             f"{p} ×{c}" for p, c in sorted(by_provider.items())
         )
-        header += f"\nУспешно: {total_found}/{len(raw_keys)}\n\n"
+        header += f"\nУспешно: {total_found}/{len(raw_entries)}\n\n"
     else:
-        header += f"Успешно: 0/{len(raw_keys)}\n\n"
+        header += f"Успешно: 0/{len(raw_entries)}\n\n"
 
     await message.answer(header + "\n".join(results))
+
+
+# ─── /keys add: вспомогательные клавиатуры для интерактивного выбора ────
+
+
+def _build_category_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора категории ключа (LLM / STT / TTS)."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🧠 LLM (чат, память)", callback_data="keys:cata:llm")
+    kb.button(text="🎤 STT (голос→текст)", callback_data="keys:cata:stt")
+    kb.button(text="🔊 TTS (текст→голос)", callback_data="keys:cata:tts")
+    kb.button(text="🔙 Закрыть", callback_data="keys:back:close")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def _build_provider_keyboard(category: str) -> InlineKeyboardMarkup:
+    """Клавиатура выбора провайдера для категории."""
+    providers = get_providers_by_category(category)
+    kb = InlineKeyboardBuilder()
+    tier_icon = {"free": "🆓", "paid": "💰", "custom": "🔧", "local": "🖥️"}
+    for p in providers:
+        kb.button(
+            text=f"{tier_icon.get(p.tier, '')} {p.display}",
+            callback_data=f"keys:cat:{category}:{p.name}",
+        )
+    kb.button(text="🔙 Назад", callback_data="keys:back:cat")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def _build_model_keyboard(provider_name: str) -> InlineKeyboardMarkup | None:
+    """Клавиатура выбора модели для провайдера."""
+    p = get_provider(provider_name)
+    if not p:
+        return None
+    kb = InlineKeyboardBuilder()
+    if p.models:
+        for m in p.models:
+            kb.button(text=f"📦 {m}", callback_data=f"keys:model:{p.name}:{m}")
+    # Custom/local провайдеры — кнопка ручного ввода модели
+    if p.tier in ("custom", "local"):
+        kb.button(
+            text="✏️ Ввести модель вручную",
+            callback_data=f"keys:model:{p.name}:__custom__",
+        )
+    kb.button(text="🔙 Назад", callback_data=f"keys:back:provider:{p.category}")
+    kb.adjust(1)
+    return kb.as_markup()
 
 
 @router.message(Command("keys"))
 async def cmd_keys(message: Message) -> None:
     """Управление ключами LLM."""
     args = (message.text or "").split()
+    # Phase 2: интерактивный выбор через inline-клавиатуру
+    if len(args) >= 2 and args[1] == "add" and len(args) < 4:
+        await message.answer(
+            "Выбери категорию ключа:", reply_markup=_build_category_keyboard()
+        )
+        return
+
     if len(args) >= 4 and args[1] == "add":
         provider = args[2].lower()
         purpose_raw = args[3].lower()
@@ -457,16 +574,21 @@ async def cmd_keys(message: Message) -> None:
                 f"{status} <b>{s.provider}</b> / {s.purpose} "
                 f"(приоритет {s.priority}, исп. {s.usage_count}×{cool})"
             )
+            if s.endpoint:
+                lines.append(f"   🔗 {s.endpoint}")
             if s.last_error:
                 lines.append(f"   ⚠️ {s.last_error[:80]}")
             if s.label:
                 lines.append(f"   🏷 {s.label}")
         lines.append("")
         lines.append(
-            "<i>/keys add &lt;provider&gt; &lt;purpose&gt; &lt;key1,key2,...&gt; — добавить ключи</i>"
+            "<i>/keys add &lt;provider&gt; &lt;purpose&gt; &lt;key&gt; — добавить ключ</i>"
         )
         lines.append(
-            "<i>/keys import [purpose] [keys...] — автоимпорт с определением провайдера</i>"
+            "<i>/keys add openai main sk-xxx https://api.мой-сервер.com/v1 — с кастомным endpoint</i>"
+        )
+        lines.append(
+            "<i>/keys import [purpose] [keys...] — автоимпорт (формат: provider:key:endpoint)</i>"
         )
         lines.append("<i>/keys remove &lt;slot_id&gt; — удалить слот</i>")
         lines.append("<i>/keys toggle &lt;slot_id&gt; — вкл/выкл слот</i>")
@@ -495,6 +617,259 @@ async def cb_keys_remove(callback: CallbackQuery) -> None:
     if callback.message:
         await callback.message.edit_text(text)
     await callback.answer()
+
+
+# ─── /keys add: inline keyboard callbacks (Phase 2) ────────────────────
+
+
+@router.callback_query(F.data.startswith("keys:cata:"))
+async def cb_keys_cata(callback: CallbackQuery) -> None:
+    """User picked a category → show providers."""
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        return
+    category = parts[2]
+    category_names = {
+        "llm": "LLM (чат, память)",
+        "stt": "STT (голос→текст)",
+        "tts": "TTS (текст→голос)",
+    }
+    await callback.message.edit_text(
+        f"📂 <b>Категория: {category_names.get(category, category)}</b>\n"
+        f"Выбери провайдера:",
+        reply_markup=_build_provider_keyboard(category),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("keys:cat:"))
+async def cb_keys_cat(callback: CallbackQuery) -> None:
+    """User picked a provider → show models."""
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        return
+    category = parts[2]  # noqa: F841
+    provider_name = parts[3]
+    p = get_provider(provider_name)
+    if not p:
+        await callback.answer("Провайдер не найден", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        f"📋 <b>{p.display}</b>\n{p.description}\n\nДоступные модели:",
+        reply_markup=_build_model_keyboard(provider_name),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("keys:model:"))
+async def cb_keys_model(callback: CallbackQuery) -> None:
+    """User picked a model → ask for API key."""
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        return
+    provider_name = parts[2]
+    model = parts[3]
+
+    if model == "__custom__":
+        # Custom model → user will type it
+        _PENDING_KEY_ENTRIES[callback.from_user.id] = {
+            "provider": provider_name,
+            "model_pending": True,
+        }
+        await callback.message.edit_text(
+            f"🔧 Введи название модели для <b>{provider_name}</b>.\n"
+            f"Например: <code>gpt-4o</code> или <code>claude-3-opus</code>",
+            reply_markup=None,
+        )
+    else:
+        # Known model → ask for API key
+        p = get_provider(provider_name)
+        endpoint_hint = (
+            f"\n🔗 Endpoint: {p.default_endpoint}" if p and p.default_endpoint else ""
+        )
+        _PENDING_KEY_ENTRIES[callback.from_user.id] = {
+            "provider": provider_name,
+            "model": model,
+            "model_pending": False,
+        }
+        display = p.display if p else provider_name
+        key_prefix = p.key_prefix if p and p.key_prefix else "API-ключ"
+        await callback.message.edit_text(
+            f"📦 <b>{display} — {model}</b>\n"
+            f"Вставь {key_prefix}\n"
+            f"Или: <code>{provider_name}:ключ</code>{endpoint_hint}\n"
+            f"С endpoint: <code>{provider_name}:ключ:https://твой-url.com/v1</code>",
+            reply_markup=None,
+        )
+    await callback.answer()
+
+
+# ─── /keys add: back navigation callbacks ───────────────────────────────
+
+
+@router.callback_query(F.data == "keys:back:close")
+async def cb_keys_back_close(callback: CallbackQuery) -> None:
+    """Close the key addition dialog."""
+    await callback.message.edit_text("🔑 Добавление ключа отменено.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "keys:back:cat")
+async def cb_keys_back_cat(callback: CallbackQuery) -> None:
+    """Back to category selection."""
+    await callback.message.edit_text(
+        "Выбери категорию ключа:", reply_markup=_build_category_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("keys:back:provider:"))
+async def cb_keys_back_provider(callback: CallbackQuery) -> None:
+    """Back to provider list for category."""
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        return
+    category = parts[3]
+    category_names = {
+        "llm": "LLM (чат, память)",
+        "stt": "STT (голос→текст)",
+        "tts": "TTS (текст→голос)",
+    }
+    await callback.message.edit_text(
+        f"📂 <b>Категория: {category_names.get(category, category)}</b>\n"
+        f"Выбери провайдера:",
+        reply_markup=_build_provider_keyboard(category),
+    )
+    await callback.answer()
+
+
+# ─── /keys add: фильтр и обработчик pending key entry ───────────────────
+
+
+class _PendingKeyEntryFilter(BaseFilter):
+    """Фильтр: сообщение от юзера с активным интерактивным выбором ключа."""
+
+    async def __call__(
+        self, message: Message, state: FSMContext | None = None
+    ) -> bool | dict:
+        if message.from_user is None:
+            return False
+        if message.from_user.id not in _PENDING_KEY_ENTRIES:
+            return False
+        if state is not None and await state.get_state() is not None:
+            return False
+        return True
+
+
+@router.message(_PendingKeyEntryFilter())
+async def _pending_key_entry_handler(message: Message) -> None:
+    """Принимает ключ или модель после inline-выбора."""
+    from src.crypto import decrypt
+    from src.llm.router import _provider_class_for
+
+    uid = message.from_user.id
+    entry = _PENDING_KEY_ENTRIES.pop(uid)
+    text = (message.text or "").strip()
+
+    if not text or text.lower() in ("/cancel", "отмена"):
+        await message.answer("❌ Добавление ключа отменено.")
+        return
+
+    if entry.get("model_pending"):
+        # User typed a custom model name → now ask for the key
+        provider_name = entry["provider"]
+        model = text
+        _PENDING_KEY_ENTRIES[uid] = {
+            "provider": provider_name,
+            "model": model,
+            "model_pending": False,
+        }
+        p = get_provider(provider_name)
+        display = p.display if p else provider_name
+        await message.answer(
+            f"📦 <b>{display} — {model}</b>\n"
+            f"Теперь вставь API-ключ:\n"
+            f"<code>{provider_name}:ключ</code> или просто сам ключ"
+        )
+        return
+
+    # User sent the API key — parse and import
+    provider_name = entry["provider"]
+    model = entry.get("model")
+    p = get_provider(provider_name)
+    category = p.category if p else "llm"
+
+    api_key = text
+    endpoint = None
+
+    # Try parsing provider:key or plain key formats
+    parts = text.split(":", 1)
+    if len(parts) == 2 and parts[0].lower() == provider_name:
+        # Format: provider:key or provider:key:endpoint
+        sub_parts = parts[1].split(":", 1)
+        if len(sub_parts) == 2:
+            api_key = sub_parts[0]
+            endpoint = sub_parts[1]
+        else:
+            api_key = parts[1]
+
+    # Delete message for security
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, uid)
+        slot, is_new = await add_key_slot(
+            session,
+            owner,
+            provider_name,
+            api_key,
+            purpose="main",
+            label=f"{provider_name}/main",
+            priority=0,
+            endpoint=endpoint,
+            model=model,
+            category=category,
+        )
+
+    if not is_new:
+        await message.answer(
+            f"ℹ️ Ключ {provider_name}/{model or ''} "
+            f"уже был добавлен ранее (слот #{slot.id})."
+        )
+        return
+
+    # Validate key
+    try:
+        key_dec = decrypt(slot.key_enc)
+        prov_class = _provider_class_for(provider_name)
+        prov = (
+            prov_class(key_dec, base_url=endpoint) if endpoint else prov_class(key_dec)
+        )
+        valid = await prov.validate_key()
+        if not valid:
+            async with get_session() as session:
+                bad_slot = await session.get(LlmKeySlot, slot.id)
+                if bad_slot:
+                    await session.delete(bad_slot)
+                    await session.flush()
+            await message.answer(
+                f"❌ Ключ {provider_name}/{model or ''} "
+                f"не прошёл валидацию. Проверь ключ."
+            )
+        else:
+            await message.answer(
+                f"✅ Ключ {provider_name}/{model or ''} "
+                f"добавлен и проверен! (слот #{slot.id})"
+            )
+    except Exception:
+        await message.answer(
+            f"✅ Ключ {provider_name}/{model or ''} "
+            f"добавлен! (слот #{slot.id}, проверка недоступна)"
+        )
 
 
 class _PendingImportFilter(BaseFilter):
@@ -616,6 +991,149 @@ async def cmd_memory(message: Message, userbot_manager: UserbotManager) -> None:
                 ]
             )
             await message.answer(lines[-1], reply_markup=kb)
+        return
+
+    forget_sweep_mode = "--forget-sweep" in args
+    if forget_sweep_mode:
+        from src.core.memory.auto_forget import auto_forget_sweep
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            count = await auto_forget_sweep(session, owner.id)
+            await session.commit()
+        await message.answer(
+            f"🧹 Auto-forget sweep: deactivated {count} low-retention facts."
+        )
+        return
+
+    graph_export_mode = "--graph:export" in args
+    if graph_export_mode:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            # Nodes: active memories (max 500)
+            all_mems = await list_memories(session, owner, limit=500, is_active=True)
+            nodes = [
+                {
+                    "id": m.id,
+                    "fact": m.fact,
+                    "contact_id": m.contact_id,
+                    "memory_type": m.memory_type,
+                    "importance": m.importance,
+                    "sentiment": m.sentiment,
+                    "created_at": m.created_at.isoformat() if m.created_at else None,
+                }
+                for m in all_mems
+            ]
+            # Edges: all links for user
+            edges_result = await session.execute(
+                select(
+                    MemoryLink.source_id,
+                    MemoryLink.target_id,
+                    MemoryLink.weight,
+                    MemoryLink.relation_type,
+                ).where(MemoryLink.user_id == owner.id)
+            )
+            edges = [
+                {
+                    "source": int(r.source_id),
+                    "target": int(r.target_id),
+                    "weight": float(r.weight),
+                    "relation_type": r.relation_type,
+                }
+                for r in edges_result.all()
+            ]
+        payload = {"nodes": nodes, "edges": edges}
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        # Telegram message limit ~4000 chars for safety
+        if len(text) > 3900:
+            text = text[:3900] + "\n...]}"  # truncated
+        await message.answer(
+            f"<b>📊 Graph export:</b>\n<pre>{sanitize_html(text)}</pre>"
+        )
+        return
+
+    graph_mode = "--graph" in args
+    if graph_mode:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            stats = await get_graph_stats(session, owner.id)
+        lines = [
+            "📊 <b>Knowledge Graph Statistics</b>",
+            "",
+            f"🧠 <b>Nodes (active memories):</b> {stats['node_count']}",
+            f"🔗 <b>Edges (links):</b> {stats['total_edges']}",
+            f"📏 <b>Average degree:</b> {stats['avg_degree']}",
+            f"🔗 <b>Connected components:</b> {stats['components']}",
+            f"🕳 <b>Isolated nodes:</b> {stats['isolated_nodes']}",
+            "",
+            "<b>Edges by type:</b>",
+        ]
+        for rel_type, cnt in sorted(
+            stats["edges_by_type"].items(), key=lambda x: -x[1]
+        ):
+            lines.append(f"  • <b>{rel_type}</b>: {cnt}")
+        if stats["top_hubs"]:
+            lines.extend(["", "<b>Top-5 hub nodes:</b>"])
+            for hub in stats["top_hubs"]:
+                fact_snippet = sanitize_html(hub["fact"][:60])
+                lines.append(
+                    f"  🔗 <b>ID {hub['memory_id']}</b> — degree {hub['degree']}: "
+                    f"«{fact_snippet}»"
+                )
+        await message.answer("\n".join(lines))
+        return
+
+    impact_mode = "--impact" in args
+    if impact_mode:
+        parts = args.replace("--impact", "").strip()
+        if not parts:
+            await message.answer("Использование: /memory --impact @имя_контакта")
+            return
+        contact_name = parts.strip()
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            client = (
+                userbot_manager.get_client(message.from_user.id)
+                if userbot_manager
+                else None
+            )
+            if client is None:
+                await message.answer("⚠️ Userbot не подключён.")
+                return
+            candidates = await resolve(client, owner, contact_name)
+            if not candidates:
+                await message.answer(f"Контакт «{contact_name}» не найден.")
+                return
+            from src.db.repos.memory_repo import contact_impact
+
+            impact = await contact_impact(session, owner.id, candidates[0].peer_id)
+        lines = [
+            f"📊 <b>Impact: {sanitize_html(impact.contact_name)}</b>",
+            "",
+            f"📌 Фактов: {len(impact.direct_facts)}",
+            f"👥 Связанных контактов: {len(impact.related_contacts)}",
+            f"🕸 Всего узлов в графе: {impact.total_nodes}",
+        ]
+        if impact.topics:
+            lines.append(f"🏷 Темы: {', '.join(impact.topics[:5])}")
+        if impact.upcoming_events:
+            lines.extend(["", "⏰ <b>Напоминания:</b>"])
+            for ev in impact.upcoming_events:
+                deadline = f" ({ev['deadline']})" if ev["deadline"] else ""
+                lines.append(f"  • {sanitize_html(ev['text'])}{deadline}")
+        if impact.related_contacts:
+            lines.extend(["", "👥 <b>Связи:</b>"])
+            for rc in impact.related_contacts[:5]:
+                lines.append(
+                    f"  • {sanitize_html(rc['name'])} "
+                    f"(via: «{sanitize_html(rc['via_fact'])}»)"
+                )
+        if impact.direct_facts:
+            lines.extend(["", "📌 <b>Факты:</b>"])
+            for f in impact.direct_facts[:5]:
+                snippet = sanitize_html((f.fact or "")[:80])
+                lines.append(f"  • #{f.id} {snippet}")
+        await message.answer("\n".join(lines))
         return
 
     tag_mode = "--tag" in args

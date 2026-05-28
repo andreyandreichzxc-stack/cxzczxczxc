@@ -14,7 +14,7 @@ from typing import Any
 from src.core.actions.vector_store import get_vector_store
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
-from src.llm.base import ChatMessage, LLMProvider
+from src.llm.base import ChatMessage, LLMProvider, TaskType
 from src.llm.router import ExhaustedError
 
 
@@ -92,6 +92,14 @@ AGENT_SYSTEM = """\
      «о чём чат», «краткое содержание», «в двух словах», «саммари»,
      «перескажи», «что там в чате», «итоги переписки», «о чём они писали»
 
+"ask_chat"         — задать вопрос LLM про переписку с контактом.
+  contact: str, query: str|null
+  🎯 Семантика: пользователь хочет анализ/мнение/вывод по чату. Примеры:
+     «проанализируй чат», «проанализируй переписку», «анализ диалога»,
+     «дай оценку», «что думаешь об этом чате», «как там Вася поживает»,
+     «что в чате с Петей», «оцени переписку», «выводы по диалогу»,
+     «проверь чат», «посмотри что пишут»
+
 "tasks_for_chat"   — извлечь задачи/обещания из переписки.
   contact: str
 
@@ -129,10 +137,18 @@ AGENT_SYSTEM = """\
   urgent_notify_enabled, draft_suggestions_enabled,
   draft_only_important, draft_max_per_hour,
   monitor_only_selected_folders, notify_on_auto_reply,
-  auto_reply_close_contacts
+  auto_reply_close_contacts,
+  model_override_maestro, model_override_draft, model_override_memory,
+  model_override_search, model_override_classify, model_override_summarize,
+  model_override_humanize, model_override_skills, model_override_background
+  Для model_override_*: value = имя модели (строка), "" или "default" для сброса.
   🎯 Семантика: пользователь хочет поменять конфигурацию. Примеры:
      «настрой», «измени режим», «включи автоответ», «поменяй настройки»,
-     «смени часовой пояс», «конфигурация», «отключи автоответ»
+     «смени часовой пояс», «конфигурация», «отключи автоответ»,
+     «поставь deepseek-reasoner для maestro» → key=model_override_maestro,
+     «измени модель для черновиков на gpt-5-mini» → key=model_override_draft,
+     «сбрось модель памяти» → key=model_override_memory, value="",
+     «какая модель у maestro?» → используй show_profile или ответь chat
 
 "find_in_chats"    — найти чат по теме.
   query: str, action: "catchup"|"summary"|"tasks"|"draft"
@@ -416,13 +432,16 @@ async def route_intent(
             now_local=now_local or "",
             tz_name=tz_name or "",
         )
+        _used_skills_meta: list[dict] = []
         if user_id is not None:
             try:
                 from src.core.intelligence.skills import build_skill_index
 
-                ctx.skill_index = (
-                    await build_skill_index(user_id, user_text, "agent")
-                )[0]
+                skill_str, skill_meta = await build_skill_index(
+                    user_id, user_text, "agent"
+                )
+                ctx.skill_index = skill_str
+                _used_skills_meta = skill_meta
             except Exception:
                 logger.debug("Failed to build skill index", exc_info=True)
 
@@ -471,7 +490,7 @@ async def route_intent(
                     ChatMessage(role="system", content=system),
                     ChatMessage(role="user", content=user_text),
                 ],
-                heavy=heavy,
+                task_type=TaskType.CLASSIFY,
             ),
             timeout=60.0,
         )
@@ -501,4 +520,6 @@ async def route_intent(
                 "reply": "🚦 Превышен лимит запросов. Подожди минуту.",
             }
         raise
-    return _safe_parse(raw)
+    result = _safe_parse(raw)
+    result["used_skills"] = _used_skills_meta
+    return result

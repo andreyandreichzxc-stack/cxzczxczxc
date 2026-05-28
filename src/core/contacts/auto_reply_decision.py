@@ -9,6 +9,7 @@ Auto-reply handlers call ``decide()`` instead of duplicating inline logic.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 # Prevents runaway LLM costs when many peers trigger auto-reply at once.
 # Key: "YYYY-MM-DD-HH" hour bucket, value: count of replies sent.
 _global_reply_count: dict[str, int] = {}
+_global_reply_lock = asyncio.Lock()
 _GLOBAL_REPLY_MAX_PER_HOUR = settings.auto_reply_global_limit_per_hour
 
 
@@ -35,26 +37,28 @@ def _global_reply_hour_key() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
 
 
-def _global_reply_allow() -> bool:
+async def _global_reply_allow() -> bool:
     """Check if the global hourly budget has been exhausted."""
-    key = _global_reply_hour_key()
-    count = _global_reply_count.get(key, 0)
-    return count < _GLOBAL_REPLY_MAX_PER_HOUR
+    async with _global_reply_lock:
+        key = _global_reply_hour_key()
+        count = _global_reply_count.get(key, 0)
+        return count < _GLOBAL_REPLY_MAX_PER_HOUR
 
 
-def _global_reply_increment() -> None:
+async def _global_reply_increment() -> None:
     """Increment the global reply counter for the current hour.
     Cleans up stale keys on every call."""
-    key = _global_reply_hour_key()
-    _global_reply_count[key] = _global_reply_count.get(key, 0) + 1
-    # Purge stale buckets older than 2 hours
-    now_ts = time.time()
-    stale_cutoff = datetime.fromtimestamp(now_ts - 7200, tz=timezone.utc).strftime(
-        "%Y-%m-%d-%H"
-    )
-    for stale_key in list(_global_reply_count.keys()):
-        if stale_key < stale_cutoff:
-            del _global_reply_count[stale_key]
+    async with _global_reply_lock:
+        key = _global_reply_hour_key()
+        _global_reply_count[key] = _global_reply_count.get(key, 0) + 1
+        # Purge stale buckets older than 2 hours
+        now_ts = time.time()
+        stale_cutoff = datetime.fromtimestamp(now_ts - 7200, tz=timezone.utc).strftime(
+            "%Y-%m-%d-%H"
+        )
+        for stale_key in list(_global_reply_count.keys()):
+            if stale_key < stale_cutoff:
+                del _global_reply_count[stale_key]
 
 
 class AutoReplyVerdict(Enum):
@@ -227,7 +231,7 @@ async def decide(
         )
 
     # ── 8. Global hourly rate-limit ────────────────────────────────────────
-    if not _global_reply_allow():
+    if not await _global_reply_allow():
         return AutoReplyChoice(
             verdict=AutoReplyVerdict.SKIP_GLOBAL_LIMIT,
             reason=f"Global hourly limit ({_GLOBAL_REPLY_MAX_PER_HOUR}/h) reached",

@@ -25,6 +25,8 @@ class SettingsStates(StatesGroup):
     waiting_import_keys = State()
     waiting_custom_instructions = State()
     waiting_alias = State()
+    waiting_deepseek_key = State()
+    waiting_custom_model_name = State()
 
 
 class NewsTopicStates(StatesGroup):

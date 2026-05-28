@@ -35,6 +35,7 @@ from src.db.session import get_session
 from src.userbot.dialogs import sync_dialogs
 from src.userbot import get_active_telethon_client, get_userbot_manager
 from src.llm.cloudflare_provider import CloudflareProvider
+from src.llm.deepseek_provider import DeepSeekProvider
 from src.llm.gemini_provider import GeminiProvider
 from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
@@ -101,6 +102,9 @@ SEARCHABLE_SETTINGS: dict[str, str] = {
     "gemini_key": "API ключ Gemini",
     "mistral_key": "API ключ Mistral",
     "cloudflare_key": "API ключ Cloudflare",
+    "deepseek_key": "API ключ DeepSeek",
+    # Раздел: Модели
+    "model_overrides": "Переопределения моделей по типу задач",
     # Раздел: Папки
     "monitored_folders": "Отслеживаемые папки Telegram",
     "monitor_only_selected_folders": "Мониторить только выбранные папки",
@@ -130,6 +134,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         gemini_key = await get_api_key(session, owner, "gemini")
         mistral_key = await get_api_key(session, owner, "mistral")
         cloudflare_key = await get_api_key(session, owner, "cloudflare")
+        deepseek_key = await get_api_key(session, owner, "deepseek")
 
         # ── Extract ORM values to local vars (session-safe) ──────────
         _tz = s.timezone
@@ -168,7 +173,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         f"📊 Smart дайджест: {_check(_smart_digest_enabled)} (каждые {_smart_digest_interval_min}м)\n"
         f"🤖 LLM: <b>{_llm_provider}</b> · {'тяжёлая' if _use_heavy_model else 'лёгкая'}\n"
         f"🎤 Транскрипция: <b>{_transcription_mode}</b> ({_transcription_api_provider})\n"
-        f"🔑 Ключи: OpenAI {_check(bool(openai_key))} · Gemini {_check(bool(gemini_key))} · Mistral {_check(bool(mistral_key))} · Cloudflare {_check(bool(cloudflare_key))}\n\n"
+        f"🔑 Ключи: OpenAI {_check(bool(openai_key))} · Gemini {_check(bool(gemini_key))} · Mistral {_check(bool(mistral_key))} · DeepSeek {_check(bool(deepseek_key))} · Cloudflare {_check(bool(cloudflare_key))}\n\n"
         "<i>Тапни раздел, чтобы открыть его настройки и описание.</i>"
     )
     kb = InlineKeyboardBuilder()
@@ -196,6 +201,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         ),
     )
     kb.row(
+        InlineKeyboardButton(text="🧠 Модели", callback_data="set:sec:models"),
         InlineKeyboardButton(text="✍️ Черновики", callback_data="set:sec:drafts"),
         InlineKeyboardButton(text="🔒 Приватность", callback_data="set:sec:privacy"),
     )
@@ -545,6 +551,7 @@ async def _render_section(
         gemini_key = await get_api_key(session, owner, "gemini")
         mistral_key = await get_api_key(session, owner, "mistral")
         cloudflare_key = await get_api_key(session, owner, "cloudflare")
+        deepseek_key = await get_api_key(session, owner, "deepseek")
 
         kb = InlineKeyboardBuilder()
 
@@ -800,6 +807,131 @@ async def _render_section(
             )
             kb.row(*_back_row())
 
+        elif section == "models":
+            try:
+                overrides = json.loads(s.model_overrides) if s.model_overrides else {}
+            except (json.JSONDecodeError, TypeError):
+                overrides = {}
+
+            task_labels = {
+                "maestro": "Maestro (оркестрация)",
+                "draft": "Черновики",
+                "memory": "Память",
+                "search": "Поиск",
+                "stt": "Распознавание речи",
+                "humanize": "Очеловечивание",
+                "classify": "Классификация",
+                "summarize": "Саммари",
+                "skills": "Навыки",
+                "background": "Фоновые задачи",
+                "default": "Обычный чат",
+            }
+
+            lines = ["🧠 <b>Настройки моделей</b>", ""]
+            for task_type, label in task_labels.items():
+                override = overrides.get(task_type)
+                if override:
+                    lines.append(f"  {label}: <code>{override}</code> ✏")
+                else:
+                    lines.append(f"  {label}: <i>по умолчанию</i>")
+
+            lines.append("")
+            lines.append(
+                "<i>Нажми на задачу, чтобы выбрать модель. "
+                "Переопределения имеют приоритет над настройками LLM-провайдера.</i>"
+            )
+            text = "\n".join(lines)
+
+            for task_type, label in task_labels.items():
+                kb.row(
+                    InlineKeyboardButton(
+                        text=label, callback_data=f"set:model:{task_type}"
+                    )
+                )
+            kb.row(
+                InlineKeyboardButton(
+                    text="🗑 Сбросить все", callback_data="set:model:reset_all"
+                )
+            )
+            kb.row(*_back_row())
+
+        elif section.startswith("model_sel:"):
+            # Подменю выбора модели для конкретного task_type
+            task_type = section.split(":", 1)[1]
+
+            task_labels = {
+                "maestro": "Maestro (оркестрация)",
+                "draft": "Черновики",
+                "memory": "Память",
+                "search": "Поиск",
+                "stt": "Распознавание речи",
+                "humanize": "Очеловечивание",
+                "classify": "Классификация",
+                "summarize": "Саммари",
+                "skills": "Навыки",
+                "background": "Фоновые задачи",
+                "default": "Обычный чат",
+            }
+            task_label = task_labels.get(task_type, task_type)
+
+            try:
+                overrides = json.loads(s.model_overrides) if s.model_overrides else {}
+            except (json.JSONDecodeError, TypeError):
+                overrides = {}
+
+            current = overrides.get(task_type)
+
+            # Получаем доступные модели из каталога текущего провайдера
+            from src.llm.provider_catalog import get_provider
+
+            provider_info = get_provider(s.llm_provider)
+            available_models = provider_info.models if provider_info else []
+
+            lines = [
+                f"🧠 <b>Модель для: {task_label}</b>",
+                "",
+                f"Текущая: <code>{current}</code>"
+                if current
+                else "Текущая: <i>по умолчанию</i>",
+                "",
+            ]
+            text = "\n".join(lines)
+
+            # Кнопка «По умолчанию» (удаляет override)
+            kb.row(
+                InlineKeyboardButton(
+                    text=("• " if not current else "") + "🔄 По умолчанию",
+                    callback_data=f"set:model:set:{task_type}:__default__",
+                )
+            )
+            # Кнопки моделей из каталога
+            for model in available_models:
+                mark = "• " if current == model else ""
+                kb.row(
+                    InlineKeyboardButton(
+                        text=f"{mark}{model}",
+                        callback_data=f"set:model:set:{task_type}:{model}",
+                    )
+                )
+            # Кнопка ручного ввода
+            kb.row(
+                InlineKeyboardButton(
+                    text="✏ Ввести вручную…",
+                    callback_data=f"set:model:custom:{task_type}",
+                )
+            )
+            # Удалить override (если есть)
+            if current:
+                kb.row(
+                    InlineKeyboardButton(
+                        text="🗑 Удалить переопределение",
+                        callback_data=f"set:model:del:{task_type}",
+                    )
+                )
+            kb.row(
+                InlineKeyboardButton(text="🔙 Назад", callback_data="set:sec:models")
+            )
+
         elif section == "transcription":
             api_provider = getattr(s, "transcription_api_provider", "openai")
             labels = {
@@ -980,6 +1112,7 @@ async def _render_section(
                 f"OpenAI: {_check(bool(openai_key))}\n"
                 f"Gemini: {_check(bool(gemini_key))}\n"
                 f"Mistral: {_check(bool(mistral_key))}\n"
+                f"DeepSeek: {_check(bool(deepseek_key))}\n"
                 f"Cloudflare: {_check(bool(cloudflare_key))}"
             )
             kb.row(
@@ -994,6 +1127,11 @@ async def _render_section(
                 InlineKeyboardButton(
                     text="🔑 Mistral key", callback_data="set:input:mistral_key"
                 ),
+                InlineKeyboardButton(
+                    text="🔑 DeepSeek key", callback_data="set:input:deepseek_key"
+                ),
+            )
+            kb.row(
                 InlineKeyboardButton(
                     text="🔑 Cloudflare key", callback_data="set:input:cloudflare_key"
                 ),
@@ -1053,7 +1191,12 @@ async def _render_section(
         elif section == "folders":
             folders_data = await list_folders(session, owner)
 
-            monitored = json.loads(s.monitored_folders) if s.monitored_folders else []
+            try:
+                monitored = (
+                    json.loads(s.monitored_folders) if s.monitored_folders else []
+                )
+            except json.JSONDecodeError:
+                monitored = []
 
             lines = ["📁 <b>Мониторинг папок</b>", ""]
 
@@ -1306,6 +1449,18 @@ async def cb_input_cloudflare(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.answer()
 
 
+@router.callback_query(F.data == "set:input:deepseek_key")
+async def cb_input_deepseek(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingsStates.waiting_deepseek_key)
+    await callback.message.answer(
+        "Пришли DeepSeek API key с <code>platform.deepseek.com</code>. "
+        "Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
+        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "set:input:digest_time")
 async def cb_input_digest(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_digest_time)
@@ -1356,7 +1511,10 @@ async def cb_folder_toggle(callback: CallbackQuery) -> None:
         owner = await get_or_create_user(session, callback.from_user.id)
         s = owner.settings
 
-        monitored = json.loads(s.monitored_folders) if s.monitored_folders else []
+        try:
+            monitored = json.loads(s.monitored_folders) if s.monitored_folders else []
+        except json.JSONDecodeError:
+            monitored = []
 
         if folder_name in monitored:
             monitored.remove(folder_name)
@@ -1386,6 +1544,157 @@ async def cb_folder_refresh(callback: CallbackQuery) -> None:
             await callback.answer("❌ Сначала /login", show_alert=True)
 
     await _refresh_section(callback, "folders")
+
+
+# ---------- Модели: callback'и ----------
+
+
+@router.callback_query(F.data == "set:model:reset_all")
+async def cb_model_reset_all(callback: CallbackQuery) -> None:
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        owner.settings.model_overrides = None
+        await session.flush()
+    await callback.answer("🗑 Все переопределения моделей сброшены")
+    await _refresh_section(callback, "models")
+
+
+@router.callback_query(F.data.startswith("set:model:set:"))
+async def cb_model_set(callback: CallbackQuery) -> None:
+    """set:model:set:<task_type>:<model_name>"""
+    parts = callback.data.split(":")
+    # parts: ["set", "model", "set", task_type, ...model_parts]
+    if len(parts) < 5:
+        await callback.answer("Ошибка данных", show_alert=True)
+        return
+    task_type = parts[3]
+    model_name = ":".join(parts[4:])  # модели могут содержать ":" (напр. @cf/...)
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        s = owner.settings
+        try:
+            overrides = json.loads(s.model_overrides) if s.model_overrides else {}
+        except (json.JSONDecodeError, TypeError):
+            overrides = {}
+
+        if model_name == "__default__":
+            overrides.pop(task_type, None)
+        else:
+            overrides[task_type] = model_name
+
+        s.model_overrides = (
+            json.dumps(overrides, ensure_ascii=False) if overrides else None
+        )
+        await session.flush()
+
+    display = model_name if model_name != "__default__" else "по умолчанию"
+    await callback.answer(f"✅ {task_type} → {display}")
+    await _refresh_section(callback, f"model_sel:{task_type}")
+
+
+@router.callback_query(F.data.startswith("set:model:del:"))
+async def cb_model_del(callback: CallbackQuery) -> None:
+    """set:model:del:<task_type>"""
+    task_type = callback.data.split(":")[3]
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        s = owner.settings
+        try:
+            overrides = json.loads(s.model_overrides) if s.model_overrides else {}
+        except (json.JSONDecodeError, TypeError):
+            overrides = {}
+        overrides.pop(task_type, None)
+        s.model_overrides = (
+            json.dumps(overrides, ensure_ascii=False) if overrides else None
+        )
+        await session.flush()
+    await callback.answer(f"🗑 Переопределение для {task_type} удалено")
+    await _refresh_section(callback, "models")
+
+
+@router.callback_query(F.data.startswith("set:model:custom:"))
+async def cb_model_custom(callback: CallbackQuery, state: FSMContext) -> None:
+    """set:model:custom:<task_type> — ввод имени модели вручную."""
+    task_type = callback.data.split(":")[3]
+    await state.set_state(SettingsStates.waiting_custom_model_name)
+    await state.update_data(custom_model_task_type=task_type)
+    await callback.message.answer(
+        "✏ Введи название модели (например: <code>deepseek-reasoner</code>, "
+        "<code>gpt-4o-mini</code>). /cancel — отмена."
+    )
+    await callback.answer()
+
+
+@router.message(SettingsStates.waiting_custom_model_name)
+async def step_custom_model_name(message: Message, state: FSMContext) -> None:
+    model_name = (message.text or "").strip()
+    if not model_name:
+        await message.answer("Пустое название. Повтори или /cancel.")
+        return
+    if len(model_name) > 128:
+        await message.answer(
+            "Слишком длинное название (макс. 128). Повтори или /cancel."
+        )
+        return
+
+    # Hard validation: regex
+    from src.bot.handlers.free_text_common import _MODEL_NAME_RE
+
+    if not _MODEL_NAME_RE.match(model_name):
+        await message.answer(
+            "❌ Недопустимые символы в имени модели. "
+            "Допустимы: буквы, цифры, <code>@ / _ . : -</code>\n"
+            "Повтори или /cancel."
+        )
+        return
+
+    data = await state.get_data()
+    task_type = data.get("custom_model_task_type", "default")
+
+    # Soft validation: catalog check (warn but still save)
+    catalog_warning = ""
+    try:
+        from src.llm.provider_catalog import get_provider
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            current_provider = owner.settings.llm_provider
+        provider_info = get_provider(current_provider)
+        if provider_info and provider_info.models:
+            if model_name not in provider_info.models:
+                catalog_warning = (
+                    f"\n\n⚠️ Модель <code>{model_name}</code> не найдена в каталоге "
+                    f"провайдера <b>{current_provider}</b>.\n"
+                    f"Доступные: {', '.join(f'<code>{m}</code>' for m in provider_info.models[:8])}\n"
+                    f"Сохраняю, но проверь имя на опечатки."
+                )
+    except Exception:
+        logger.debug("catalog soft-validation skipped", exc_info=True)
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        s = owner.settings
+        try:
+            overrides = json.loads(s.model_overrides) if s.model_overrides else {}
+        except (json.JSONDecodeError, TypeError):
+            overrides = {}
+        overrides[task_type] = model_name
+        s.model_overrides = json.dumps(overrides, ensure_ascii=False)
+        await session.flush()
+    await state.clear()
+    await message.answer(
+        f"✅ Модель для <b>{task_type}</b>: <code>{model_name}</code>{catalog_warning}"
+    )
+
+
+@router.callback_query(F.data.startswith("set:model:"))
+async def cb_model_open(callback: CallbackQuery) -> None:
+    """set:model:<task_type> — открыть подменю выбора модели."""
+    task_type = callback.data.split(":")[2]
+    text, kb = await _render_section(callback.from_user.id, f"model_sel:{task_type}")
+    await _safe_edit(callback.message, text, kb)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("set:tz:"))
@@ -1532,6 +1841,35 @@ async def step_cloudflare_key(message: Message, state: FSMContext) -> None:
     count = len(parts)
     await message.answer(
         f"✅ Сохранено Cloudflare ключей: {count}.\n🔑 В базе Cloudflare ключей: {total}."
+    )
+
+
+@router.message(SettingsStates.waiting_deepseek_key)
+async def step_deepseek_key(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Пустой ключ. Повтори или /cancel.")
+        return
+    parts = [k.strip() for k in raw.split(",") if k.strip()]
+    if not parts:
+        await message.answer("Нет ни одного непустого ключа. Повтори или /cancel.")
+        return
+    try:
+        await message.delete()
+    except Exception:
+        logger.exception("failed to delete message with deepseek key")
+    # Валидируем первый ключ как индикатор; остальные считаем рабочими
+    if not await DeepSeekProvider(parts[0]).validate_key():
+        await message.answer("❌ Ключ не работает. Повтори или /cancel.")
+        return
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        await upsert_api_key(session, owner, "deepseek", ",".join(parts))
+        total = await _count_slots_for_provider(session, owner, "deepseek")
+    await state.clear()
+    count = len(parts)
+    await message.answer(
+        f"✅ Сохранено DeepSeek ключей: {count}.\n🔑 В базе DeepSeek ключей: {total}."
     )
 
 

@@ -8,7 +8,7 @@ from src.db.repo import add_memory, get_or_create_user, list_memories
 from src.db.session import get_session
 from src.config import settings
 from src.core.scheduling.notification_queue import notification_queue
-from src.llm.base import ChatMessage
+from src.llm.base import ChatMessage, TaskType
 from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ async def distill_cluster(
                     ChatMessage(role="system", content=system),
                     ChatMessage(role="user", content=user_text),
                 ],
-                heavy=False,
+                task_type=TaskType.MEMORY,
             )
         except Exception:
             logger.exception("Distillation LLM call failed")

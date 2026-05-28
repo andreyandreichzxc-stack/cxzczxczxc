@@ -8,22 +8,21 @@ DeepSeek V4 Flash (free): 1M контекст, reasoning, coding — топ бе
 """
 
 import httpx
-from openai import (
-    APIConnectionError,
-    AsyncOpenAI,
-    AuthenticationError,
-    PermissionDeniedError,
-)
+from openai import AsyncOpenAI
 
+from src.llm._openai_compat_mixin import OpenAICompatBaseMixin
+from src.llm._ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash:free"
 HEAVY_MODEL = "deepseek/deepseek-v4-flash:free"
 
 
-class OpenRouterProvider:
+class OpenRouterProvider(OpenAICompatBaseMixin):
     """Провайдер для OpenRouter free models (DeepSeek V4 Flash и другие).
 
     OpenAI-совместимый API. Не поддерживает embeddings (free tier без эмбеддингов).
@@ -31,32 +30,27 @@ class OpenRouterProvider:
 
     name = "openrouter"
 
-    def __init__(self, api_key: str) -> None:
-        self._client = AsyncOpenAI(
+    def __init__(
+        self, api_key: str, *, base_url: str | None = None, model: str | None = None
+    ) -> None:
+        base_url = _validate_base_url(base_url)
+        kwargs: dict = dict(
             api_key=api_key,
-            base_url=OPENROUTER_BASE_URL,
+            base_url=base_url or OPENROUTER_BASE_URL,
             timeout=httpx.Timeout(60.0, connect=10.0),
             default_headers={
                 "HTTP-Referer": "https://github.com/tashfeenahmed/freellmapi",
                 "X-Title": "TelegramHelper",
             },
         )
+        self._client = AsyncOpenAI(**kwargs)
+        self._model = model
 
-    async def validate_key(self) -> bool:
-        try:
-            await self._client.models.list()
-            return True
-        except AuthenticationError:
-            return False  # invalid/revoked key
-        except PermissionDeniedError:
-            return False  # key lacks permission
-        except APIConnectionError:
-            raise  # network issue (timeout, connection refused) — let caller retry
-        except Exception:
-            return False  # unknown error — assume invalid
+    def _resolve_model(self, heavy: bool) -> str:
+        return self._model or (HEAVY_MODEL if heavy else DEFAULT_MODEL)
 
     async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
-        model = HEAVY_MODEL if heavy else DEFAULT_MODEL
+        model = self._resolve_model(heavy)
         resp = await self._client.chat.completions.create(
             model=model,
             messages=[{"role": m.role, "content": m.content} for m in messages],
@@ -71,9 +65,6 @@ class OpenRouterProvider:
             "OpenRouter free tier не поддерживает embeddings. "
             "Используй OpenAI или другой провайдер для эмбеддингов."
         )
-
-    async def close(self) -> None:
-        await self._client.close()
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         raise NotImplementedError(

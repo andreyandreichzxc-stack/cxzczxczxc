@@ -7,6 +7,7 @@ from src.core.contacts.contact_resolver import resolve
 from src.core.contacts.style_profile import update_style_profile_for_contact
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
+from src.llm.base import TaskType
 from src.llm.router import build_provider
 from src.userbot.manager import UserbotManager
 
@@ -16,19 +17,23 @@ router.message.filter(OwnerOnly())
 
 
 @router.message(Command("style"))
-async def cmd_style(message: Message, command: CommandObject, userbot_manager: UserbotManager) -> None:
+async def cmd_style(
+    message: Message, command: CommandObject, userbot_manager: UserbotManager
+) -> None:
     client = userbot_manager.get_client(message.from_user.id)
     if client is None:
         await message.answer("Сначала /login.")
         return
     query = (command.args or "").strip()
     if not query:
-        await message.answer("Использование: <code>/style имя контакта</code> — пересчитать профиль стиля общения.")
+        await message.answer(
+            "Использование: <code>/style имя контакта</code> — пересчитать профиль стиля общения."
+        )
         return
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.CLASSIFY)
 
     if provider is None:
         await message.answer("Сначала добавь LLM-ключ в /settings.")
@@ -39,7 +44,9 @@ async def cmd_style(message: Message, command: CommandObject, userbot_manager: U
         await message.answer("Контакт не найден.")
         return
     target = candidates[0]
-    profile = await update_style_profile_for_contact(provider, message.from_user.id, target.peer_id)
+    profile = await update_style_profile_for_contact(
+        provider, message.from_user.id, target.peer_id
+    )
     if not profile:
         await message.answer(
             f"Не нашёл достаточно моих сообщений к <b>{target.label()}</b>. "
@@ -47,7 +54,9 @@ async def cmd_style(message: Message, command: CommandObject, userbot_manager: U
         )
         return
 
-    short = ", ".join(f"{k}: {v}" for k, v in list(profile.items())[:5] if isinstance(v, (str, int)))
+    short = ", ".join(
+        f"{k}: {v}" for k, v in list(profile.items())[:5] if isinstance(v, (str, int))
+    )
     await message.answer(
         f"✅ Профиль стиля для <b>{target.label()}</b> обновлён.\n<i>{short}</i>"
     )

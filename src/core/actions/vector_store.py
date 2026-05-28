@@ -176,6 +176,7 @@ class VectorStore:
                             "importance": importance,
                             "confidence": confidence,
                             "created_at": created_at,
+                            "embedding": embedding,  # store vector for cosine similarity
                         },
                     )
                 ],
@@ -248,6 +249,7 @@ class VectorStore:
                 "importance": p.payload.get("importance", 0.5),
                 "confidence": p.payload.get("confidence", 0.5),
                 "created_at": p.payload.get("created_at"),
+                "embedding": p.payload.get("embedding"),  # for cosine similarity
             }
             for p in raw
         ]

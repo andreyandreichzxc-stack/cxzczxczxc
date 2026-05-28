@@ -113,20 +113,128 @@ _INTENT_RISK_MAP: dict[str, ActionRisk] = {
 }
 
 
+# ── Tool name → risk mapping ───────────────────────────────────────────
+# Used when the action is an MCP tool name rather than an intent.
+
+_TOOL_RISK_MAP: dict[str, ActionRisk] = {
+    "search_sessions": ActionRisk.LOW,
+    "search_contexts": ActionRisk.LOW,
+    "cross_chat_search": ActionRisk.LOW,
+    "recall_memory": ActionRisk.LOW,
+    "mcp_connectors": ActionRisk.MEDIUM,
+    "mcp_web": ActionRisk.MEDIUM,
+    "mcp_http": ActionRisk.MEDIUM,
+    "mcp_telegram": ActionRisk.HIGH,  # sends messages
+    "mcp_reminders": ActionRisk.LOW,
+    "mcp_filesystem": ActionRisk.MEDIUM,
+    "mcp_system": ActionRisk.LOW,
+    "mcp_oauth": ActionRisk.HIGH,
+    "tg_profile": ActionRisk.LOW,
+    "execute_code": ActionRisk.CRITICAL,
+    "list_contacts": ActionRisk.LOW,
+    "draft_reply": ActionRisk.MEDIUM,
+    "summarize_chat": ActionRisk.LOW,
+    "set_reminder": ActionRisk.MEDIUM,
+    "search_messages": ActionRisk.LOW,
+}
+
+
+def _risk_from_value(value: str | None) -> ActionRisk | None:
+    if not value:
+        return None
+    try:
+        return ActionRisk(value.strip().lower())
+    except ValueError:
+        return None
+
+
+def _registered_tool_risk(
+    intent: str,
+    params: dict[str, Any] | None = None,
+) -> ActionRisk | None:
+    try:
+        from src.core.actions.tool_registry import tool_registry
+    except Exception:
+        return None
+
+    spec = tool_registry.get(intent)
+    if spec is None:
+        return None
+    action_name = params.get("action") if params else None
+    if spec.effective_requires_confirmation(action_name):
+        return ActionRisk.HIGH
+    return _risk_from_value(spec.effective_risk(action_name))
+
+
 def get_action_risk(intent: str) -> ActionRisk:
     """Return the risk level for a given intent string.
 
+    Checks tool names first, then intent names.
     Unknown intents default to HIGH (safe side).
     """
     # Normalise: strip leading slashes, lowercase
     normalised = intent.strip().lstrip("/").lower()
+    tool_risk = _registered_tool_risk(normalised)
+    if tool_risk is not None:
+        return tool_risk
+    # Check legacy hardcoded tool names after registry metadata.
+    if normalised in _TOOL_RISK_MAP:
+        return _TOOL_RISK_MAP[normalised]
+    # Fallback to intents
     return _INTENT_RISK_MAP.get(normalised, ActionRisk.HIGH)
+
+
+def _connector_action_risk(params: dict[str, Any]) -> ActionRisk:
+    action = str(params.get("action") or "list").strip().lower()
+    if action in {"list", "describe"}:
+        return ActionRisk.LOW
+    if action != "execute":
+        return ActionRisk.MEDIUM
+
+    connector = str(params.get("connector") or "").strip().lower()
+    connector_action = str(params.get("connector_action") or "").strip().lower()
+    if not connector or not connector_action:
+        return ActionRisk.MEDIUM
+
+    try:
+        from src.core.connectors import connector_registry, register_builtin_connectors
+    except Exception:
+        return ActionRisk.MEDIUM
+
+    register_builtin_connectors()
+    registered = connector_registry.get(connector)
+    if registered is None:
+        return ActionRisk.MEDIUM
+    action_spec = registered.spec.get_action(connector_action)
+    if action_spec is None:
+        return ActionRisk.MEDIUM
+    if str(params.get("exposure") or "").strip().lower() == "read-only":
+        return ActionRisk.LOW
+
+    risk = _risk_from_value(action_spec.risk) or ActionRisk.MEDIUM
+    if action_spec.requires_confirmation and risk == ActionRisk.LOW:
+        return ActionRisk.HIGH
+    return risk
+
+
+def _action_risk_for_params(intent: str, params: dict[str, Any]) -> ActionRisk:
+    normalised = intent.strip().lstrip("/").lower()
+    if normalised == "mcp_connectors":
+        return _connector_action_risk(params)
+    tool_risk = _registered_tool_risk(normalised, params)
+    if tool_risk is not None:
+        return tool_risk
+    return get_action_risk(intent)
 
 
 # ── Confirmation logic ────────────────────────────────────────────────
 
 
-def needs_approval(intent: str, context: dict[str, Any] | None = None) -> bool:
+def needs_approval(
+    intent: str,
+    context: dict[str, Any] | None = None,
+    risk: ActionRisk | None = None,
+) -> bool:
     """Return True if the action requires user confirmation.
 
     ``context`` may contain overrides:
@@ -143,7 +251,7 @@ def needs_approval(intent: str, context: dict[str, Any] | None = None) -> bool:
     - CRITICAL → always confirm (return True — caller should also
                  verify explicit user intent via ``bypass_reason``).
     """
-    risk = get_action_risk(intent)
+    risk = risk or get_action_risk(intent)
     ctx = context or {}
 
     if risk == ActionRisk.LOW:
@@ -165,7 +273,11 @@ def needs_approval(intent: str, context: dict[str, Any] | None = None) -> bool:
 # ── Confirmation message generation ───────────────────────────────────
 
 
-def get_confirmation_message(intent: str, params: dict[str, Any]) -> str:
+def get_confirmation_message(
+    intent: str,
+    params: dict[str, Any],
+    risk: ActionRisk | None = None,
+) -> str:
     """Generate a human-readable confirmation message in Russian.
 
     Example output:
@@ -173,7 +285,7 @@ def get_confirmation_message(intent: str, params: dict[str, Any]) -> str:
       "Удалить контакт «Иван Петров»?"
       "Забыть факт: «User works at Google»?"
     """
-    risk = get_action_risk(intent)
+    risk = risk or get_action_risk(intent)
     prefix = _RISK_PREFIX.get(risk, "")
 
     # Try intent-specific formatters first
@@ -346,6 +458,24 @@ def _describe_params(intent: str, params: dict[str, Any]) -> str:
 # ── Parameter sanitisation ────────────────────────────────────────────
 
 
+def _registered_tool_allowed_keys(intent: str) -> set[str] | None:
+    try:
+        from src.core.actions.tool_registry import tool_registry
+    except Exception:
+        return None
+
+    spec = tool_registry.get(intent)
+    if spec is None:
+        return None
+
+    allowed = set(spec.params.keys())
+    schema = spec.input_schema if isinstance(spec.input_schema, dict) else {}
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        allowed.update(str(key) for key in properties.keys())
+    return allowed
+
+
 def sanitize_action(intent: str, params: dict[str, Any]) -> dict[str, Any]:
     """Validate and sanitise action parameters.
 
@@ -357,7 +487,8 @@ def sanitize_action(intent: str, params: dict[str, Any]) -> dict[str, Any]:
     4. Remove empty / null values.
     """
     spec = action_registry.get(intent)
-    allowed: set[str] = spec.allowed if spec is not None else SAFE_KEYS
+    tool_allowed = _registered_tool_allowed_keys(intent) if spec is None else None
+    allowed: set[str] = spec.allowed if spec is not None else (tool_allowed or SAFE_KEYS)
 
     cleaned: dict[str, Any] = {}
     for k, v in params.items():
@@ -433,15 +564,15 @@ def evaluate(
     -------
     GuardrailResult
     """
-    risk = get_action_risk(intent)
     sanitized = sanitize_action(intent, params)
-    need_confirm = needs_approval(intent, context)
+    risk = _action_risk_for_params(intent, sanitized)
+    need_confirm = needs_approval(intent, context, risk=risk)
 
     reason_parts: list[str] = []
     reason_parts.append(f"risk={risk.value}")
 
     if need_confirm:
-        confirm_msg = get_confirmation_message(intent, sanitized)
+        confirm_msg = get_confirmation_message(intent, sanitized, risk=risk)
         reason_parts.append("needs_approval=True")
     else:
         confirm_msg = ""

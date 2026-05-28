@@ -13,7 +13,7 @@ import logging
 import re
 from typing import Any
 
-from src.llm.base import ChatMessage
+from src.llm.base import ChatMessage, TaskType
 from src.llm.router import build_provider
 from src.db.session import get_session
 from src.db.repo import get_or_create_user
@@ -102,7 +102,7 @@ async def generate_scene_narrative(
     try:
         async with get_session() as session:
             owner = await get_or_create_user(session, telegram_id)
-            provider = await build_provider(session, owner)
+            provider = await build_provider(session, owner, task_type=TaskType.MEMORY)
     except Exception:
         logger.exception("Failed to get provider for scene extraction")
         return None
@@ -117,6 +117,7 @@ async def generate_scene_narrative(
                 ChatMessage(role="system", content=SCENE_SYSTEM_PROMPT),
                 ChatMessage(role="user", content=user_prompt),
             ],
+            task_type=TaskType.MEMORY,
         )
     except Exception:
         logger.exception("LLM call failed for scene extraction")

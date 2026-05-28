@@ -290,11 +290,8 @@ async def _send_login_step(chat_id: int, bot, state: FSMContext | None = None) -
     )
     await bot.send_message(
         chat_id,
-        "<b>Шаг 1 из 5: 🔑 Авторизация</b>\n\n"
-        "Сначала подключим твой Telegram-аккаунт — так я смогу "
-        "читать чаты, отвечать на сообщения и работать с контекстом.\n\n"
-        "Нажми на кнопку ниже и отправь команду /login (или введи её вручную).\n\n"
-        "После успешного входа я автоматически переведу тебя на следующий шаг.",
+        "🚀 <b>Шаг 1/4 — Авторизация</b>\n\n"
+        "Подключи свой Telegram-аккаунт командой /login",
         reply_markup=kb,
     )
 
@@ -338,17 +335,15 @@ async def step_onboarding_login(message: Message, state: FSMContext) -> None:
 async def _send_llm_key_step(chat_id: int, bot) -> None:
     """Отправляет сообщение шага «Ключ для ИИ»."""
     text = (
-        "<b>Шаг 2 из 5: 🤖 API-ключ для ИИ</b>\n\n"
-        "Теперь нужен ключ для работы с искусственным интеллектом.\n"
-        "Отправь мне API-ключ одного из поддерживаемых провайдеров:\n\n"
-        "• <b>OpenAI</b> — начинается на <code>sk-</code>\n"
-        "• <b>Gemini</b> — AIzaSy...\n"
-        "• <b>Mistral</b> — начинается на <code>Nb...</code>\n"
-        "• <b>Cloudflare</b> — Workers AI Token\n\n"
-        "Я проверю ключ и сохраню его в зашифрованном виде.\n"
-        "🔐 Ключ после проверки будет сразу удалён из чата.\n\n"
-        "<i>Пример: отправь мне OpenAI-ключ.</i>\n\n"
-        "/cancel — отменить настройку."
+        "🔑 <b>Шаг 2/4 — подключи мозг</b>\n\n"
+        "Форматы ключей:\n"
+        "• OpenAI:      sk-proj-...\n"
+        "• Anthropic:   sk-ant-api03-...\n"
+        "• Gemini:      AIzaSy...\n"
+        "• Mistral:     Nb...\n"
+        "• OpenRouter:  sk-or-...\n"
+        "• Cloudflare:  (длинный токен)\n"
+        "• Groq:        gsk_..."
     )
     await bot.send_message(chat_id, text)
 
@@ -404,6 +399,8 @@ def _detect_provider(key: str) -> str | None:
     key = key.strip()
     if key.startswith("sk-or-"):
         return "openrouter"
+    if key.startswith("sk-ant-"):
+        return "anthropic"
     if key.startswith("sk-"):
         return "openai"
     if key.startswith("AIzaSy"):
@@ -435,6 +432,10 @@ async def _validate_key(provider: str, key: str) -> tuple[bool, str | None]:
             from src.llm.openrouter_provider import OpenRouterProvider
 
             return (await OpenRouterProvider(key).validate_key(), None)
+        if provider == "anthropic":
+            from src.llm.anthropic_provider import AnthropicProvider
+
+            return (await AnthropicProvider(key).validate_key(), None)
     except Exception as e:
         err_str = str(e).lower()
         if any(
@@ -464,11 +465,8 @@ async def _send_timezone_step(chat_id: int, bot) -> None:
 
     await bot.send_message(
         chat_id,
-        "<b>Шаг 3 из 5: 🕐 Часовой пояс</b>\n\n"
-        "Откуда ты? Это нужно для правильного времени дайджестов, "
-        "напоминаний и новостей.\n\n"
-        "Выбери свой часовой пояс ниже или отправь IANA-название "
-        "(например <code>Europe/Moscow</code>).",
+        "🕐 <b>Шаг 3/4 — часовой пояс</b>\n\n"
+        "Выбери свой город или введи вручную (например, Europe/Moscow)",
         reply_markup=kb,
     )
 
@@ -563,13 +561,8 @@ async def _send_sync_step(chat_id: int, bot) -> None:
 
     await bot.send_message(
         chat_id,
-        "<b>Шаг 4 из 5: 📱 Синхронизация чатов</b>\n\n"
-        "Хочешь, чтобы я прочитал твои чаты? "
-        "Так я буду знать контекст и смогу помогать эффективнее.\n\n"
-        "• <b>Все личные чаты</b> — просканирую все диалоги\n"
-        "• <b>Выбрать папки</b> — только чаты из выбранных папок Telegram\n"
-        "• <b>Пропустить</b> — настрою позже в /settings\n\n"
-        "Выбери вариант:",
+        "📱 <b>Шаг 4/4 — синхронизация контактов</b>\n\n"
+        "Я прочитаю твои диалоги и запомню важное. Это займёт 2-5 минут.",
         reply_markup=kb,
     )
 
@@ -734,8 +727,9 @@ async def _finish_onboarding(chat_id: int, bot, tg_id: int, extra: str = "") -> 
         providers = sorted(
             {k.provider for k in owner.key_slots if getattr(k, "enabled", True)}
         )
-        key_count = len(providers)
         key_names = ", ".join(_pretty_provider(p) for p in providers)
+        if not key_names:
+            key_names = "—"
 
         # Часовой пояс
         tz_name = owner.settings.timezone or "UTC"
@@ -748,18 +742,23 @@ async def _finish_onboarding(chat_id: int, bot, tg_id: int, extra: str = "") -> 
         tone_label = tone_labels.get(tone_key, tone_key)
 
     msg = (
-        "🎉 <b>Готово! Что настроено:</b>\n"
-        f"• Telegram: подключён (аккаунт {session_label})\n"
-        f"• LLM: {key_count} ключ{'ей' if key_count != 1 else ''} ({key_names if key_names else '—'})\n"
+        "<b>Итог настройки</b>\n"
+        f"• Сессия: {session_label}\n"
+        f"• Контакты: {contact_count}\n"
+        f"• Факты в памяти: {fact_count}\n"
+        f"• LLM-ключи: {len(providers)} ({key_names})\n"
         f"• Часовой пояс: {tz_name}\n"
-        f"• Контактов: {contact_count}\n"
-        f"• Фактов в памяти: {fact_count}\n"
-        f"• Режим личности: {tone_label}\n\n"
-        "<b>Что дальше:</b>\n"
-        "• /help — все команды\n"
-        "• Просто напиши мне — я пойму\n"
-        "• /contact Имя — что я знаю о человеке\n"
-        "• /mode — сменить стиль общения"
+        f"• Тон: {tone_label}\n\n"
+        "🎉 <b>Я полностью настроен и готов к работе!</b>\n\n"
+        "Что я теперь умею:\n"
+        "🧠 Помню факты о тебе и контактах\n"
+        "💬 Авто-отвечаю в ЛС пока ты занят\n"
+        "📋 Веду список дел и напоминаю\n"
+        "📰 Собираю дайджест новостей\n"
+        "🔍 Ищу по истории переписок\n"
+        "🌤️ Погода, крипта, whois, таймеры\n\n"
+        "Просто напиши мне — я пойму.\n"
+        "Подробнее: /help"
     )
     if extra:
         msg = extra + "\n\n" + msg
@@ -789,6 +788,8 @@ async def advance_onboarding_after_login(message: Message, state: FSMContext) ->
 
     # Переходим к шагу LLM ключа
     await state.set_state(OnboardingStates.waiting_llm_key)
-    await message.answer("🔑 Аккаунт подключён! Продолжаем настройку 🚀")
+    await message.answer(
+        "✅ Готово! <b>Шаг 2/4 — API-ключ</b>\n\nТеперь нужен ключ для доступа к LLM. Выбери провайдера:"
+    )
     await _send_llm_key_step(message.chat.id, message.bot)
     return True

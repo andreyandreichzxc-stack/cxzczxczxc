@@ -73,6 +73,18 @@ _FTS_SETUP = [
     """,
 ]
 
+# Agent Session FTS5: external-content virtual table linked to agent_session_messages.
+# No triggers needed — FTS5 reads directly from the content table via content_rowid.
+_SESSION_FTS_SETUP = [
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS agent_session_messages_fts USING fts5(
+        content, role, session_id UNINDEXED,
+        content='agent_session_messages', content_rowid='id',
+        tokenize='unicode61 remove_diacritics 2'
+    );
+    """,
+]
+
 # Memory FTS5: virtual table + триггеры синхронизации с memories.
 _MEMORY_FTS_SETUP = [
     """
@@ -232,6 +244,8 @@ async def init_db() -> None:
 
         # FTS5 virtual tables are not tracked by Alembic — raw SQL.
         for stmt in _FTS_SETUP:
+            await conn.execute(text(stmt))
+        for stmt in _SESSION_FTS_SETUP:
             await conn.execute(text(stmt))
         for stmt in _MEMORY_FTS_SETUP:
             await conn.execute(text(stmt))

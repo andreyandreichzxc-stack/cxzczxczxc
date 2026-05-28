@@ -23,6 +23,7 @@ from src.db.repo import (
     get_self_profile,
 )
 from src.db.session import get_session
+from src.llm.base import TaskType
 from src.llm.router import build_provider
 from src.userbot.manager import UserbotManager
 
@@ -53,7 +54,7 @@ async def cmd_me(message: Message, command: CommandObject) -> None:
 
         if "--rebuild" in args:
             await message.answer("\U0001f9e0 Строю SelfProfile из памяти...")
-            provider = await build_provider(session, owner)
+            provider = await build_provider(session, owner, task_type=TaskType.DEFAULT)
             if provider is None:
                 await message.answer("\u274c Нет LLM-провайдера. Настрой /settings.")
                 return
@@ -290,7 +291,7 @@ async def cb_profile_rebuild(
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         contact = await get_contact(session, owner, peer_id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.DEFAULT)
 
     if provider is None:
         await callback.message.edit_text("❌ Нет LLM-провайдера. Настрой /settings.")

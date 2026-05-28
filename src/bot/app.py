@@ -13,10 +13,13 @@ from aiogram.types import Message
 from src.bot.handlers import (
     analyze_cmd,
     approve_cmd,
+    ask_cmd,
+    avito_cmd,
     catchup_cmd,
     chat_cmd,
     contact_cmd,
     digest_cmd,
+    docs_cmd,
     draft_actions,
     explain_cmd,
     gates_cmd,
@@ -24,6 +27,7 @@ from src.bot.handlers import (
     help_cmd,
     humanize_cmd,
     inbox_cmd,
+    install_cmd,
     mode_cmd,
     free_text,
     free_text_memory,
@@ -35,6 +39,7 @@ from src.bot.handlers import (
     profile_cmd,
     search,
     send,
+    sessions_cmd,
     settings as settings_handlers,
     skills_cmd,
     start,
@@ -44,11 +49,11 @@ from src.bot.handlers import (
     today_cmd,
     todos,
     trajectory_cmd,
+    wiki_cmd,
 )
 from src.bot.handlers.free_text_pipeline import confirm_router
 from src.config import settings
 from src.core.infra.notifier import notifier
-from src.core.scheduling.notification_queue import notification_queue
 from src.userbot.manager import UserbotManager
 
 
@@ -103,7 +108,6 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
         session=session,
     )
     notifier.attach(bot)
-    notification_queue.start()
 
     # Patch bot.send_message so ALL outbound messages (message.answer, etc.)
     # automatically get retry with exponential backoff.
@@ -126,6 +130,9 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
           3 (нет часового)   — всё разрешено, но подсказка /sync после ответа
           4 (готов)          — без ограничений
         """
+        if not message.from_user:
+            return  # channel posts, no user context
+
         tg_id = message.from_user.id
         if tg_id != settings.owner_telegram_id:
             return await handler(message, data)
@@ -172,10 +179,13 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
         return
 
     dp.include_router(approve_cmd.router)
+    dp.include_router(ask_cmd.router)
     dp.include_router(gates_cmd.router)
     dp.include_router(health_cmd.router)
     dp.include_router(help_cmd.router)
+    dp.include_router(docs_cmd.router)
     dp.include_router(inbox_cmd.router)
+    dp.include_router(install_cmd.router)
     dp.include_router(start.router)
     dp.include_router(analyze_cmd.router)
     dp.include_router(contact_cmd.router)
@@ -195,12 +205,15 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
     dp.include_router(news_topics.router)
     dp.include_router(threads_cmd.router)
     dp.include_router(timeline_cmd.router)
+    dp.include_router(sessions_cmd.router)
     dp.include_router(explain_cmd.router)
     dp.include_router(humanize_cmd.router)
     dp.include_router(mode_cmd.router)
     dp.include_router(today_cmd.router)
     dp.include_router(skills_cmd.router)
     dp.include_router(trajectory_cmd.router)
+    dp.include_router(wiki_cmd.router)
+    dp.include_router(avito_cmd.router)
     dp.include_router(free_text_memory.router)
     dp.include_router(free_text_settings.router)
     dp.include_router(confirm_router)

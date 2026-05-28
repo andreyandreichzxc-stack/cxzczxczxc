@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from src.config import PROJECT_ROOT, settings
-from src.core.actions.tool_registry import tool
+from src.core.actions.tool_registry import CONFIRMATION_RISKS, ToolActionSpec, tool
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +164,36 @@ def _is_text_file(path: Path) -> bool:
     ),
     category="system",
     risk="medium",
+    actions={
+        "list": ToolActionSpec(
+            name="list",
+            risk="low",
+            read_only=True,
+            idempotent=True,
+            user_content=True,
+        ),
+        "space": ToolActionSpec(
+            name="space",
+            risk="low",
+            read_only=True,
+            idempotent=True,
+            user_content=False,
+        ),
+        "read": ToolActionSpec(
+            name="read",
+            risk="medium",
+            read_only=True,
+            idempotent=True,
+            user_content=True,
+        ),
+        "search": ToolActionSpec(
+            name="search",
+            risk="medium",
+            read_only=True,
+            idempotent=True,
+            user_content=True,
+        ),
+    },
     params={
         "action": "str",
         "path": "str",
@@ -345,17 +375,38 @@ async def _fs_search(dir_path: str, pattern: str) -> dict:
         "Retrieve system-level information about the bot runtime. "
         "Supports actions:\n"
         "- 'status' — uptime, memory usage, platform, DB size\n"
-        "- 'version' — SOUL.md title, git commit hash"
+        "- 'version' — SOUL.md title, git commit hash\n"
+        "- 'doctor' — read-only tool/connector registry health check"
     ),
     category="system",
     risk="low",
     params={"action": "str"},
+    actions={
+        "status": ToolActionSpec(
+            name="status",
+            description="Runtime status and local resource stats",
+            risk="low",
+            read_only=True,
+        ),
+        "version": ToolActionSpec(
+            name="version",
+            description="Version and local metadata",
+            risk="low",
+            read_only=True,
+        ),
+        "doctor": ToolActionSpec(
+            name="doctor",
+            description="Read-only tool/connector health check",
+            risk="low",
+            read_only=True,
+        ),
+    },
 )
 async def mcp_system(action: str, **kwargs: Any) -> dict:
     """System introspection tool.
 
     Args:
-        action: One of ``"status"``, ``"version"``.
+        action: One of ``"status"``, ``"version"``, ``"doctor"``.
 
     Returns:
         A dict with the result data or an ``"error"`` key on failure.
@@ -365,8 +416,10 @@ async def mcp_system(action: str, **kwargs: Any) -> dict:
             return await _sys_status()
         elif action == "version":
             return await _sys_version()
+        elif action == "doctor":
+            return await _sys_doctor()
         else:
-            return {"error": f"Unknown action {action!r}. Valid: status, version"}
+            return {"error": f"Unknown action {action!r}. Valid: status, version, doctor"}
     except Exception as exc:
         logger.exception("mcp_system(%r) failed", action)
         return {"error": str(exc)}
@@ -471,6 +524,73 @@ async def _sys_version() -> dict:
         result["git_note"] = "Not a git repository"
 
     return {"ok": True, **result}
+
+
+async def _sys_doctor() -> dict[str, Any]:
+    from src.core.actions import register_builtin_tools
+    from src.core.actions.tool_registry import tool_registry
+    from src.core.connectors import connector_registry, register_builtin_connectors
+
+    failures: list[str] = []
+    warnings: list[str] = []
+
+    try:
+        register_builtin_tools()
+    except Exception as exc:
+        failures.append(f"tool bootstrap failed: {exc.__class__.__name__}")
+
+    tools = sorted(
+        (
+            spec
+            for specs in tool_registry.list_by_category().values()
+            for spec in specs
+        ),
+        key=lambda spec: spec.name,
+    )
+    names = [spec.name for spec in tools]
+    duplicate_names = sorted({name for name in names if names.count(name) > 1})
+    if duplicate_names:
+        failures.append(f"duplicate tools: {', '.join(duplicate_names)}")
+
+    for spec in tools:
+        risk = spec.risk.strip().lower()
+        if risk in CONFIRMATION_RISKS and not spec.requires_confirmation:
+            warnings.append(f"{spec.name}: {risk} risk relies on registry confirmation")
+        if spec.name.startswith("mcp_") and not spec.actions:
+            warnings.append(f"{spec.name}: missing action-level metadata")
+        if spec.actions:
+            for action in spec.actions.values():
+                action_risk = action.risk.strip().lower()
+                if not action.read_only and action_risk == "low":
+                    warnings.append(f"{spec.name}.{action.name}: write action has low risk")
+
+    try:
+        register_builtin_connectors()
+    except Exception as exc:
+        failures.append(f"connector bootstrap failed: {exc.__class__.__name__}")
+
+    try:
+        connectors = connector_registry.list(exposure="all")
+        read_only_connectors = connector_registry.list(exposure="read-only")
+    except Exception as exc:
+        connectors = []
+        read_only_connectors = []
+        failures.append(f"connector listing failed: {exc.__class__.__name__}")
+    for connector in read_only_connectors:
+        for action in connector.get("actions", []):
+            annotations = action.get("annotations") or {}
+            if annotations.get("read_only") is not True:
+                failures.append(
+                    f"{connector.get('name')}.{action.get('name')} exposed as read-only"
+                )
+
+    return {
+        "ok": not failures,
+        "tools_count": len(tools),
+        "connectors_count": len(connectors),
+        "failures": failures,
+        "warnings": warnings,
+    }
 
 
 # ── Helpers ────────────────────────────────────────────────────────────

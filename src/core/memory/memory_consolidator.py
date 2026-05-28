@@ -82,8 +82,5 @@ async def consolidation_loop() -> None:
         await asyncio.sleep(settings.memory_consolidation_interval_sec)  # 6 hours
 
 
-from functools import partial
-from src.core.infra.task_manager import task_manager
-
 # NOTE: registration moved to dream_cycle.py (unified nightly job).
 # task_manager.register("memory-consolidator", partial(consolidation_loop))

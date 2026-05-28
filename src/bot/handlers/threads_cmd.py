@@ -225,12 +225,13 @@ async def cb_thread_reply(callback: CallbackQuery, userbot_manager=None) -> None
     peer_id = int(parts[2])
     from src.core.intelligence.summarizer import draft_reply
     from src.core.infra.text_sanitizer import sanitize_html
+    from src.llm.base import TaskType
     from src.llm.router import build_provider
 
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
         contact = await get_contact(session, owner, peer_id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.DRAFT)
         msgs = await fetch_chat_messages(session, owner, peer_id, limit=20)
         name = contact.display_name if contact else str(peer_id)
 

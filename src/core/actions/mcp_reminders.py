@@ -40,7 +40,8 @@ logger = logging.getLogger(__name__)
         "- 'create' — create a new reminder with optional ISO-deadline."
     ),
     category="reminder",
-    risk="low",
+    risk="medium",
+    requires_confirmation=True,
     params={
         "action": "str — 'list' or 'create'",
         "text": "str — reminder text (required for action='create')",

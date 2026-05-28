@@ -22,14 +22,27 @@ from aiogram.types import (
     InlineKeyboardMarkup,
 )
 
+from src.core.humanizer import (
+    analyze_ai_score as _analyze_ai_score,
+    humanize_deep as _humanize_deep,
+    humanize_response as _humanize_response,
+)
+from src.core.infra.text_sanitizer import sanitize_html as _sanitize_html
 from src.core.contacts.chat_service import load_chat as _load_chat
+from src.core.contacts.contact_memory_digest import (
+    get_contact_digest as _get_contact_digest,
+)
 from src.core.actions.commitment_extractor import (
     extract_and_save_commitments as _extract_commitments,
 )
 from src.core.intelligence.summarizer import (
+    ask_chat as _ask_chat,
     catchup as _catchup,
     draft_reply as _draft_reply,
     summarize_chat as _summarize_chat,
+)
+from src.core.intelligence.style_matcher import (
+    get_or_update_style_profile as _get_style_profile,
 )
 from src.db.repo import (
     create_pending_action,
@@ -37,6 +50,7 @@ from src.db.repo import (
     get_or_create_user as _get_or_create_user,
 )
 from src.db.session import get_session
+from src.llm.base import TaskType
 from src.llm.router import build_provider
 from src.userbot.manager import UserbotManager
 
@@ -68,7 +82,7 @@ async def _load_chat_context(
 ) -> dict | None:
     """Загружает полный контекст для чат-действия.
 
-    Returns dict с ключами: client, owner, contact, messages, provider, heavy
+    Returns dict с ключами: client, owner, contact, messages, provider
     или None если не удалось (ошибку уже отправил вызывающий).
     """
     client = userbot_manager.get_client(telegram_id)
@@ -82,8 +96,7 @@ async def _load_chat_context(
     async with get_session() as session:
         owner = await _get_or_create_user(session, telegram_id)
         contact = await _get_contact(session, owner, peer_id)
-        provider = await build_provider(session, owner)
-        heavy = owner.settings.use_heavy_model
+        provider = await build_provider(session, owner, task_type=TaskType.DEFAULT)
 
     if contact is None or provider is None:
         return None
@@ -94,7 +107,6 @@ async def _load_chat_context(
         "contact": contact,
         "messages": messages,
         "provider": provider,
-        "heavy": heavy,
     }
 
 
@@ -130,7 +142,6 @@ async def summarize_chat_action(
         ctx["provider"],
         ctx["contact"],
         ctx["messages"],
-        heavy=ctx["heavy"],
         global_style=ctx["owner"].global_style_profile,
         owner_id=ctx["owner"].id,
     )
@@ -198,7 +209,6 @@ async def draft_reply_action(
         ctx["contact"],
         ctx["messages"],
         instruction=instruction or None,
-        heavy=ctx["heavy"],
         global_style=ctx["owner"].global_style_profile,
         owner_id=ctx["owner"].id,
     )
@@ -247,7 +257,6 @@ async def catchup_action(
         ctx["provider"],
         ctx["contact"],
         ctx["messages"],
-        heavy=ctx["heavy"],
         global_style=ctx["owner"].global_style_profile,
         owner_id=ctx["owner"].id,
     )
@@ -256,6 +265,139 @@ async def catchup_action(
     return ChatActionResult(
         html=html,
         display_name=ctx["contact"].display_name,
+        markup=_actions_keyboard(peer_id),
+    )
+
+
+async def _load_memory_context(
+    telegram_id: int,
+    peer_id: int,
+    contact_name: str,
+    *,
+    max_facts: int = 5,
+) -> str:
+    """Загружает память о контакте: факты, обещания, стиль.
+
+    Пытается сначала через быстрый contact_digest (кеш),
+    при нехватке фактов — fallback на recall().
+    Возвращает пустую строку если памяти нет.
+    """
+    try:
+        digest = await _get_contact_digest(telegram_id, peer_id)
+        facts = digest.get("facts") or []
+        if facts:
+            lines = [f"<recall_context>\n📌 Факты о {_sanitize_html(contact_name)}:"]
+            for f in facts[:max_facts]:
+                lines.append(f"• {_sanitize_html(f.get('fact', ''))}")
+            promises = digest.get("promises") or []
+            if promises:
+                lines.append("\n📋 Обещания:")
+                for p in promises[:3]:
+                    lines.append(f"• {_sanitize_html(p.get('text', ''))}")
+            lines.append("</recall_context>")
+            return "\n".join(lines)
+
+        # Fallback: полный recall
+        from src.core.memory.memory_recall import (
+            recall as _recall,
+            format_recall_for_prompt as _fmt_recall,
+        )
+
+        result = await _recall(
+            telegram_id,
+            contact_id=peer_id,
+            query="",
+            limit=max_facts,
+            include_self=False,
+            mode="light",
+        )
+        if result and result.facts:
+            return _fmt_recall(result, max_facts=max_facts)
+    except Exception:
+        logger.warning(
+            "Failed to load memory context for %s (peer_id=%s)",
+            contact_name,
+            peer_id,
+            exc_info=True,
+        )
+    return ""
+
+
+async def ask_chat_action(
+    telegram_id: int,
+    peer_id: int,
+    userbot_manager: UserbotManager,
+    user_query: str = "",
+    limit: int = 50,
+) -> ChatActionResult | None:
+    """Проанализировать чат: задать вопрос LLM про переписку.
+
+    Args:
+        telegram_id: ID владельца
+        peer_id: ID чата/контакта
+        userbot_manager: менеджер userbot'ов
+        user_query: вопрос пользователя
+        limit: сколько сообщений загрузить
+    """
+    ctx = await _load_chat_context(telegram_id, peer_id, userbot_manager, limit=limit)
+    if ctx is None:
+        return None
+
+    # Загружаем память о контакте
+    contact_name = ctx["contact"].display_name
+    memory_context = await _load_memory_context(telegram_id, peer_id, contact_name)
+
+    text = await _ask_chat(
+        ctx["provider"],
+        ctx["contact"],
+        ctx["messages"],
+        user_query=user_query,
+        global_style=ctx["owner"].global_style_profile,
+        owner_id=ctx["owner"].id,
+        memory_context=memory_context,
+    )
+
+    # Humanizer: очеловечиваем ответ
+    owner_telegram_id = telegram_id
+    style_profile = ""
+    try:
+        style_profile = (await _get_style_profile(owner_telegram_id)) or ""
+    except Exception:
+        pass
+
+    humanized = _humanize_response(
+        text,
+        context_hint="analysis",
+        style_profile=style_profile,
+    )
+    score, _ = _analyze_ai_score(humanized)
+    if score > 0.3 and len(humanized) > 100:
+        try:
+            try:
+                async with get_session() as session:
+                    owner = await _get_or_create_user(session, telegram_id)
+                    heavy_provider = await build_provider(
+                        session, owner, task_type=TaskType.HUMANIZE
+                    )
+                    if heavy_provider is None:
+                        heavy_provider = ctx["provider"]
+            except Exception:
+                heavy_provider = ctx["provider"]
+            humanized = await _humanize_deep(
+                humanized, heavy_provider, user_style=style_profile
+            )
+        except Exception:
+            logger.debug("deep humanize non-critical fail", exc_info=True)
+
+    if user_query:
+        truncated_query = user_query[:60] + "…" if len(user_query) > 60 else user_query
+        html = f"🤖 <b>Анализ чата «{contact_name}»</b>\n<i>Запрос: {_sanitize_html(truncated_query)}</i>\n\n{humanized}"
+    else:
+        html = f"🤖 <b>Анализ чата «{contact_name}»</b>\n\n{humanized}"
+
+    return ChatActionResult(
+        html=html,
+        display_name=contact_name,
         markup=_actions_keyboard(peer_id),
     )
 

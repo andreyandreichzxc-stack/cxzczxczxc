@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import partial
 
@@ -48,9 +48,9 @@ logger = logging.getLogger(__name__)
 class BriefingData:
     urgent_count: int = 0
     unread_total: int = 0
-    waiting_reply: list = None  # list[dict]
-    overdue_commitments: list = None  # list[dict]
-    today_commitments: list = None  # list[dict]
+    waiting_reply: list[dict] = field(default_factory=list)
+    overdue_commitments: list[dict] = field(default_factory=list)
+    today_commitments: list[dict] = field(default_factory=list)
     recent_memories: int = 0
     memory_stats: dict = None  # статистика по памяти
     fuel_stats: dict = None  # статистика топлива памяти
@@ -338,6 +338,8 @@ async def _collect_morning_digest(owner_id: int) -> str:
 
         needs_reply_names: list[str] = []
         for conv in unanswered:
+            if conv.last_incoming_at is None:
+                continue
             hours = (now - conv.last_incoming_at).total_seconds() / 3600
             urgency = "🔴" if hours > 48 else "🟡"
 
@@ -473,8 +475,27 @@ async def _collect_healthy(
         .group_by(Contact.peer_id, Contact.display_name)
     )
 
+    rows = list(rows_r.all())
+
+    # ── Batch load yesterday message counts for all peers ──────────
+    all_peer_ids = [r[0] for r in rows]
+    if all_peer_ids:
+        yday_r = await session.execute(
+            select(Message.peer_id, func.count().label("cnt"))
+            .where(
+                Message.user_id == owner.id,
+                Message.peer_id.in_(all_peer_ids),
+                Message.date >= yesterday_start,
+                Message.date < today_start,
+            )
+            .group_by(Message.peer_id)
+        )
+        yday_by_peer = {r[0]: r[1] for r in yday_r.all()}
+    else:
+        yday_by_peer = {}
+
     result: list[str] = []
-    for row in rows_r.all():
+    for row in rows:
         peer_id, name, msg_total, last_date, outgoing = row
         outgoing = outgoing or 0
 
@@ -501,17 +522,7 @@ async def _collect_healthy(
         score = max(0.0, min(100.0, round(score)))
 
         if score >= 80:
-            yday_r = await session.execute(
-                select(func.count())
-                .select_from(Message)
-                .where(
-                    Message.user_id == owner.id,
-                    Message.peer_id == peer_id,
-                    Message.date >= yesterday_start,
-                    Message.date < today_start,
-                )
-            )
-            yday_msgs = yday_r.scalar_one() or 0
+            yday_msgs = yday_by_peer.get(peer_id, 0)
             result.append(f"💚 С {name} всё хорошо, {yday_msgs} сообщений вчера")
 
     return result[:5]

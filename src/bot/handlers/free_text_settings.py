@@ -1,5 +1,6 @@
 """Обработчики настроек: set_setting, news topics, auto_mode, quiet_hours."""
 
+import json
 import logging
 
 from aiogram import Router
@@ -53,6 +54,45 @@ SETTING_FIELDS: dict[str, str] = {
     "pattern_caching_enabled": "bool",
     "monitored_folders": "str",
     "timezone": "tz",
+    # Model overrides per task type (stored as JSON in model_overrides field)
+    "model_override_maestro": "model",
+    "model_override_draft": "model",
+    "model_override_memory": "model",
+    "model_override_search": "model",
+    "model_override_classify": "model",
+    "model_override_summarize": "model",
+    "model_override_humanize": "model",
+    "model_override_skills": "model",
+    "model_override_background": "model",
+}
+
+
+# Русские алиасы → task_type для распознавания NL-запросов на модельные оверрайды.
+# Используется LLM-агентом и keyword-роутером.
+MODEL_OVERRIDE_ALIASES: dict[str, str] = {
+    "maestro": "maestro",
+    "маэстро": "maestro",
+    "draft": "draft",
+    "черновик": "draft",
+    "черновики": "draft",
+    "черновиков": "draft",
+    "memory": "memory",
+    "память": "memory",
+    "памяти": "memory",
+    "search": "search",
+    "поиск": "search",
+    "classify": "classify",
+    "классификация": "classify",
+    "суммаризация": "summarize",
+    "summarize": "summarize",
+    "саммари": "summarize",
+    "humanize": "humanize",
+    "гуманизация": "humanize",
+    "skills": "skills",
+    "навыки": "skills",
+    "background": "background",
+    "фоновые": "background",
+    "фоновый": "background",
 }
 
 
@@ -71,7 +111,21 @@ async def _exec_set_setting(intent, message) -> None:
         return
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        setattr(owner.settings, key, validated)
+        if key.startswith("model_override_"):
+            task_type = key.replace("model_override_", "")
+            try:
+                overrides = json.loads(owner.settings.model_overrides or "{}")
+            except (json.JSONDecodeError, TypeError):
+                overrides = {}
+            if validated:
+                overrides[task_type] = validated
+            else:
+                overrides.pop(task_type, None)
+            owner.settings.model_overrides = (
+                json.dumps(overrides) if overrides else None
+            )
+        else:
+            setattr(owner.settings, key, validated)
         await session.commit()
         await invalidate_settings_cache(message.from_user.id)
         new_tz = owner.settings.timezone
@@ -79,6 +133,42 @@ async def _exec_set_setting(intent, message) -> None:
         await message.answer(f"✅ Часовой пояс: <b>{tz_short(new_tz)}</b>")
     elif isinstance(validated, bool):
         await message.answer(f"✅ <b>{key}</b>: {'ВКЛ' if validated else 'ВЫКЛ'}")
+    elif key.startswith("model_override_"):
+        task_type = key.replace("model_override_", "")
+        if validated:
+            await message.answer(
+                sanitize_html(
+                    f"✅ Модель для <b>{task_type}</b>: <code>{validated}</code>"
+                )
+            )
+            # Soft validation: warn if model not in provider catalog
+            try:
+                from src.llm.provider_catalog import get_provider
+
+                async with get_session() as _session:
+                    _owner = await get_or_create_user(_session, message.from_user.id)
+                    _provider = _owner.settings.llm_provider
+                _info = get_provider(_provider)
+                if _info and _info.models and validated not in _info.models:
+                    logger.warning(
+                        "Model '%s' not in catalog for provider '%s' (user %s, task %s)",
+                        validated,
+                        _provider,
+                        message.from_user.id,
+                        task_type,
+                    )
+                    await message.answer(
+                        f"⚠️ Модель <code>{validated}</code> не найдена в каталоге "
+                        f"провайдера <b>{_provider}</b>. Проверь имя на опечатки."
+                    )
+            except Exception:
+                logger.debug("catalog soft-validation skipped", exc_info=True)
+        else:
+            await message.answer(
+                sanitize_html(
+                    f"✅ Модель для <b>{task_type}</b>: сброшена (по умолчанию)"
+                )
+            )
     else:
         shown = str(validated)
         if len(shown) > 100:

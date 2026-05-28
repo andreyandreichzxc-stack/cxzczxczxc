@@ -35,6 +35,7 @@ from src.db.models._memory import (
 )
 from src.db.models._cache import SmartCacheEntry
 from src.db.models._embedding_cache import EmbeddingCacheEntry
+from src.db.models._avito import AvitoListing, AvitoPriceHistory, AvitoWatch
 from src.db.models._learning import (
     AgentCache,
     SelfProfile,
@@ -46,6 +47,10 @@ from src.db.models._learning import (
     InstructionProfile,
     InstructionCandidate,
     InstructionEvent,
+)
+from src.db.models._session import (
+    AgentSession,
+    AgentSessionMessage,
 )
 
 __all__ = [
@@ -87,4 +92,9 @@ __all__ = [
     "InstructionProfile",
     "InstructionCandidate",
     "InstructionEvent",
+    "AvitoListing",
+    "AvitoPriceHistory",
+    "AvitoWatch",
+    "AgentSession",
+    "AgentSessionMessage",
 ]

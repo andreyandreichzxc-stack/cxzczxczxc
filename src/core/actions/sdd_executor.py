@@ -60,7 +60,6 @@ _ALLOWED_NODES: set[type[ast.AST]] = {
     # Control flow
     ast.If,
     ast.For,
-    ast.While,
     ast.Break,
     ast.Continue,
     ast.Return,
@@ -286,13 +285,27 @@ async def execute_code(code: str, **kwargs: Any) -> dict[str, Any]:
         "Выполняет безопасный Python-код для пакетных операций. "
         "Используй для: отметить несколько напоминаний done, "
         "проставить теги фактам, массово обновить данные. "
-        "НЕ используй для единичных операций."
+        "НЕ используй для единичных операций. "
+        "(нет доступа к БД/сессии — для массовых вычислений, не для запросов данных)"
     ),
     category="system",
     risk="critical",
     requires_confirmation=True,
     params={
         "code": "str — валидный Python-код (безопасный, без импортов, без eval/exec)"
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "ok": {"type": "boolean"},
+            "result": {"description": "Value of _result variable from executed code"},
+            "output": {"type": "string", "description": "Captured print() output"},
+            "error": {
+                "type": "string",
+                "description": "Execution error or sandbox rejection",
+            },
+        },
+        "required": ["ok"],
     },
 )
 async def _execute_code_tool(code: str, **kwargs: Any) -> dict[str, Any]:

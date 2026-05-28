@@ -18,6 +18,7 @@ from src.bot.filters import OwnerOnly
 from src.core.contacts.health_score import get_contact_health
 from src.core.contacts.reply_radar import collect_reply_radar
 from src.core.actions.conflict_predictor import detect_silence_triggers
+from src.core.infra.formatting import bold, code, italic
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.timeutil import fmt_local
 from src.db.repo import get_or_create_user, list_open_commitments, list_contacts
@@ -45,7 +46,10 @@ async def cmd_inbox(message: Message) -> None:
             lines.append(f"🟡 <b>Ждут ответа ({len(waiting)}):</b>")
             for item in waiting[:5]:
                 hours_str = _fmt_hours_ago(item.waiting_hours)
-                lines.append(f"  • {sanitize_html(item.contact_name)} — {hours_str}")
+                lines.append(
+                    f"  • {bold(sanitize_html(item.contact_name))} "
+                    f"— {italic(hours_str)}"
+                )
             if len(waiting) > 5:
                 lines.append(f"  … и ещё {len(waiting) - 5}")
             lines.append("")
@@ -64,18 +68,21 @@ async def cmd_inbox(message: Message) -> None:
                 who = c.peer_name or "Я"
                 if c in overdue:
                     lines.append(
-                        f"  ⚠️ {sanitize_html(who)}: {sanitize_html(c.text[:60])} "
-                        f"(<b>просрочено</b>)"
+                        f"  ⚠️ {bold(sanitize_html(who))}: "
+                        f"{italic(sanitize_html(c.text[:60]))} "
+                        f"({bold('просрочено')})"
                     )
                 elif c.deadline_at:
                     dl = fmt_local(c.deadline_at, tz_name, fmt="%d %b %H:%M")
                     lines.append(
-                        f"  • {sanitize_html(who)}: {sanitize_html(c.text[:60])} "
-                        f"(до {dl})"
+                        f"  • {bold(sanitize_html(who))}: "
+                        f"{italic(sanitize_html(c.text[:60]))} "
+                        f"({code(dl)})"
                     )
                 else:
                     lines.append(
-                        f"  • {sanitize_html(who)}: {sanitize_html(c.text[:60])}"
+                        f"  • {bold(sanitize_html(who))}: "
+                        f"{italic(sanitize_html(c.text[:60]))}"
                     )
             if len(commits) > 5:
                 lines.append(f"  … и ещё {len(commits) - 5}")

@@ -21,6 +21,7 @@ from src.db.repo import (
     get_or_create_user,
 )
 from src.db.session import get_session
+from src.llm.base import TaskType
 from src.llm.router import build_provider
 from src.userbot.manager import UserbotManager
 
@@ -115,7 +116,7 @@ async def _do_index(
     async with get_session() as session:
         owner = await get_or_create_user(session, tg_id)
         contact = await get_contact(session, owner, peer_id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.SEARCH)
 
     if not contact or not provider:
         await message_or_msg.answer("Контакт или LLM-ключ не найдены.")
@@ -150,7 +151,7 @@ async def cmd_search(
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.SEARCH)
 
     # Шаг 1: FTS-поиск по всем чатам (кросс-чатовый)
     async with get_session() as session:

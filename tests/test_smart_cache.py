@@ -9,7 +9,7 @@ import pytest
 # Ensure project root is in path and DB is in-memory BEFORE any src imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
-os.environ["ENCRYPTION_KEY"] = "HmsOzSAxuyfb7zet2nmwhFkgWfH5z6Lsr3tW7MO8GDI="
+os.environ["ENCRYPTION_KEY"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 os.environ["BOT_TOKEN"] = "test:token"
 os.environ["OWNER_TELEGRAM_ID"] = "123456789"
 

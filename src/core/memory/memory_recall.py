@@ -16,21 +16,55 @@ import time
 from src.config import settings
 from src.db.repo import get_or_create_user
 from src.db.session import get_session
-from src.llm.router import _ensure_utc, build_provider
+from src.llm.base import TaskType
+from src.core.infra.timeutil import ensure_utc as _ensure_utc
+from src.llm.router import build_provider
 from src.core.memory.hybrid_search import reciprocal_rank_fusion
+from src.core.memory.temporal_layers import compute_retention
 
 logger = logging.getLogger(__name__)
 
 _recall_cache: dict[str, tuple[float, RecallResult]] = {}
 _recall_lock: asyncio.Lock = asyncio.Lock()
-_RECALL_CACHE_MAX = settings.max_recall_cache_size
-_RECALL_CACHE_RESULT_TTL = 30.0  # TTL for results WITH facts
-_RECALL_CACHE_EMPTY_TTL = 60.0  # TTL for empty results
-_bg_bump_tasks: list[asyncio.Task] = []  # track background bump tasks
+_RECALL_CACHE_MAX = settings.recall_cache_max_size
+_RECALL_CACHE_RESULT_TTL = (
+    settings.recall_cache_result_ttl
+)  # TTL for results WITH facts
+_RECALL_CACHE_EMPTY_TTL = settings.recall_cache_empty_ttl  # TTL for empty results
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _make_recall_cache_key(
+    *,
+    telegram_id: int,
+    query: str | None,
+    contact_id: int | None,
+    mode: str,
+    limit: int,
+    include_self: bool,
+    include_pinned: bool,
+    include_tasks: bool,
+    include_deep: bool,
+    semantic_threshold: float,
+) -> str:
+    """Build a cache key from every option that can change recall output."""
+    return "|".join(
+        (
+            str(telegram_id),
+            query or "",
+            str(contact_id),
+            mode,
+            str(limit),
+            str(bool(include_self)),
+            str(bool(include_pinned)),
+            str(bool(include_tasks)),
+            str(bool(include_deep)),
+            f"{semantic_threshold:.4f}",
+        )
+    )
 
 
 def _jaccard_similarity(text_a: str, text_b: str) -> float:
@@ -47,7 +81,7 @@ def _jaccard_similarity(text_a: str, text_b: str) -> float:
 def _mmr_rerank(
     facts: list[dict],
     query_embedding: list[float] | None = None,
-    lambda_param: float = 0.7,
+    lambda_param: float = settings.recall_mmr_lambda,
     top_k: int | None = None,
 ) -> list[dict]:
     """
@@ -59,13 +93,9 @@ def _mmr_rerank(
     Each dict in *facts* must have:
         - "score" (float): original relevance score
         - "fact"  (str):  fact text
+        - "embedding" (list[float], optional): fact embedding vector
 
-    Algorithm
-    ---------
-    1. Start with the highest-scoring fact.
-    2. For each remaining candidate compute:
-       MMR = λ · relevance − (1 − λ) · max_similarity_to_already_selected
-    3. Greedily pick the best candidate.
+    Uses cosine similarity when embeddings are available, Jaccard as fallback.
     """
     if not facts:
         return facts
@@ -77,18 +107,24 @@ def _mmr_rerank(
     selected = [sorted_facts[0]]
     candidates = sorted_facts[1:]
 
+    # Check if we have embeddings for cosine similarity
+    has_embeddings = any(f.get("embedding") for f in sorted_facts)
+
     while candidates and len(selected) < top_k:
         best_idx = -1
         best_score = -float("inf")
 
         for i, cand in enumerate(candidates):
-            # Relevance: use pre-computed score (e.g. RRF fused score)
             relevance = cand.get("score", 0)
 
-            # Diversity: max Jaccard similarity to any already-selected fact
             max_sim = 0.0
             for sel in selected:
-                sim = _jaccard_similarity(cand["fact"], sel["fact"])
+                if has_embeddings and cand.get("embedding") and sel.get("embedding"):
+                    sim = _cosine_similarity_vectors(
+                        cand["embedding"], sel["embedding"]
+                    )
+                else:
+                    sim = _jaccard_similarity(cand["fact"], sel["fact"])
                 if sim > max_sim:
                     max_sim = sim
 
@@ -106,6 +142,9 @@ def _mmr_rerank(
     return selected
 
 
+from src.core.memory.similarity import cosine_similarity as _cosine_similarity_vectors
+
+
 @dataclass
 class RecalledFact:
     """Факт, извлечённый recall-сервисом, с причиной попадания."""
@@ -116,6 +155,7 @@ class RecalledFact:
     memory_id: int | None = None
     contact_id: int | None = None
     layer: str = "recent"
+    retention: float = 0.5  # Ebbinghaus retention score 0.0-1.0
 
 
 @dataclass
@@ -124,25 +164,29 @@ class RecallResult:
     meta: dict = field(default_factory=dict)
 
 
-async def _bump_use_count_async(
-    telegram_id: int,
-    result: RecallResult,
-) -> None:
-    """Fire-and-forget: increment use_count for cached results."""
-    try:
-        async with get_session() as session:
-            from src.db.models import Memory
+async def _bump_use_counts(fact_ids: list[int]) -> None:
+    """Инкрементирует use_count и last_used_at для фактов в отдельной сессии.
 
-            now_cache = datetime.now(timezone.utc)
-            for f in result.facts:
-                if f.memory_id:
-                    m = await session.get(Memory, f.memory_id)
-                    if m:
-                        m.use_count = (m.use_count or 0) + 1
-                        m.last_used_at = now_cache
-            await session.flush()
+    Используется и для cache-hit, и для fresh-result путей.
+    Bulk UPDATE — одна SQL-операция вместо N.
+    """
+    try:
+        from src.db.models._memory import Memory
+        from sqlalchemy import update as sa_update
+
+        now = datetime.now(timezone.utc)
+        async with get_session() as session:
+            await session.execute(
+                sa_update(Memory)
+                .where(Memory.id.in_(fact_ids))
+                .values(
+                    use_count=Memory.use_count + 1,
+                    last_used_at=now,
+                )
+            )
+            await session.commit()
     except Exception:
-        logger.debug("Async use_count bump failed", exc_info=True)
+        logger.debug("_bump_use_counts failed (non-critical)", exc_info=True)
 
 
 async def recall(
@@ -151,12 +195,12 @@ async def recall(
     session=None,  # NEW: опциональная сессия извне
     contact_id: int | None = None,
     query: str | None = None,
-    limit: int = 8,
+    limit: int = settings.recall_default_limit,
     include_self: bool = True,
     include_pinned: bool = True,
     include_tasks: bool = True,
     include_deep: bool = True,
-    semantic_threshold: float = 0.55,
+    semantic_threshold: float = settings.recall_semantic_threshold,
     mode: str = "deep",
 ) -> RecallResult:
     """
@@ -174,8 +218,22 @@ async def recall(
 
     Возвращает список RecalledFact с причинами.
     """
-    global _bg_bump_tasks
-    _cache_key = f"{telegram_id}:{query}:{contact_id}:{mode}"
+    mode = (mode or "deep").lower()
+    if mode not in {"light", "normal", "deep"}:
+        mode = "deep"
+    include_deep = include_deep and mode == "deep"
+    _cache_key = _make_recall_cache_key(
+        telegram_id=telegram_id,
+        query=query,
+        contact_id=contact_id,
+        mode=mode,
+        limit=limit,
+        include_self=include_self,
+        include_pinned=include_pinned,
+        include_tasks=include_tasks,
+        include_deep=include_deep,
+        semantic_threshold=semantic_threshold,
+    )
     _cache_now = time.monotonic()
     async with _recall_lock:
         if _cache_key in _recall_cache:
@@ -185,21 +243,14 @@ async def recall(
             if _cache_now - ts < ttl:
                 # Async increment use_count — don't block the return
                 if cached.facts:
-                    _bg_bump_tasks.append(
-                        asyncio.create_task(_bump_use_count_async(telegram_id, cached))
-                    )
-                    # Clean done tasks periodically
-                    if len(_bg_bump_tasks) > 20:
-                        _bg_bump_tasks = [t for t in _bg_bump_tasks if not t.done()]
+                    cached_ids = [f.memory_id for f in cached.facts if f.memory_id]
+                    if cached_ids:
+                        asyncio.create_task(_bump_use_counts(cached_ids))
                 return cached
             else:
                 del _recall_cache[_cache_key]
 
     result = RecallResult()
-    mode = (mode or "deep").lower()
-    if mode not in {"light", "normal", "deep"}:
-        mode = "deep"
-    include_deep = include_deep and mode == "deep"
     include_semantic = bool(query) and mode in {"normal", "deep"}
     _include_frequent = mode in {"normal", "deep"}
     include_self_facts = include_self and mode in {"normal", "deep"}
@@ -241,6 +292,7 @@ async def recall(
             q_all = q_all.limit(max(limit * 40, 500))
         all_facts_result = await session.execute(q_all)
         all_facts: list[Memory] = list(all_facts_result.scalars().all())
+        facts_by_id: dict[int, Memory] = {m.id: m for m in all_facts}
 
         # --- 1. Pinned ---
         if include_pinned:
@@ -262,6 +314,7 @@ async def recall(
                         memory_id=m.id,
                         contact_id=m.contact_id,
                         layer=m.temporal_layer or "recent",
+                        retention=compute_retention(m, now),
                     )
                 )
                 seen_ids.add(m.id)
@@ -295,19 +348,63 @@ async def recall(
                                 memory_id=m.id,
                                 contact_id=m.contact_id,
                                 layer=m.temporal_layer or "recent",
+                                retention=compute_retention(m, now),
                             )
                         )
                         seen_ids.add(m.id)
 
+        # --- 3a. Deep prefetch + BFS graph expansion (for RRF graph stream, deep mode) ---
+        graph_results: list[tuple[int, float]] | None = None
+        _deep_prefetched: list | None = None
+        _deep_graph: list | None = None
+
+        if include_deep:
+            try:
+                from src.core.memory.deep_memory import (
+                    deep_memory as dm,
+                    _extract_keywords,
+                )
+
+                keywords = _extract_keywords(query) if query else None
+                pre_facts = await dm.prefetch_facts(
+                    session=session,
+                    owner_id=owner.id,
+                    context_keywords=keywords,
+                    contact_id=contact_id,
+                    telegram_id=telegram_id,
+                )
+                _deep_prefetched = pre_facts
+                seed_ids = [
+                    f.memory_id for f in pre_facts if f.memory_id and f.memory_id > 0
+                ]
+                if query and seed_ids:
+                    bfs_nodes = await dm.bfs_expand(
+                        session=session,
+                        seed_memory_ids=seed_ids,
+                        owner_id=owner.id,
+                    )
+                    _deep_graph = bfs_nodes
+                    bfs_list: list[tuple[int, float]] = []
+                    for node in bfs_nodes:
+                        if node.memory_id not in seed_ids:
+                            bfs_list.append((node.memory_id, 0.5))
+                    if bfs_list:
+                        graph_results = bfs_list
+            except (ImportError, ValueError, ConnectionError, OSError):
+                logger.debug("Deep prefetch / BFS failed, skipping", exc_info=True)
+
         # --- 3. Hybrid search: Qdrant semantic + FTS5 keyword (RRF) ---
         if include_semantic:
+            query_text = query or ""
             try:
                 from src.core.actions.vector_store import get_vector_store
                 from src.db.repo import search_memories_fts_with_scores
 
-                provider = await build_provider(session, owner)
+                provider = await build_provider(
+                    session, owner, task_type=TaskType.SEARCH
+                )
                 if provider:
-                    embedding = await provider.embed(query[:300])
+                    embedding = await provider.embed(query_text[:300])
 
                     # Лимит поиска зависит от режима: light → 0 (не вызывается),
                     # normal → 5, deep → 10
@@ -328,7 +425,7 @@ async def recall(
                     keyword_task = search_memories_fts_with_scores(
                         session,
                         owner,
-                        query,
+                        query_text,
                         contact_id=contact_id,
                         limit=qdrant_limit,
                     )
@@ -346,16 +443,51 @@ async def recall(
                     ]
                     keyword_hits: list[tuple[int, float]] = keyword_hits_raw
 
-                    # Reciprocal Rank Fusion
+                    # Reciprocal Rank Fusion (vector + keyword + optional graph)
                     fused = reciprocal_rank_fusion(
                         vector_results=vector_hits,
                         keyword_results=keyword_hits,
+                        graph_results=graph_results,
                     )
+
+                    # Build embedding lookup from Qdrant results (+ BFS graph facts)
+                    embedding_map: dict[int, list[float]] = {}
+                    for hit in vector_hits_raw:
+                        mid = hit.get("memory_id")
+                        emb = hit.get("embedding")
+                        if mid and emb:
+                            embedding_map[mid] = emb
+                    if graph_results:
+                        for bfs_id, _ in graph_results:
+                            if bfs_id not in embedding_map:
+                                for hit in vector_hits_raw:
+                                    if hit.get("memory_id") == bfs_id and hit.get(
+                                        "embedding"
+                                    ):
+                                        embedding_map[bfs_id] = hit["embedding"]
+                                        break
+
+                    # Apply Ebbinghaus retention weighting
+                    if fused:
+                        fused_with_retention = []
+                        for mid, rrf_score in fused:
+                            # Find the memory object to compute retention
+                            mem_obj = facts_by_id.get(mid)
+                            if mem_obj:
+                                ret = compute_retention(mem_obj, now)
+                                # Blend: 70% RRF score + 30% retention
+                                weighted_score = rrf_score * (0.7 + 0.3 * ret)
+                            else:
+                                weighted_score = rrf_score
+                            fused_with_retention.append((mid, weighted_score))
+                        fused = sorted(
+                            fused_with_retention, key=lambda x: x[1], reverse=True
+                        )
 
                     hybrid_ranked: list[RecalledFact] = []
                     for mem_id, fused_score in fused:
                         if mem_id not in seen_ids:
-                            m = next((f for f in all_facts if f.id == mem_id), None)
+                            m = facts_by_id.get(mem_id)
                             if m:
                                 hybrid_ranked.append(
                                     RecalledFact(
@@ -365,6 +497,7 @@ async def recall(
                                         memory_id=m.id,
                                         contact_id=m.contact_id,
                                         layer=m.temporal_layer or "recent",
+                                        retention=compute_retention(m, now),
                                     )
                                 )
                                 seen_ids.add(m.id)
@@ -372,7 +505,13 @@ async def recall(
                     # MMR rerank: balance relevance vs diversity
                     if len(hybrid_ranked) > 2:
                         mmr_input = [
-                            {"score": rf.confidence, "fact": rf.fact}
+                            {
+                                "score": rf.confidence,
+                                "fact": rf.fact,
+                                "embedding": embedding_map.get(rf.memory_id)
+                                if rf.memory_id is not None
+                                else None,
+                            }
                             for rf in hybrid_ranked
                         ]
                         mmr_output = _mmr_rerank(
@@ -386,6 +525,11 @@ async def recall(
                         )
 
                     ranked.extend(hybrid_ranked)
+
+                    # Mark BFS graph fact IDs as seen to prevent duplication in stage 8
+                    if graph_results:
+                        for bfs_id, _ in graph_results:
+                            seen_ids.add(bfs_id)
             except (ImportError, ValueError, ConnectionError, OSError):
                 logger.debug("Hybrid recall failed, skipping", exc_info=True)
 
@@ -413,6 +557,7 @@ async def recall(
                     memory_id=m.id,
                     contact_id=m.contact_id,
                     layer=m.temporal_layer or "recent",
+                    retention=compute_retention(m, now),
                 )
             )
             seen_ids.add(m.id)
@@ -435,6 +580,7 @@ async def recall(
                     memory_id=m.id,
                     contact_id=m.contact_id,
                     layer=m.temporal_layer or "recent",
+                    retention=compute_retention(m, now),
                 )
             )
             seen_ids.add(m.id)
@@ -454,6 +600,7 @@ async def recall(
                         memory_id=m.id,
                         contact_id=m.contact_id,
                         layer=m.temporal_layer or "recent",
+                        retention=compute_retention(m, now),
                     )
                 )
                 seen_ids.add(m.id)
@@ -475,43 +622,48 @@ async def recall(
                         memory_id=m.id,
                         contact_id=m.contact_id,
                         layer=m.temporal_layer or "recent",
+                        retention=compute_retention(m, now),
                     )
                 )
                 seen_ids.add(m.id)
 
-        # --- 8. Deep memory: tier 2-3 prefetch + BFS graph expansion ---
-        if include_deep:
-            try:
-                from src.core.memory.deep_memory import (
-                    deep_memory as dm,
-                    _extract_keywords,
-                )
-
-                keywords = _extract_keywords(query) if query else None
-                deep_result = await dm.retrieve(
-                    session=session,
-                    owner_id=owner.id,
-                    context_keywords=keywords,
-                    contact_id=contact_id,
-                    telegram_id=telegram_id,
-                )
-                for f in deep_result.facts:
-                    if f.memory_id not in seen_ids:
-                        ranked.append(
-                            RecalledFact(
-                                fact=f.fact,
-                                reason=f"🧠 deep:{f.reason}",
-                                confidence=f.confidence,
-                                memory_id=f.memory_id,
-                                contact_id=f.contact_id,
-                                layer="deep",
-                            )
+        # --- 8. Deep memory: tier 2/3 non-BFS facts ---
+        # BFS-expanded facts are already included via graph_results stream in RRF (stage 3).
+        # Here we add only non-graph deep facts: tier-2 prefetch, tier-3, distilled,
+        # scene narratives — using the already-prefetched data from stage 3a.
+        if include_deep and _deep_prefetched:
+            for f in _deep_prefetched:
+                if f.memory_id not in seen_ids:
+                    ranked.append(
+                        RecalledFact(
+                            fact=f.fact,
+                            reason=f"🧠 deep:{f.reason}",
+                            confidence=f.confidence,
+                            memory_id=f.memory_id,
+                            contact_id=f.contact_id,
+                            layer="deep",
                         )
-                        seen_ids.add(f.memory_id)
-                # Сохраняем граф для форматирования
-                result.meta["deep_graph"] = deep_result.graph
-            except (ImportError, ValueError, ConnectionError, OSError):
-                logger.debug("Deep memory recall failed, skipping", exc_info=True)
+                    )
+                    seen_ids.add(f.memory_id)
+            # Сохраняем граф для форматирования (уже получен на шаге 3a)
+            if _deep_graph:
+                result.meta["deep_graph"] = _deep_graph
+                # Compute graph statistics for prompt injection
+                rel_counts: dict[str, int] = {}
+                for node in _deep_graph:
+                    for _, rel_type in node.neighbors:
+                        key = rel_type or "related"
+                        rel_counts[key] = rel_counts.get(key, 0) + 1
+                total = sum(rel_counts.values())
+                supports = rel_counts.get("supports", 0)
+                contradicts = rel_counts.get("contradicts", 0)
+                related = total - supports - contradicts
+                result.meta["graph_stats"] = {
+                    "total": total,
+                    "supports": supports,
+                    "contradicts": contradicts,
+                    "related": related,
+                }
 
         # Limit
         result.facts = ranked[:limit]
@@ -523,7 +675,7 @@ async def recall(
         }
 
         # Cache ALL results (before use_count increment so cache is clean).
-        # On cache hit, _bump_use_count_async fires a background increment.
+        # On cache hit, _bump_use_counts fires a background increment.
         async with _recall_lock:
             if len(_recall_cache) >= _RECALL_CACHE_MAX:
                 # Evict 10% of oldest entries (not just 1)
@@ -534,19 +686,25 @@ async def recall(
                         del _recall_cache[sorted_items[i][0]]
             _recall_cache[_cache_key] = (_cache_now, result)
 
-        # Инкрементируем use_count для возвращённых фактов
-        for f in result.facts:
-            if f.memory_id:
-                m = next((x for x in all_facts if x.id == f.memory_id), None)
-                if m:
-                    m.use_count = (m.use_count or 0) + 1
-                    m.last_used_at = now
-        await session.flush()
+        # Инкрементируем use_count для возвращённых фактов — в отдельной сессии,
+        # чтобы не мутировать внешнюю сессию вызывающего кода.
+        recalled_ids = [f.memory_id for f in result.facts if f.memory_id]
+        if recalled_ids:
+            asyncio.create_task(_bump_use_counts(recalled_ids))
     finally:
         if _close_session and _session_cm is not None:
             await _session_cm.__aexit__(*sys.exc_info())
 
     return result
+
+
+def _retention_marker(retention: float) -> str:
+    """Return a visual indicator of memory retention strength."""
+    if retention >= 0.8:
+        return "🟢"
+    elif retention >= 0.5:
+        return "🟡"
+    return "🔴"
 
 
 def format_recall_for_prompt(recall_result: RecallResult, max_facts: int = 8) -> str:
@@ -563,14 +721,16 @@ def format_recall_for_prompt(recall_result: RecallResult, max_facts: int = 8) ->
     if surface_facts:
         lines.append("<recall_context>")
         for rf in surface_facts[:max_facts]:
-            lines.append(f"[{rf.reason}] {rf.fact}")
+            marker = _retention_marker(rf.retention)
+            lines.append(f"[{rf.reason}] {marker} {rf.fact}")
         lines.append("</recall_context>")
 
     # Глубокая память (шаг 8)
     if deep_facts:
         lines.append('<recall_context type="deep">')
         for rf in deep_facts[:max_facts]:
-            lines.append(f"[{rf.reason}] {rf.fact}")
+            marker = _retention_marker(rf.retention)
+            lines.append(f"[{rf.reason}] {marker} {rf.fact}")
         lines.append("</recall_context>")
 
     # Граф MemoryLink (если есть)
@@ -595,6 +755,16 @@ def format_recall_for_prompt(recall_result: RecallResult, max_facts: int = 8) ->
                 "memory_recall: graph_context extraction failed", exc_info=True
             )
             pass
+
+    # Graph statistics summary
+    graph_stats = recall_result.meta.get("graph_stats")
+    if graph_stats:
+        lines.append(
+            f"📊 Граф памяти: {graph_stats['total']} связей "
+            f"({graph_stats['supports']} supports, "
+            f"{graph_stats['contradicts']} contradicts, "
+            f"{graph_stats['related']} related)"
+        )
 
     return "\n".join(lines)
 

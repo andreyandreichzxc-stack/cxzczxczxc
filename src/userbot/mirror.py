@@ -23,6 +23,7 @@ from src.db.repo import (
     upsert_message,
 )
 from src.db.session import get_session
+from src.llm.base import TaskType
 from src.llm.router import build_provider
 
 
@@ -108,7 +109,9 @@ async def _process_incoming_bg(
             async with get_session() as _im_session:
                 _im_owner = await get_or_create_user(_im_session, owner_telegram_id)
                 _im_contact = await get_contact(_im_session, _im_owner, peer_id)
-                _im_provider = await build_provider(_im_session, _im_owner)
+                _im_provider = await build_provider(
+                    _im_session, _im_owner, task_type=TaskType.CLASSIFY
+                )
                 decision = await process_incoming(
                     message_text=text,
                     sender_name=sender_name,
@@ -157,22 +160,25 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
             if not peer_id:
                 return
 
-            # Don't process messages until onboarding is complete
+            should_process_inbox = True
+
+            # Don't run heavy processing until onboarding is complete, but still mirror messages.
             try:
                 from src.bot.filters import get_onboarding_phase
 
                 phase = await get_onboarding_phase(owner_telegram_id)
                 if phase < 4:
-                    return  # silently skip — bot not ready yet
+                    should_process_inbox = False
             except Exception:
-                pass  # can't check onboarding — continue cautiously
+                logger.exception("onboarding phase check failed; mirroring only")
+                should_process_inbox = False
 
             # Проверка watched_peers — фильтрация чатов
             async with get_session() as _w_session:
                 _w_owner = await get_or_create_user(_w_session, owner_telegram_id)
                 _watched = await get_watched_peers(_w_session, _w_owner)
                 if _watched and peer_id not in _watched:
-                    return
+                    should_process_inbox = False
 
             kind = _classify(msg)
             text = msg.text or msg.message or None
@@ -267,7 +273,7 @@ def attach_mirror(client: TelegramClient, owner_telegram_id: int) -> None:
                     _is_bot_sender = bool(getattr(_sender_entity, "bot", False))
                 except Exception:
                     _is_bot_sender = True  # can't resolve → skip (fail-safe)
-            if not msg.out and msg.text and not _is_bot_sender:
+            if should_process_inbox and not msg.out and msg.text and not _is_bot_sender:
                 track_ff(
                     asyncio.create_task(
                         _process_incoming_bg(

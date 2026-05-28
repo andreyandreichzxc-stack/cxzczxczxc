@@ -20,7 +20,7 @@ from telethon import TelegramClient
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import User as TgUser
 
-from src.core.actions.tool_registry import tool
+from src.core.actions.tool_registry import ToolActionSpec, tool
 from src.core.contacts.contact_resolver import resolve
 from src.db.repo import get_contact, get_contact_profile, get_or_create_user
 from src.db.session import get_session
@@ -44,11 +44,44 @@ logger = logging.getLogger(__name__)
     category="messaging",
     risk="critical",
     requires_confirmation=True,
+    actions={
+        "get_info": ToolActionSpec(name="get_info", risk="low", read_only=True, idempotent=True),
+        "send": ToolActionSpec(
+            name="send",
+            risk="critical",
+            read_only=False,
+            destructive=False,
+            idempotent=False,
+            requires_confirmation=True,
+        ),
+    },
     params={
         "action": "str — 'get_info' or 'send'",
         "peer": "str — contact name, display name, or @username",
         "text": "str — message text to send (required for action='send')",
         "limit": "int — max fuzzy-search candidates (default 5)",
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "ok": {"type": "boolean"},
+            "action": {"type": "string", "description": "get_info or send"},
+            "contact": {
+                "type": "object",
+                "properties": {
+                    "display_name": {"type": "string"},
+                    "username": {"type": "string"},
+                    "bio": {"type": "string"},
+                },
+                "description": "Contact info (action=get_info)",
+            },
+            "sent": {
+                "type": "boolean",
+                "description": "Whether message was sent (action=send)",
+            },
+            "error": {"type": "string"},
+        },
+        "required": ["ok"],
     },
 )
 async def mcp_telegram(
@@ -99,6 +132,8 @@ async def mcp_telegram(
         if action == "get_info":
             return await _get_info(client, telegram_id, peer.strip(), limit=limit)
         elif action == "send":
+            if not bool(kwargs.get("_confirmed", False)):
+                return {"error": "requires confirmation"}
             return await _send_message(client, telegram_id, peer.strip(), text)
         else:
             return {

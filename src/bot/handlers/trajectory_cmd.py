@@ -19,7 +19,9 @@ async def cmd_trajectory(message: Message, command: CommandObject) -> None:
     only_errors = args.startswith("errors")
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        rows = await list_trajectories(session, owner, only_errors=only_errors, limit=10)
+        rows = await list_trajectories(
+            session, owner, only_errors=only_errors, limit=10
+        )
 
     if not rows:
         await message.answer("Trajectory пока пустой.")
@@ -31,7 +33,9 @@ async def cmd_trajectory(message: Message, command: CommandObject) -> None:
         status = "ok" if row.success else "err"
         req = (row.request_text or "").replace("\n", " ")[:80]
         tail = f" · {row.error[:80]}" if row.error else ""
-        lines.append(f"• #{row.id} · {status} · {row.route_mode or '-'} · {row.latency_ms or 0}ms{tail}\n  <i>{req}</i>")
+        lines.append(
+            f"• #{row.id} · {status} · {row.route_mode or '-'} · {row.latency_ms or 0}ms{tail}\n  <i>{req}</i>"
+        )
     await message.answer("\n".join(lines))
 
 
@@ -45,7 +49,9 @@ async def cmd_evolve(message: Message) -> None:
         )
 
     if not pending and not created:
-        await message.answer("Новых skill-кандидатов нет. Нужно больше успешных trajectory.")
+        await message.answer(
+            "Новых skill-кандидатов нет. Нужно больше успешных trajectory."
+        )
         return
 
     lines = [f"<b>Self-evolution</b>: новых кандидатов {created}"]
@@ -53,4 +59,3 @@ async def cmd_evolve(message: Message) -> None:
         lines.append(f"• <b>{skill.name}</b> — {skill.description or ''}")
     lines.append("\nОдобрить: <code>/skills enable name</code>")
     await message.answer("\n".join(lines))
-

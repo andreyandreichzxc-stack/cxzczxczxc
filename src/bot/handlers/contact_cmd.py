@@ -13,6 +13,7 @@ from src.core.contacts.contact_resolver import resolve
 from src.core.contacts.health_score import get_contact_health
 from src.core.memory.context_files import get_contact_context
 from src.core.memory.memory_recall import recall
+from src.core.infra.formatting import bold, format_memory_fact, italic
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import (
     fetch_chat_messages,
@@ -222,18 +223,22 @@ async def cmd_contact(
         lines.append("🧠 Что я знаю:")
         for f in memory_result.facts[:5]:
             conf_str = f"{f.confidence:.2f}" if f.confidence else "?"
-            lines.append(f"  • {sanitize_html(f.fact)} (conf {conf_str})")
+            lines.append(
+                f"  • {format_memory_fact(f.fact)} {italic(f'(conf {conf_str})')}"
+            )
 
     # ── Commitments ──────────────────────────────────────────────────
     if commitments:
         lines.append("")
-        lines.append("📋 Обещания:")
+        lines.append(bold("📋 Обещания:"))
         for i, c in enumerate(commitments[:5], 1):
             who = "Я" if c["direction"] == "mine" else "Они"
             deadline = ""
             if c["deadline_at"]:
                 deadline = f" (до {c['deadline_at'].strftime('%d.%m')})"
-            lines.append(f"  {i}. <b>{who}</b>: {sanitize_html(c['text'])}{deadline}")
+            lines.append(
+                f"  {i}. {bold(who)}: {italic(sanitize_html(c['text']))}{deadline}"
+            )
 
     # ── Context file ─────────────────────────────────────────────────
     if context_text:

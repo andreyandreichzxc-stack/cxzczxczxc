@@ -63,7 +63,7 @@ async def collect_nudges(owner_telegram_id: int, limit: int = 5) -> list[dict]:
                 .where(
                     Message.user_id == owner.id,
                     Message.peer_id == conv.peer_id,
-                    Message.is_outgoing == False,
+                    Message.is_outgoing.is_(False),
                 )
                 .order_by(desc(Message.date))
                 .limit(1)

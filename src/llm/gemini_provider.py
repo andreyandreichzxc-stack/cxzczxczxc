@@ -25,8 +25,11 @@ def _to_gemini_contents(messages: list[ChatMessage]) -> tuple[str | None, list[d
 class GeminiProvider:
     name = "gemini"
 
-    def __init__(self, api_key: str) -> None:
+    def __init__(
+        self, api_key: str, *, base_url: str | None = None, model: str | None = None
+    ) -> None:
         self._client = genai.Client(api_key=api_key, http_options={"timeout": 60000})
+        self._model = model
 
     async def validate_key(self) -> bool:
         def _check() -> bool:
@@ -45,10 +48,13 @@ class GeminiProvider:
 
         return await asyncio.to_thread(_check)
 
-    async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
-        model = (
+    def _resolve_model(self, heavy: bool) -> str:
+        return self._model or (
             LLMDefaults.GEMINI_CHAT_HEAVY if heavy else LLMDefaults.GEMINI_CHAT_LIGHT
         )
+
+    async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
+        model = self._resolve_model(heavy)
         system, contents = _to_gemini_contents(messages)
 
         def _call() -> str:
@@ -60,7 +66,7 @@ class GeminiProvider:
             )
             return resp.text or ""
 
-        return await asyncio.to_thread(_call)
+        return await asyncio.wait_for(asyncio.to_thread(_call), timeout=90.0)
 
     async def embed(self, text: str) -> list[float]:
         from src.core.actions.embedding_cache import get as cache_get, set as cache_set
@@ -76,12 +82,19 @@ class GeminiProvider:
             )
             return list(resp.embeddings[0].values)
 
-        result = await asyncio.to_thread(_call)
+        result = await asyncio.wait_for(asyncio.to_thread(_call), timeout=90.0)
         cache_set(text, result, LLMDefaults.GEMINI_EMBED)
         return result
 
+    async def list_models(self) -> list[str]:
+        def _list() -> list[str]:
+            return [m.name for m in self._client.models.list()]
+
+        return await asyncio.to_thread(_list)
+
     async def close(self) -> None:
-        await asyncio.to_thread(self._client.close)
+        if hasattr(self._client, "close"):
+            await asyncio.to_thread(self._client.close)
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         from src.core.actions.embedding_cache import get as cache_get, set as cache_set
@@ -115,7 +128,9 @@ class GeminiProvider:
                     )
                     return [list(e.values) for e in resp.embeddings]
 
-                api_results.extend(await asyncio.to_thread(_call))
+                api_results.extend(
+                    await asyncio.wait_for(asyncio.to_thread(_call), timeout=90.0)
+                )
 
             for idx, emb in zip(uncached_indices, api_results):
                 cache_set(texts[idx], emb, LLMDefaults.GEMINI_EMBED)

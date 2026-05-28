@@ -12,16 +12,18 @@ def register_default_gates() -> None:
     gates.register(
         "ffmpeg",
         check=lambda: shutil.which("ffmpeg") is not None,
-        fallback=None,  # voice transcription won't work
+        fallback=None,
         description="ffmpeg (voice messages)",
+        install_hint="apt install ffmpeg  # Linux\nbrew install ffmpeg  # macOS\nwinget install ffmpeg  # Windows",
     )
 
     # Check Qdrant (for semantic search)
     gates.register(
         "qdrant",
         check=lambda: _check_qdrant_available(),
-        fallback="fts5_only",  # FTS5 keyword search still works
-        description="Qdrant (embedded, semantic search)",
+        fallback="fts5_only",
+        description="Qdrant (semantic search)",
+        install_hint="Qdrant embedded — no install needed. Check data/qdrant/ permissions.",
     )
 
     # Check faster-whisper (for local transcription)
@@ -30,6 +32,7 @@ def register_default_gates() -> None:
         check=lambda: _check_import("faster_whisper"),
         fallback="openai_whisper_api",
         description="faster-whisper (local transcription)",
+        install_hint="pip install faster-whisper",
     )
 
     # Check pyyaml (for skill YAML frontmatter)
@@ -38,14 +41,16 @@ def register_default_gates() -> None:
         check=lambda: _check_import("yaml"),
         fallback="json_only",
         description="PyYAML (skill frontmatter)",
+        install_hint="pip install pyyaml",
     )
 
     # Check bs4 (for web fetching)
     gates.register(
         "beautifulsoup",
         check=lambda: _check_import("bs4"),
-        fallback=None,  # web tools won't work
+        fallback=None,
         description="BeautifulSoup4 (web fetching)",
+        install_hint="pip install beautifulsoup4",
     )
 
     # Check psutil (for system status)
@@ -54,6 +59,25 @@ def register_default_gates() -> None:
         check=lambda: _check_import("psutil"),
         fallback=None,
         description="psutil (system monitoring)",
+        install_hint="pip install psutil",
+    )
+
+    # Check httpx (for Avito stealth / HTTP/2)
+    gates.register(
+        "httpx",
+        check=lambda: _check_import("httpx"),
+        fallback="requests_only",
+        description="httpx (HTTP/2, Avito stealth)",
+        install_hint="pip install httpx",
+    )
+
+    # Check playwright (for Avito stealth browser fallback)
+    gates.register(
+        "playwright",
+        check=lambda: _check_import("playwright"),
+        fallback=None,
+        description="Playwright (Avito browser stealth)",
+        install_hint="pip install playwright && playwright install chromium",
     )
 
 

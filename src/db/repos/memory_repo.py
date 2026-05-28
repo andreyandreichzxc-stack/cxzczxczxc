@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
+from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import case, delete, distinct, func, or_, select, text as sql_text
+from sqlalchemy import case, distinct, func, or_, select, text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import (
+    Commitment,
     Contact,
     Memory,
     MemoryCandidate,
@@ -260,6 +263,7 @@ async def add_memory(
     Если embedding передан, индексирует факт в Qdrant для будущих проверок.
     """
     from src.core.actions.stats_cache import invalidate
+    from src.db.repos.session_repo import _get_user_lock
 
     fact = fact.strip()
     if len(fact) < 3:
@@ -275,92 +279,101 @@ async def add_memory(
     temporal_markers = {"сейчас", "раньше", "уже не", "больше не", "перестал"}
     has_temporal_marker = any(m in fact.lower() for m in temporal_markers)
 
-    if deduplicate and not has_temporal_marker:
-        # --- Уровень 1: SHA256 хеш (точные повторы) ---
-        result = await session.execute(
-            select(Memory)
-            .where(
-                Memory.user_id == user.id,
-                Memory.embedding_hash == emb_hash,
+    # Per-user lock to prevent concurrent dedup+insert race
+    lock = _get_user_lock(user.id)
+
+    async with lock:
+        if deduplicate and not has_temporal_marker:
+            # --- Уровень 1: SHA256 хеш (точные повторы) ---
+            result = await session.execute(
+                select(Memory)
+                .where(
+                    Memory.user_id == user.id,
+                    Memory.embedding_hash == emb_hash,
+                )
+                .limit(1)
             )
-            .limit(1)
-        )
-        existing = result.scalar_one_or_none()
-        if existing:
-            existing.times_mentioned = (existing.times_mentioned or 1) + 1
-            existing.confidence = min(1.0, existing.confidence + source_weight)
-            existing.updated_at = datetime.now(timezone.utc)
-            if sentiment and existing.sentiment != sentiment:
-                existing.sentiment = "contradictory"  # маркируем противоречие
-            await session.flush()
-            await invalidate("mem_")
-            return existing
+            existing = result.scalar_one_or_none()
+            if existing:
+                existing.times_mentioned = (existing.times_mentioned or 1) + 1
+                existing.confidence = min(1.0, existing.confidence + source_weight)
+                existing.updated_at = datetime.now(timezone.utc)
+                if sentiment and existing.sentiment != sentiment:
+                    existing.sentiment = "contradictory"  # маркируем противоречие
+                await session.flush()
+                await invalidate("mem_")
+                return existing
 
-        # --- Уровень 2: семантическая дедупликация через Qdrant ---
-        if embedding is not None and vector_store_obj is not None:
-            # Проверяем кэш эмбеддингов (на случай если embed уже закэширован)
+            # --- Уровень 2: семантическая дедупликация через Qdrant ---
+            if embedding is not None and vector_store_obj is not None:
+                # Проверяем кэш эмбеддингов (на случай если embed уже закэширован)
 
-            # Ищем кандидатов с запасом (порог 0.7)
-            similar = await vector_store_obj.search_similar_memories(
-                user_id=user.id,
-                embedding=embedding,
-                threshold=0.7,
-                limit=3,
-            )
-            if similar:
-                best = similar[0]
-                existing = await session.get(Memory, best["memory_id"])
-                if existing and existing.user_id == user.id:
-                    # Динамический порог
-                    now = datetime.now(timezone.utc)
-                    age_days = (
-                        (now - existing.created_at).days if existing.created_at else 999
-                    )
-                    same_source = existing.source == source
-                    if same_source and age_days < 7:
-                        dyn_threshold = 0.92
-                    elif not same_source:
-                        dyn_threshold = 0.78
-                    else:
-                        dyn_threshold = 0.85
-
-                    if best["score"] >= dyn_threshold:
-                        existing.times_mentioned = (existing.times_mentioned or 1) + 1
-                        existing.confidence = min(
-                            1.0, existing.confidence + source_weight
+                # Ищем кандидатов с запасом (порог 0.7)
+                similar = await vector_store_obj.search_similar_memories(
+                    user_id=user.id,
+                    embedding=embedding,
+                    threshold=0.7,
+                    limit=3,
+                )
+                if similar:
+                    best = similar[0]
+                    existing = await session.get(Memory, best["memory_id"])
+                    if existing and existing.user_id == user.id:
+                        # Динамический порог
+                        now = datetime.now(timezone.utc)
+                        age_days = (
+                            (now - existing.created_at).days
+                            if existing.created_at
+                            else 999
                         )
-                        existing.updated_at = now
-                        if sentiment and existing.sentiment != sentiment:
-                            existing.sentiment = "contradictory"
-                        await session.flush()
-                        await invalidate("mem_")
-                        return existing
+                        same_source = existing.source == source
+                        if same_source and age_days < 7:
+                            dyn_threshold = 0.92
+                        elif not same_source:
+                            dyn_threshold = 0.78
+                        else:
+                            dyn_threshold = 0.85
 
-    mem = Memory(
-        user_id=user.id,
-        contact_id=contact_id,
-        fact=fact,
-        sentiment=sentiment,
-        source=source,
-        confidence=confidence,
-        times_mentioned=1,
-        message_id=message_id,
-        is_active=True,
-        cluster_topic=cluster_topic,
-        embedding_hash=emb_hash,
-        importance=importance if importance is not None else 0.5,
-        decay_rate=decay_rate if decay_rate is not None else 0.07,
-        memory_tier=memory_tier,
-        memory_type=memory_type,
-        pinned=pinned,
-        expires_at=expires_at,
-        use_count=use_count,
-    )
-    session.add(mem)
-    await session.flush()
+                        if best["score"] >= dyn_threshold:
+                            existing.times_mentioned = (
+                                existing.times_mentioned or 1
+                            ) + 1
+                            existing.confidence = min(
+                                1.0, existing.confidence + source_weight
+                            )
+                            existing.updated_at = now
+                            if sentiment and existing.sentiment != sentiment:
+                                existing.sentiment = "contradictory"
+                            await session.flush()
+                            await invalidate("mem_")
+                            return existing
 
-    # Auto-link: connect to related facts via keyword overlap
-    await _auto_link_memory(session, user, mem)
+        # Create new memory inside the lock — atomic with the dedup check
+        mem = Memory(
+            user_id=user.id,
+            contact_id=contact_id,
+            fact=fact,
+            sentiment=sentiment,
+            source=source,
+            confidence=confidence,
+            times_mentioned=1,
+            message_id=message_id,
+            is_active=True,
+            cluster_topic=cluster_topic,
+            embedding_hash=emb_hash,
+            importance=importance if importance is not None else 0.5,
+            decay_rate=decay_rate if decay_rate is not None else 0.07,
+            memory_tier=memory_tier,
+            memory_type=memory_type,
+            pinned=pinned,
+            expires_at=expires_at,
+            use_count=use_count,
+        )
+        session.add(mem)
+        await session.flush()
+
+    # Auto-link: connect to related facts via cosine similarity (Qdrant) or keyword overlap fallback
+    await _auto_link_memory(session, user, mem, embedding=embedding)
 
     try:
         from src.core.infra.hooks import hooks
@@ -408,55 +421,210 @@ async def add_memory(
     return mem
 
 
-async def _auto_link_memory(session: AsyncSession, user, memory) -> None:
-    """Auto-link new fact to related facts via keyword overlap (no LLM).
+async def _auto_link_memory(
+    session: AsyncSession, user, memory, embedding: list[float] | None = None
+) -> None:
+    """Auto-link new fact to related facts via multiple strategies.
 
-    Finds candidate facts for the same contact, computes keyword overlap
-    (words >= 4 chars), and creates a MemoryLink when overlap >= 2.
-    Reuses the existing link_memories() for bidirectional link creation.
+    Primary: Qdrant cosine similarity → "supports" / "related".
+    Fallback: keyword overlap → "related".
+    Supplementary passes (always run):
+      - Temporal co-occurrence (same contact, <1h apart) → "co_temporal"
+      - Entity co-occurrence (shared proper nouns) → "co_entity"
+      - Cause-effect hint (positive→negative same contact) → "preceded"
+
+    All supplementary passes add links on top of the existing ones.
     """
     if not memory.fact or not memory.is_active:
         return
 
-    # Keywords = words with 4+ characters
-    words = {w.lower() for w in memory.fact.split() if len(w) >= 4}
-    if len(words) < 2:
-        return
-
-    # Find active facts for same contact (limit 30)
-    candidates_q = (
-        select(Memory)
-        .where(
-            Memory.user_id == user.id,
-            Memory.is_active == True,
-            Memory.id != memory.id,
-            Memory.contact_id == memory.contact_id,
-        )
-        .limit(30)
-    )
-    result = await session.execute(candidates_q)
-    candidates = result.scalars().all()
-
     links_added = 0
-    for c in candidates:
-        if not c.fact:
-            continue
-        c_words = {w.lower() for w in c.fact.split() if len(w) >= 4}
-        overlap = len(words & c_words)
-        if overlap >= 2:
-            # Link weight: base 0.3 + 0.1 per shared keyword
+
+    # ── Pass 1: Semantic linking via Qdrant ──────────────────────────────
+    if embedding:
+        try:
+            from src.core.actions.vector_store import get_vector_store
+
+            similar = await get_vector_store().search_similar_memories(
+                user_id=user.id,
+                embedding=embedding,
+                threshold=0.65,  # lower than dedup (0.85)
+                limit=10,
+                contact_id=None,  # search across all contacts for cross-links
+            )
+
+            for hit in similar:
+                hit_id = hit.get("memory_id")
+                if hit_id is None or hit_id == memory.id:
+                    continue
+
+                cosine_score = hit.get("score", 0.0)
+                if cosine_score < 0.65:
+                    continue
+
+                if cosine_score >= 0.90:
+                    relation_type = "supports"
+                elif cosine_score >= 0.75:
+                    relation_type = "related"  # strong
+                else:
+                    relation_type = "related"  # weak
+
+                await link_memories(
+                    session,
+                    user,
+                    source_id=memory.id,
+                    target_id=hit_id,
+                    relation_type=relation_type,
+                    weight=cosine_score,
+                )
+                links_added += 1
+        except Exception:
+            logger.debug(
+                "Semantic linking failed, falling back to keyword overlap",
+                exc_info=True,
+            )
+
+    # ── Pass 2: Keyword overlap fallback (only if no semantic links) ─────
+    if links_added == 0:
+        words = {w.lower() for w in memory.fact.split() if len(w) >= 4}
+        if len(words) >= 2:
+            candidates_q = (
+                select(Memory)
+                .where(
+                    Memory.user_id == user.id,
+                    Memory.is_active.is_(True),
+                    Memory.id != memory.id,
+                    Memory.contact_id == memory.contact_id,
+                )
+                .limit(30)
+            )
+            result = await session.execute(candidates_q)
+            candidates = result.scalars().all()
+
+            for c in candidates:
+                if not c.fact:
+                    continue
+                c_words = {w.lower() for w in c.fact.split() if len(w) >= 4}
+                overlap = len(words & c_words)
+                if overlap >= 2:
+                    await link_memories(
+                        session,
+                        user,
+                        source_id=memory.id,
+                        target_id=c.id,
+                        relation_type="related",
+                        weight=0.3 + overlap * 0.1,
+                    )
+                    links_added += 1
+
+    # ── Pass 3: Temporal co-occurrence ───────────────────────────────────
+    # Same contact, created_at within 1 hour
+    if memory.contact_id is not None and memory.created_at is not None:
+        window_start = memory.created_at - timedelta(hours=1)
+        window_end = memory.created_at + timedelta(hours=1)
+        result = await session.execute(
+            select(Memory)
+            .where(
+                Memory.user_id == user.id,
+                Memory.is_active.is_(True),
+                Memory.id != memory.id,
+                Memory.contact_id == memory.contact_id,
+                Memory.created_at.between(window_start, window_end),
+            )
+            .limit(30)
+        )
+        for c in result.scalars().all():
+            if not c.fact:
+                continue
             await link_memories(
                 session,
                 user,
                 source_id=memory.id,
                 target_id=c.id,
-                relation_type="related",
-                weight=0.3 + overlap * 0.1,
+                relation_type="co_temporal",
+                weight=0.5,
+            )
+            links_added += 1
+
+    # ── Pass 4: Entity co-occurrence (shared proper nouns) ───────────────
+    # Simple: capitalized word >= 3 chars
+    proper_nouns: set[str] = set()
+    for word in memory.fact.split():
+        clean = word.strip(".,!?;:'\"()[]{}")
+        if len(clean) >= 3 and clean[0].isupper() and clean.isalpha():
+            proper_nouns.add(clean)
+    if proper_nouns:
+        conditions = [Memory.fact.ilike(f"%{pn}%") for pn in proper_nouns]
+        result = await session.execute(
+            select(Memory)
+            .where(
+                Memory.user_id == user.id,
+                Memory.is_active.is_(True),
+                Memory.id != memory.id,
+                or_(*conditions),
+            )
+            .limit(30)
+        )
+        for c in result.scalars().all():
+            if not c.fact:
+                continue
+            # Double-check: does c.fact actually contain any of the same proper nouns?
+            c_upper = {
+                w.strip(".,!?;:'\"()[]{}")
+                for w in c.fact.split()
+                if len(w.strip(".,!?;:'\"()[]{}")) >= 3
+                and w.strip(".,!?;:'\"()[]{}")[0].isupper()
+                and w.strip(".,!?;:'\"()[]{}").isalpha()
+            }
+            if proper_nouns & c_upper:
+                await link_memories(
+                    session,
+                    user,
+                    source_id=memory.id,
+                    target_id=c.id,
+                    relation_type="co_entity",
+                    weight=0.4,
+                )
+                links_added += 1
+
+    # ── Pass 5: Cause-effect hint ────────────────────────────────────────
+    # If new fact is negative, link from older positive facts of same contact
+    if (
+        memory.sentiment == "negative"
+        and memory.contact_id is not None
+        and memory.created_at is not None
+    ):
+        result = await session.execute(
+            select(Memory)
+            .where(
+                Memory.user_id == user.id,
+                Memory.is_active.is_(True),
+                Memory.id != memory.id,
+                Memory.contact_id == memory.contact_id,
+                Memory.sentiment == "positive",
+                Memory.created_at < memory.created_at,
+            )
+            .limit(10)
+        )
+        for c in result.scalars().all():
+            if not c.fact:
+                continue
+            await link_memories(
+                session,
+                user,
+                source_id=c.id,  # earlier positive → new negative
+                target_id=memory.id,
+                relation_type="preceded",
+                weight=0.3,
             )
             links_added += 1
 
     if links_added:
-        logger.debug("Auto-linked %d facts to memory %d", links_added, memory.id)
+        logger.debug(
+            "Auto-linked %d facts to memory %d",
+            links_added,
+            memory.id,
+        )
 
 
 async def list_memories(
@@ -465,6 +633,8 @@ async def list_memories(
     *,
     contact_id: int | None = None,
     limit: int | None = None,
+    is_active: bool | None = None,
+    has_tags: bool | None = None,
 ) -> list[Memory]:
     query = (
         select(Memory)
@@ -473,6 +643,15 @@ async def list_memories(
     )
     if contact_id is not None:
         query = query.where(Memory.contact_id == contact_id)
+    if is_active is not None:
+        query = query.where(Memory.is_active == is_active)
+    if has_tags is not None:
+        if has_tags:
+            query = query.where(Memory.tags.isnot(None), Memory.tags != "")
+        else:
+            from sqlalchemy import or_
+
+            query = query.where(or_(Memory.tags.is_(None), Memory.tags == ""))
     if limit is not None:
         query = query.limit(limit)
     result = await session.execute(query)
@@ -1054,3 +1233,317 @@ async def get_memory_graph(
         # (аналогично оригинальному поведению `if mem:`)
 
     return graph
+
+
+async def get_graph_stats(session: AsyncSession, user_id: int) -> dict:
+    """Return graph statistics: node count, edge type breakdown, top hubs, connected components, average degree.
+
+    Uses SQL aggregation wherever possible; flood-fill in Python for connected components.
+    """
+    # ── 1. Node count (active memories) ──────────────────────────────
+    node_count = (
+        await session.execute(
+            select(func.count())
+            .select_from(Memory)
+            .where(Memory.user_id == user_id, Memory.is_active)
+        )
+    ).scalar() or 0
+
+    # ── 2. Edge counts by relation_type ─────────────────────────────
+    edge_rows = (
+        await session.execute(
+            select(
+                func.coalesce(MemoryLink.relation_type, "unknown").label("rel_type"),
+                func.count().label("cnt"),
+            )
+            .where(MemoryLink.user_id == user_id)
+            .group_by(func.coalesce(MemoryLink.relation_type, "unknown"))
+        )
+    ).all()
+    edges_by_type: dict[str, int] = {r.rel_type: r.cnt for r in edge_rows}
+    total_edges = sum(edges_by_type.values())
+
+    # ── 3. Top-5 hub nodes (highest total degree: source + target) ──
+    hub_sql = """
+        SELECT node_id, SUM(degree) AS total_degree
+        FROM (
+            SELECT source_id AS node_id, COUNT(*) AS degree
+            FROM memory_links
+            WHERE user_id = :uid
+            GROUP BY source_id
+            UNION ALL
+            SELECT target_id AS node_id, COUNT(*) AS degree
+            FROM memory_links
+            WHERE user_id = :uid
+            GROUP BY target_id
+        ) AS d
+        GROUP BY node_id
+        ORDER BY total_degree DESC
+        LIMIT 5
+    """
+    hub_rows = (await session.execute(sql_text(hub_sql), {"uid": user_id})).all()
+
+    top_hubs: list[dict] = []
+    if hub_rows:
+        hub_ids = [int(r[0]) for r in hub_rows]
+        mems = (
+            (await session.execute(select(Memory).where(Memory.id.in_(hub_ids))))
+            .scalars()
+            .all()
+        )
+        mem_map = {m.id: m for m in mems}
+        for row in hub_rows:
+            nid = int(row[0])
+            mem = mem_map.get(nid)
+            top_hubs.append(
+                {
+                    "memory_id": nid,
+                    "degree": int(row[1]),
+                    "fact": mem.fact[:80] if mem else "?",
+                    "contact_id": mem.contact_id if mem else None,
+                }
+            )
+
+    # ── 4. Connected components (flood fill) ─────────────────────────
+    # Load all edges for flood-fill
+    all_edges = (
+        await session.execute(
+            select(MemoryLink.source_id, MemoryLink.target_id)
+            .where(MemoryLink.user_id == user_id)
+            .distinct()
+        )
+    ).all()
+
+    active_ids: set[int] = set(
+        (
+            await session.execute(
+                select(Memory.id).where(Memory.user_id == user_id, Memory.is_active)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # Build undirected adjacency (only edges between active nodes)
+    adj: dict[int, set[int]] = defaultdict(set)
+    for s, t in all_edges:
+        s_id, t_id = int(s), int(t)
+        if s_id in active_ids and t_id in active_ids:
+            adj[s_id].add(t_id)
+            adj[t_id].add(s_id)
+
+    # Nodes that appear in any edge
+    nodes_in_edges: set[int] = set()
+    for s, t in all_edges:
+        s_id, t_id = int(s), int(t)
+        nodes_in_edges.add(s_id)
+        nodes_in_edges.add(t_id)
+
+    # Isolated = active nodes with no edges
+    isolated = len(active_ids - nodes_in_edges)
+
+    # BFS only for connected nodes (non-isolated)
+    connected_ids = active_ids & nodes_in_edges
+    visited: set[int] = set()
+    components = 0
+    for nid in connected_ids:
+        if nid in visited:
+            continue
+        components += 1
+        queue = deque([nid])
+        while queue:
+            cur = queue.popleft()
+            if cur in visited:
+                continue
+            visited.add(cur)
+            for neighbor in adj.get(cur, set()):
+                if neighbor not in visited:
+                    queue.append(neighbor)
+
+    # ── 5. Average degree ───────────────────────────────────────────
+    avg_degree = round(total_edges / max(node_count, 1), 2)
+
+    # ── 6. Isolated nodes (active nodes with no edges) ──────────────
+    connected = len(visited)
+
+    return {
+        "node_count": node_count,
+        "total_edges": total_edges,
+        "edges_by_type": edges_by_type,
+        "top_hubs": top_hubs,
+        "components": components,
+        "isolated_nodes": isolated,
+        "avg_degree": avg_degree,
+    }
+
+
+# ── Impact Analysis ────────────────────────────────────────────────────
+
+
+@dataclass
+class ContactImpact:
+    """Результат impact analysis для контакта."""
+
+    contact_id: int
+    contact_name: str
+    direct_facts: list[Memory]
+    related_contacts: list[dict]  # [{"id": int, "name": str, "via_fact": str}]
+    topics: list[str]
+    upcoming_events: list[dict]  # [{"text": str, "deadline": str}]
+    total_nodes: int
+
+
+async def contact_impact(
+    session: AsyncSession,
+    user_id: int,
+    contact_id: int,
+    max_depth: int = 2,
+) -> ContactImpact:
+    """Полный граф зависимостей контакта.
+
+    Возвращает:
+    - прямые факты о контакте
+    - связанные контакты через MemoryLink
+    - темы из кластеров
+    - активные напоминания/дедлайны
+    """
+    # 1. Direct facts
+    facts: list[Memory] = list(
+        (
+            await session.execute(
+                select(Memory).where(
+                    Memory.user_id == user_id,
+                    Memory.contact_id == contact_id,
+                    Memory.is_active == True,  # noqa: E712
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    fact_ids = [f.id for f in facts]
+
+    # 2. Related contacts via MemoryLink
+    related_contacts: list[dict] = []
+    if fact_ids:
+        links_result = await session.execute(
+            select(MemoryLink).where(
+                MemoryLink.user_id == user_id,
+                or_(
+                    MemoryLink.source_id.in_(fact_ids),
+                    MemoryLink.target_id.in_(fact_ids),
+                ),
+            )
+        )
+        links = links_result.scalars().all()
+
+        neighbor_ids: set[int] = set()
+        for link in links:
+            other_id = link.target_id if link.source_id in fact_ids else link.source_id
+            if other_id not in fact_ids:
+                neighbor_ids.add(other_id)
+
+        if neighbor_ids:
+            neighbor_mems_result = await session.execute(
+                select(Memory).where(
+                    Memory.id.in_(list(neighbor_ids)),
+                    Memory.is_active == True,  # noqa: E712
+                    Memory.contact_id.isnot(None),
+                    Memory.contact_id != contact_id,
+                )
+            )
+            neighbor_mems = neighbor_mems_result.scalars().all()
+
+            # Batch-load contact names to avoid N+1
+            neighbor_cids: list[int] = []
+            seen_contacts: set[int] = set()
+            for nm in neighbor_mems:
+                if nm.contact_id and nm.contact_id not in seen_contacts:
+                    seen_contacts.add(nm.contact_id)
+                    neighbor_cids.append(nm.contact_id)
+
+            name_map: dict[int, str] = {}
+            if neighbor_cids:
+                names_result = await session.execute(
+                    select(Contact.peer_id, Contact.display_name).where(
+                        Contact.user_id == user_id,
+                        Contact.peer_id.in_(neighbor_cids),
+                    )
+                )
+                name_map = {
+                    int(r[0]): r[1] or f"contact#{r[0]}" for r in names_result.all()
+                }
+
+            for nm in neighbor_mems:
+                if nm.contact_id and nm.contact_id in seen_contacts:
+                    cname = name_map.get(nm.contact_id, f"contact#{nm.contact_id}")
+                    # Only add once per contact
+                    if any(rc["id"] == nm.contact_id for rc in related_contacts):
+                        continue
+                    related_contacts.append(
+                        {
+                            "id": nm.contact_id,
+                            "name": cname,
+                            "via_fact": (nm.fact or "")[:60],
+                        }
+                    )
+
+    # 3. Topics from clusters
+    topics: list[str] = []
+    if fact_ids:
+        cluster_rows = (
+            (
+                await session.execute(
+                    select(MemoryCluster.topic)
+                    .join(
+                        MemoryClusterMember,
+                        MemoryClusterMember.cluster_id == MemoryCluster.id,
+                    )
+                    .where(
+                        MemoryCluster.user_id == user_id,
+                        MemoryClusterMember.memory_id.in_(fact_ids),
+                    )
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        topics = [t for t in cluster_rows if t]
+
+    # 4. Upcoming commitments
+    contact_name_row = await session.execute(
+        select(Contact.display_name).where(
+            Contact.user_id == user_id, Contact.peer_id == contact_id
+        )
+    )
+    contact_name = contact_name_row.scalar() or f"contact#{contact_id}"
+
+    events: list[dict] = []
+    commitments_result = await session.execute(
+        select(Commitment).where(
+            Commitment.user_id == user_id,
+            Commitment.status == "open",
+        )
+    )
+    commitments = commitments_result.scalars().all()
+
+    for c in commitments:
+        if c.peer_name and contact_name and contact_name.lower() in c.peer_name.lower():
+            events.append(
+                {
+                    "text": c.text or "",
+                    "deadline": c.deadline_at.isoformat() if c.deadline_at else "",
+                }
+            )
+
+    return ContactImpact(
+        contact_id=contact_id,
+        contact_name=contact_name,
+        direct_facts=facts,
+        related_contacts=related_contacts[:10],
+        topics=topics[:10],
+        upcoming_events=events[:5],
+        total_nodes=len(facts) + len(related_contacts),
+    )

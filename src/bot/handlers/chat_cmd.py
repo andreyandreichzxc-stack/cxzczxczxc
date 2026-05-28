@@ -14,6 +14,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from src.bot.filters import OwnerOnly
 from src.bot.handlers.rate_limiter import check_rate_limit
 from src.bot.pending_questions import get_pending, has_pending
+from src.core.infra.formatting import italic
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.services.chat_actions import (
     catchup_action,
@@ -37,6 +38,7 @@ from src.db.repo import (
     remove_watched_peer,
 )
 from src.db.session import get_session
+from src.llm.base import TaskType
 from src.llm.router import build_provider
 from src.userbot.manager import UserbotManager
 
@@ -762,7 +764,7 @@ async def cb_extract_memories(
 
     async with get_session() as session:
         owner = await get_or_create_user(session, callback.from_user.id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.DEFAULT)
         if provider is None:
             if callback.message:
                 await callback.message.edit_text("Не задан LLM-ключ.")
@@ -818,7 +820,7 @@ async def _auto_extract_memories(message: Message, client, owner) -> None:
         contacts = await list_contacts(
             session, owner, kinds=("user",), include_archived=False
         )
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.DEFAULT)
     if provider is None:
         return
 
@@ -943,7 +945,7 @@ async def cb_smart_memories(
 
     async with get_session() as session:
         owner = await _gcu(session, callback.from_user.id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.SUMMARIZE)
         if provider is None:
             if callback.message:
                 await callback.message.edit_text("Не задан LLM-ключ.")
@@ -1045,7 +1047,7 @@ async def cb_smart_memories(
                 # Heuristic: if fact starts with verb/conjunction, format as observation
                 if fact_clean and not fact_clean[0].isupper():
                     fact_clean = fact_clean[0].upper() + fact_clean[1:]
-                lines.append(f"• {fact_clean}.")
+                lines.append(f"• {italic(sanitize_html(fact_clean + '.'))}")
         else:
             lines.append(
                 f"(Только что запомнил {total_facts} фактов. Расскажу подробнее, когда спросишь.)"
@@ -1236,7 +1238,9 @@ async def cb_profile(callback: CallbackQuery, userbot_manager: UserbotManager) -
                 if fact_text:
                     lines.append(f"  • {fact_text}")
     except Exception:
-        logger.debug("Failed to load contact digest for peer %d", peer_id, exc_info=True)
+        logger.debug(
+            "Failed to load contact digest for peer %d", peer_id, exc_info=True
+        )
 
     lines.append(f"\n💡 Подробнее: /profile {contact_name}")
 

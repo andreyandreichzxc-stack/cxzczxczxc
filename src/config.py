@@ -56,6 +56,10 @@ class LLMDefaults:
     CLOUDFLARE_CHAT_HEAVY = _LazyModel("cloudflare_chat_heavy_model")
     CLOUDFLARE_EMBED = _LazyModel("cloudflare_embed_model")
 
+    DEEPSEEK_CHAT_LIGHT = _LazyModel("deepseek_chat_light_model")
+    DEEPSEEK_CHAT_HEAVY = _LazyModel("deepseek_chat_heavy_model")
+    DEEPSEEK_EMBED = _LazyModel("deepseek_embed_model")
+
     OPENAI_BASE_URL = _LazyModel("openai_base_url")
 
 
@@ -120,6 +124,10 @@ class Settings(BaseSettings):
     )
     digest_check_sec: int = Field(60, description="Интервал проверки дайджеста")
     news_check_sec: int = Field(60, description="Интервал проверки новостей")
+    avito_check_sec: int = Field(1800, description="Интервал проверки Авито (сек)")
+    avito_default_city: str = Field(
+        "moskva", description="Город по умолчанию для Авито"
+    )
     sleep_tracker_check_sec: int = Field(900, description="Интервал трекера сна")
     sleep_tracker_fallback_sec: int = Field(600, description="Fallback трекера сна")
     memory_patterns_interval_sec: int = Field(
@@ -145,6 +153,19 @@ class Settings(BaseSettings):
     openai_embed_model: str = Field(
         "text-embedding-3-small", description="OpenAI модель эмбеддингов"
     )
+
+    # --- Agent-specific model overrides (empty = use defaults) ---
+    maestro_model: str = Field("", description="Model for maestro (empty = auto)")
+    draft_model: str = Field("", description="Model for draft replies")
+    memory_model: str = Field("", description="Model for memory operations")
+    search_model: str = Field("", description="Model for search/analysis")
+    stt_model: str = Field("", description="Model for voice transcription")
+    humanize_model: str = Field("", description="Model for text humanization")
+    classify_model: str = Field("", description="Model for intent classification")
+    summarize_model: str = Field("", description="Model for summarization/digest")
+    skills_model: str = Field("", description="Model for skills and tools")
+    background_model: str = Field("", description="Model for background tasks")
+    vision_model: str = Field("", description="Model for multimodal image analysis")
 
     gemini_chat_light_model: str = Field(
         "gemini-3-flash", description="Gemini лёгкая чат-модель"
@@ -179,6 +200,11 @@ class Settings(BaseSettings):
         "", description="Cloudflare Account ID (из URL дашборда)"
     )
 
+    context7_api_key: str = Field(
+        "",
+        description="Context7 API key for documentation search (https://context7.com)",
+    )
+
     cloudflare_chat_light_model: str = Field(
         "@cf/qwen/qwen3-30b-a3b-fp8",
         description="Cloudflare лёгкая чат-модель (Qwen3 30B — $0.05/$0.34 per M)",
@@ -190,6 +216,17 @@ class Settings(BaseSettings):
     cloudflare_embed_model: str = Field(
         "@cf/baai/bge-m3",
         description="Cloudflare модель эмбеддингов (BGE-M3 multilingual — $0.012/M)",
+    )
+
+    # --- DeepSeek ---
+    deepseek_chat_light_model: str = Field(
+        "deepseek-chat", description="DeepSeek лёгкая чат-модель"
+    )
+    deepseek_chat_heavy_model: str = Field(
+        "deepseek-reasoner", description="DeepSeek тяжёлая чат-модель"
+    )
+    deepseek_embed_model: str = Field(
+        "deepseek-embedding", description="DeepSeek модель эмбеддингов"
     )
 
     embedding_dim: int = Field(
@@ -211,13 +248,11 @@ class Settings(BaseSettings):
         description="Trigger persona rebuild every N new personal facts",
     )
 
-    # --- Telegram API credentials (дефолт — официальные TelegramHelper) ---
-    api_id: int = Field(
-        2040, description="Telegram API ID (default: 2040 — TelegramHelper official)"
-    )
+    # --- Telegram API credentials ---
+    api_id: int = Field(..., description="Telegram API ID from https://my.telegram.org")
     api_hash: str = Field(
-        "b18441a1ff607e10a989891a5462e627",
-        description="Telegram API hash (default — TelegramHelper official)",
+        ...,
+        description="Telegram API hash from https://my.telegram.org",
     )
 
     disk_critical_mb: int = Field(
@@ -236,6 +271,53 @@ class Settings(BaseSettings):
         21600, description="Интервал консолидации памяти (6 часов)"
     )
 
+    # ── Recall defaults ──
+    recall_default_limit: int = Field(8, description="Default recall limit")
+    recall_max_limit: int = Field(20, description="Max recall limit")
+    recall_semantic_threshold: float = Field(
+        0.55, description="Min cosine similarity for semantic search"
+    )
+    recall_rrf_k: int = Field(60, description="RRF k-parameter")
+    recall_mmr_lambda: float = Field(
+        0.7, description="MMR lambda (relevance vs diversity)"
+    )
+
+    # ── Ebbinghaus retention scoring ──
+    ebbinghaus_decay_base: float = Field(
+        0.07, description="Base decay rate for Ebbinghaus retention (no recall boost)"
+    )
+    ebbinghaus_access_weight: float = Field(
+        0.5, description="Weight of access count in retention boost"
+    )
+    auto_forget_threshold: float = Field(
+        0.15,
+        description="Retention score below which facts are candidates for forgetting",
+    )
+    auto_forget_enabled: bool = Field(
+        True, description="Enable automatic forgetting of low-retention facts"
+    )
+
+    # ── Limits & timeouts ──
+    max_message_length: int = Field(4096, description="Telegram max message length")
+    safe_message_length: int = Field(4000, description="Buffer before Telegram limit")
+    max_voice_queue_size: int = Field(20, description="Max voice messages in queue")
+    voice_queue_timeout: float = Field(
+        10.0, description="Seconds before dropping voice msg"
+    )
+
+    # ── Caching ──
+    context_cache_max_size: int = Field(2000, description="Max context cache entries")
+    contact_digest_cache_max: int = Field(
+        500, description="Max contact digest cache entries"
+    )
+    recall_cache_max_size: int = Field(1000, description="Max recall cache entries")
+    recall_cache_result_ttl: float = Field(
+        30.0, description="Recall cache TTL with facts (sec)"
+    )
+    recall_cache_empty_ttl: float = Field(
+        60.0, description="Recall cache TTL without facts (sec)"
+    )
+
     # Humanizer
     humanizer_deep_min_length: int = Field(
         100, description="Минимальная длина текста для deep humanizer"
@@ -247,6 +329,42 @@ class Settings(BaseSettings):
     # Tool loop
     max_tool_iterations: int = Field(
         5, description="Макс. итераций tool-calling в Maestro"
+    )
+
+    # ── Skill Evolution (SkillOpt-inspired) ──
+    skill_edit_budget: int = Field(
+        3,
+        description="Макс. количество bounded edits за одну итерацию (textual learning rate)",
+    )
+    skill_optimizer_model: str = Field(
+        "",
+        description="Модель для оптимизации навыков (пустая = использовать heavy). "
+        "Формат: 'provider/model' или 'model_name'",
+    )
+    skill_target_model: str = Field(
+        "",
+        description="Целевая модель для исполнения навыков (пустая = использовать light). "
+        "Формат: 'provider/model' или 'model_name'",
+    )
+    skill_validation_enabled: bool = Field(
+        True,
+        description="Включить validation gate для обновлений навыков",
+    )
+    skill_auto_edit_enabled: bool = Field(
+        True,
+        description="Разрешить автоматические bounded edits вместо полной замены навыков",
+    )
+    skill_edit_cooldown_sec: int = Field(
+        60,
+        description="Минимальный интервал между edits одного навыка (rate limiting)",
+    )
+    skill_auto_evolve_interval_sec: int = Field(
+        21600,  # 6 hours
+        description="Интервал auto-evolution цикла (по умолчанию 6 часов)",
+    )
+    skill_auto_evolve_min_failures: int = Field(
+        3,
+        description="Минимальное количество провалов для запуска auto-evolution навыка",
     )
 
     # Pending
@@ -261,6 +379,11 @@ class Settings(BaseSettings):
 
     # Context
     context_max_turns: int = Field(50, description="Макс. витков диалога перед сжатием")
+
+    # ── Skill seeding ──
+    skill_seed_on_startup: bool = Field(
+        True, description="Auto-seed skills from skills/*/SKILL.md on startup"
+    )
 
     @property
     def data_dir(self) -> Path:

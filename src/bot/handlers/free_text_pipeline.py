@@ -36,8 +36,9 @@ from src.db.session import get_session
 from src.userbot.manager import UserbotManager
 
 from src.core.intelligence.pre_gate import check_pre_gate
-from src.llm.base import ChatMessage
+from src.llm.base import ChatMessage, TaskType
 from src.core.infra.timeutil import now_in_tz
+from src.core.observability.response_trace import log_response_trace
 
 from .free_text_common import (
     _fire_record_trajectory,
@@ -52,10 +53,12 @@ from .free_text_common import (
 from src.core.intelligence.routing_wordlists import learn_routing as _learn_routing
 
 from src.core.humanizer import (
-    humanize_response,
+    apply_anti_ai_mode,
     humanize_deep,
     analyze_ai_score,
     _cache_last_humanized,
+    _preservation_check,
+    normalize_anti_ai_mode,
 )
 
 from .free_text_exec import (
@@ -65,6 +68,7 @@ from .free_text_exec import (
     exec_add_reminders_from_chat,
     exec_change_auto_mode,
     exec_check_memories,
+    exec_classic_ask_chat,
     exec_classic_catchup,
     exec_classic_chat,
     exec_classic_draft_reply,
@@ -97,8 +101,14 @@ from .free_text_exec import (
     exec_show_threads,
     exec_show_today,
     exec_show_trajectory,
+    exec_link_memories,
+    exec_show_memory_graph,
+    exec_show_memory_health,
+    exec_show_sessions,
+    exec_show_suggestions,
     exec_store_memory,
     exec_toggle_api_key,
+    exec_update_memory,
 )
 
 logger = logging.getLogger(__name__)
@@ -110,10 +120,45 @@ _LAST_INTENT_TTL = 900.0
 
 # ── Pending tool confirmations ────────────────────────────────────────
 # Stores tool calls awaiting user confirmation (from maestro tool loop / guardrails).
-# Format: {uid_str: {"telegram_id": int, "tool": str, "tool_params": dict, "ts": float}}
+# Format: {uid_str: {"telegram_id": int, "kind": "tool|intent", "tool": str,
+#                    "tool_params": dict, "ts": float}}
 _pending_confirmations: dict[str, dict] = {}
 _pending_confirmations_lock = asyncio.Lock()
 _PENDING_TTL = settings.pending_ttl_sec  # 5 минут — удаляем stale записи
+
+
+async def _get_anti_ai_mode(owner_telegram_id: int) -> str:
+    """Runtime mode for assistant responses: off/log/fix."""
+    try:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, owner_telegram_id)
+            user_settings = getattr(owner, "settings", None)
+            mode = getattr(user_settings, "anti_ai_mode", None)
+            enabled = getattr(user_settings, "anti_ai_enabled", None)
+            return normalize_anti_ai_mode(mode, enabled=enabled)
+    except Exception:
+        logger.debug("failed to load anti_ai_mode", exc_info=True)
+        return "off"
+
+
+async def _humanize_assistant_response(
+    text: str,
+    *,
+    owner_telegram_id: int,
+    context_hint: str | None,
+    style_profile: str = "",
+    source: str,
+    mode: str | None = None,
+) -> str:
+    mode = mode or await _get_anti_ai_mode(owner_telegram_id)
+    return apply_anti_ai_mode(
+        text,
+        mode=mode,
+        context_hint=context_hint,
+        style_profile=style_profile,
+        user_id=owner_telegram_id,
+        source=source,
+    )
 
 
 def _cleanup_stale_pending() -> None:
@@ -135,15 +180,37 @@ def _confirm_tool_keyboard(uid: str) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def _redact_confirmation_params(params: dict) -> dict:
+    redacted = {}
+    sensitive = (
+        "key",
+        "token",
+        "secret",
+        "password",
+        "credential",
+        "value",
+        "api_hash",
+        "database_url",
+        "proxy_url",
+    )
+    for name, value in params.items():
+        if any(marker in str(name).lower() for marker in sensitive):
+            redacted[name] = "***"
+        else:
+            redacted[name] = value
+    return redacted
+
+
 async def _store_tool_confirmation(
     telegram_id: int, tool: str, tool_params: dict
 ) -> str:
     """Сохраняет ожидающее подтверждение и возвращает uid для callback."""
-    _cleanup_stale_pending()
     uid = uuid.uuid4().hex[:12]
     async with _pending_confirmations_lock:
+        _cleanup_stale_pending()
         _pending_confirmations[uid] = {
             "telegram_id": telegram_id,
+            "kind": "tool",
             "tool": tool,
             "tool_params": dict(tool_params),
             "ts": time.monotonic(),
@@ -151,10 +218,26 @@ async def _store_tool_confirmation(
     return uid
 
 
+async def _store_intent_confirmation(
+    telegram_id: int, intent_name: str, intent: dict
+) -> str:
+    uid = uuid.uuid4().hex[:12]
+    async with _pending_confirmations_lock:
+        _cleanup_stale_pending()
+        _pending_confirmations[uid] = {
+            "telegram_id": telegram_id,
+            "kind": "intent",
+            "tool": intent_name,
+            "tool_params": dict(intent),
+            "ts": time.monotonic(),
+        }
+    return uid
+
+
 async def _pop_tool_confirmation(uid: str, telegram_id: int) -> dict | None:
     """Извлекает и удаляет подтверждение. Возвращает None если не найдено."""
-    _cleanup_stale_pending()
     async with _pending_confirmations_lock:
+        _cleanup_stale_pending()
         pending = _pending_confirmations.pop(uid, None)
     if pending is None:
         return None
@@ -191,27 +274,45 @@ async def _cb_tool_confirm(
         "User %d confirmed tool %s with params %s",
         callback.from_user.id,
         tool_name,
-        tool_params,
+        _redact_confirmation_params(tool_params),
     )
 
     try:
-        async with get_session() as session:
-            owner = await get_or_create_user(session, callback.from_user.id)
-            client = (
-                userbot_manager.get_client(callback.from_user.id)
-                if userbot_manager
-                else None
+        if pending.get("kind") == "intent":
+            handler_info = INTENT_HANDLERS.get(
+                tool_name
+            ) or CLASSIC_INTENT_HANDLERS.get(tool_name)
+            if handler_info is None:
+                raise RuntimeError(f"Intent {tool_name!r} not found")
+            handler, _ = handler_info
+            await handler(
+                tool_params,
+                callback.message,
+                state,
+                userbot_manager,
+                tz_name=tool_params.get("tz_name", "UTC"),
             )
-            result = await tool_registry.execute(
-                tool_name,
-                _confirmed=True,
-                session=session,
-                user=owner,
-                client=client,
-                userbot_manager=userbot_manager,
-                **tool_params,
-            )
-        ok = result.get("ok", True) if isinstance(result, dict) else True
+            ok = True
+        else:
+            async with get_session() as session:
+                owner = await get_or_create_user(session, callback.from_user.id)
+                client = (
+                    userbot_manager.get_client(callback.from_user.id)
+                    if userbot_manager
+                    else None
+                )
+                result = await tool_registry.execute(
+                    tool_name,
+                    _confirmed=True,
+                    session=session,
+                    user=owner,
+                    client=client,
+                    userbot_manager=userbot_manager,
+                    **tool_params,
+                )
+            if isinstance(result, dict) and result.get("error"):
+                raise RuntimeError(str(result["error"]))
+            ok = result.get("ok", True) if isinstance(result, dict) else True
         if callback.message:
             if ok:
                 await callback.message.edit_text(
@@ -317,7 +418,9 @@ async def _maybe_auto_save_facts(
             # NOTE: LLMProvider.chat() doesn't accept max_tokens;
             # the prompt asks for short JSON, so the LLM will return a compact response
             # with the provider's default max_tokens.
-            raw_json = await provider.chat([ChatMessage(role="user", content=prompt)])
+            raw_json = await provider.chat(
+                [ChatMessage(role="user", content=prompt)], task_type=TaskType.DEFAULT
+            )
             # Parse LLM response as JSON
             import json as _json
 
@@ -458,6 +561,12 @@ INTENT_HANDLERS: dict[str, tuple[callable, str]] = {
         "Извлечь воспоминания из чата",
     ),
     "check_memories": (h_adapter(exec_check_memories), "Проверить память"),
+    "update_memory": (h_adapter(exec_update_memory), "Обновить факт в памяти"),
+    "link_memories": (h_adapter(exec_link_memories), "Связать два факта"),
+    "show_memory_health": (h_adapter(exec_show_memory_health), "Здоровье памяти"),
+    "show_memory_graph": (h_adapter(exec_show_memory_graph), "Граф памяти"),
+    "show_sessions": (h_adapter(exec_show_sessions), "История сессий"),
+    "show_suggestions": (h_adapter(exec_show_suggestions), "Паттерны памяти"),
     "change_auto_mode": (h_adapter(exec_change_auto_mode), "Сменить авто-режим"),
     "set_quiet_hours": (h_adapter(exec_set_quiet_hours), "Установить тихие часы"),
     "show_inbox": (hu_adapter(exec_show_inbox), "Показать входящие"),
@@ -486,6 +595,7 @@ CLASSIC_INTENT_HANDLERS: dict[str, tuple[callable, str]] = {
     "search": (exec_classic_search, "Поиск"),
     "find_in_chats": (exec_classic_find_in_chats, "Поиск по чатам"),
     "news_digest": (exec_classic_news_digest, "Новостной дайджест"),
+    "ask_chat": (exec_classic_ask_chat, "Анализ чата"),
     "summarize_chat": (exec_classic_summarize_chat, "Саммари чата"),
     "tasks_for_chat": (exec_classic_tasks_for_chat, "Задачи из чата"),
     "draft_reply": (exec_classic_draft_reply, "Черновик ответа"),
@@ -632,7 +742,11 @@ async def _dispatch(intent, message, state, userbot_manager, *, tz_name: str) ->
     if kind:
         gr = guardrail_evaluate(kind, intent, context={"is_new_contact": False})
         if gr.needs_confirm:
-            uid = await _store_tool_confirmation(message.from_user.id, kind, intent)
+            intent_with_tz = dict(intent)
+            intent_with_tz["tz_name"] = tz_name
+            uid = await _store_intent_confirmation(
+                message.from_user.id, kind, intent_with_tz
+            )
             await safe_answer(
                 message,
                 sanitize_html(f"🤔 {gr.confirm_message}"),
@@ -996,6 +1110,11 @@ async def execute_instant(
     except Exception:
         pass  # hooks are optional, never break core flow
 
+    # Log user message to session (fire-and-forget)
+    from src.core.scheduling.session_logger import log_user_message
+
+    asyncio.ensure_future(log_user_message(message.from_user.id, raw))
+
     # ✨ Pre-LLM gate: handle greetings/farewells without LLM
     gate_response = check_pre_gate(raw)
     if gate_response:
@@ -1015,6 +1134,10 @@ async def execute_instant(
             latency_ms=int((time.monotonic() - turn_started) * 1000),
         )
         await _post_turn_optimize(owner_telegram_id, raw, response)
+        # Log assistant response to session
+        from src.core.scheduling.session_logger import log_assistant_response
+
+        asyncio.ensure_future(log_assistant_response(message.from_user.id, response))
         return True
 
     # Динамическое приветствие с учётом наличия памяти и сессии
@@ -1037,17 +1160,28 @@ async def execute_instant(
         )
     elif not has_memory:
         response = (
-            "Привет! Я твой AI-ассистент. "
-            "Я тебя пока не знаю — расскажи о себе или дай доступ к чатам через /sync, и я запомню."
+            "👋 <b>Привет! Я v3.0</b>\n\n"
+            "Уже умею:\n"
+            "🧠 Запоминать факты о тебе и контактах\n"
+            "💬 Отвечать за тебя в ЛС (авто-ответ)\n"
+            "📋 Вести список дел и напоминать\n"
+            "📰 Собирать дайджест новостей\n"
+            "🔍 Искать по истории переписок\n\n"
+            "Чтобы я запомнил твои контакты и факты — жми /sync"
         )
     else:
         response = f"{_time_of_day_greeting(tz_name=tz_name)}{', ' + name if name else ''}! Чем займёмся?"
 
-    # Humanize the response
+    # Humanize the assistant response according to Anti-AI runtime mode.
     context_hint = _detect_context_hint(
         raw, plan_purpose=plan.tasks[0].purpose.value if plan.tasks else None
     )
-    response = humanize_response(response, context_hint=context_hint)
+    response = await _humanize_assistant_response(
+        response,
+        owner_telegram_id=owner_telegram_id,
+        context_hint=context_hint,
+        source="free_text_pipeline.execute_instant",
+    )
     _cache_last_humanized(owner_telegram_id, response)
 
     await safe_answer(message, sanitize_html(response))
@@ -1076,6 +1210,10 @@ async def execute_instant(
         latency_ms=int((time.monotonic() - turn_started) * 1000),
     )
     await _post_turn_optimize(owner_telegram_id, raw, plan.final_response)
+    # Log assistant response to session
+    from src.core.scheduling.session_logger import log_assistant_response
+
+    asyncio.ensure_future(log_assistant_response(message.from_user.id, response))
     return True
 
 
@@ -1102,6 +1240,7 @@ async def execute_fast_route(
             now_local=now_local_str,
             tz_name=tz_name,
             history_block=history_block,
+            memory_context=getattr(plan, "memory_context", "") or None,
             user_id=owner_telegram_id,
         )
     except Exception as e:
@@ -1170,6 +1309,7 @@ async def execute_fast_route(
         route_mode="fast_route",
         intent_json=intent,
         actions_json=actions_from_intent(intent),
+        used_skills_json=intent.get("used_skills", []),
         response_text=_summarize_intent_for_memory(intent),
         success=True,
         latency_ms=int((time.monotonic() - turn_started) * 1000),
@@ -1208,6 +1348,11 @@ async def execute_maestro(
     except Exception:
         pass  # hooks are optional, never break core flow
 
+    # Log user message to session (fire-and-forget)
+    from src.core.scheduling.session_logger import log_user_message
+
+    asyncio.ensure_future(log_user_message(message.from_user.id, raw))
+
     # ✨ Pre-LLM gate: handle greetings/farewells without LLM
     gate_response = check_pre_gate(raw)
     if gate_response:
@@ -1227,17 +1372,52 @@ async def execute_maestro(
         )
         await ctx_store.add_turn(message.from_user.id, raw[:200], response[:400])
         await _post_turn_optimize(owner_telegram_id, raw, response)
+        # Log assistant response to session
+        from src.core.scheduling.session_logger import log_assistant_response
+
+        asyncio.ensure_future(log_assistant_response(message.from_user.id, response))
         return True
 
     rag_needed = plan.recall_mode == "deep"
+    # 📊 Productive thinking time: use the delay for better recall
+    if not rag_needed and len(raw) > 30:
+        try:
+            from src.core.memory.contradiction_detector import detect_contradiction
+            from src.core.memory.memory_recall import recall
+
+            _deep = await recall(
+                telegram_id=owner_telegram_id,
+                query=raw,
+                limit=5,
+                mode="deep",
+                include_deep=True,
+            )
+            _contra = await detect_contradiction(owner_telegram_id, raw)
+            if _deep and _deep.facts and len(_deep.facts) > 3:
+                rag_needed = True  # more facts found → upgrade to deep mode
+                logger.debug(
+                    "Upgraded to deep recall: %d facts found in thinking time",
+                    len(_deep.facts),
+                )
+        except Exception:
+            logger.debug("Enhanced recall in thinking time failed", exc_info=True)
     try:
         pipeline_result = await run_pipeline(
             provider,
             raw,
             owner_id=owner_telegram_id,
             history_block=history_block,
+            memory_context=getattr(plan, "memory_context", "") or None,
             global_style=injected_style,
+            self_profile=getattr(plan, "self_profile", "") or None,
             rag_enabled=rag_needed,
+            contact_id=(
+                plan.tasks[0].meta.get("contact_id")
+                if getattr(plan, "tasks", None)
+                and plan.tasks
+                and getattr(plan.tasks[0], "meta", None)
+                else None
+            ),
             userbot_manager=userbot_manager,
         )
 
@@ -1271,6 +1451,25 @@ async def execute_maestro(
                 message.from_user.id,
                 raw[:200],
                 f"[tool confirmation: {tool_name}]",
+            )
+            trace = dict(pipeline_result.get("trace") or {})
+            log_response_trace(
+                route="maestro_tool_confirm",
+                owner_id=owner_telegram_id,
+                memory_context=getattr(plan, "memory_context", "") or "",
+                context_sources=trace.get("context_sources", []),
+                tools_proposed=trace.get("tools_proposed", []),
+                tools_executed=trace.get("tools_executed", []),
+                tools_blocked=trace.get("tools_blocked", [tool_name]),
+                guardrail_decision=trace.get("guardrail_decision", {}),
+                humanizer_mode="off",
+                humanizer_changed=False,
+            )
+            # Log assistant response to session
+            from src.core.scheduling.session_logger import log_assistant_response
+
+            asyncio.ensure_future(
+                log_assistant_response(message.from_user.id, confirm_msg)
             )
             return True
 
@@ -1317,16 +1516,22 @@ async def execute_maestro(
                     await message.answer("⚠️ Не получилось сгенерировать ответ")
                 return True
 
-            # Apply humanization after streaming
-            humanized = humanize_response(
-                full_text.strip(),
+            # Apply Anti-AI mode after streaming; off/log keep text unchanged.
+            anti_ai_mode = await _get_anti_ai_mode(owner_telegram_id)
+            original_text = full_text.strip()
+            humanized = await _humanize_assistant_response(
+                original_text,
+                owner_telegram_id=owner_telegram_id,
                 context_hint=context_hint,
                 style_profile=style_block or "",
+                source="free_text_pipeline.stream",
+                mode=anti_ai_mode,
             )
             # Deep humanize if needed
             score, _ = analyze_ai_score(humanized)
             if (
-                score > 0.3
+                anti_ai_mode == "fix"
+                and score > 0.3
                 and len(humanized) > 100
                 and _safe_for_deep_humanize(humanized, context_hint=context_hint)
             ):
@@ -1337,6 +1542,7 @@ async def execute_maestro(
                 except Exception:
                     logger.debug("humanize_deep failed on streamed text", exc_info=True)
 
+            humanizer_changed = humanized != original_text
             response_text = sanitize_html(humanized)
             _cache_last_humanized(owner_telegram_id, response_text)
 
@@ -1366,12 +1572,28 @@ async def execute_maestro(
             if errors:
                 logger.debug("Maestro agent errors: %s", errors)
 
+            _used_skills = pipeline_result.get("used_skills", [])
+            trace = dict(pipeline_result.get("trace") or {})
+            log_response_trace(
+                route="maestro_stream",
+                owner_id=owner_telegram_id,
+                memory_context=getattr(plan, "memory_context", "") or "",
+                context_sources=trace.get("context_sources", []),
+                tools_proposed=trace.get("tools_proposed", []),
+                tools_executed=trace.get("tools_executed", []),
+                tools_blocked=trace.get("tools_blocked", []),
+                guardrail_decision=trace.get("guardrail_decision", {}),
+                humanizer_mode=anti_ai_mode,
+                humanizer_changed=humanizer_changed,
+                extra={"used_skills": _used_skills},
+            )
             _fire_record_trajectory(
                 owner_telegram_id,
                 request_text=raw,
                 route_mode="maestro",
                 intent_json={"intent": "maestro"},
                 actions_json=pipeline_result.get("plan", []),
+                used_skills_json=_used_skills,
                 response_text=response_text,
                 success=True,
                 error="; ".join(errors) if errors else None,
@@ -1393,6 +1615,12 @@ async def execute_maestro(
                 )
             except Exception:
                 pass
+            # Log assistant response to session
+            from src.core.scheduling.session_logger import log_assistant_response
+
+            asyncio.ensure_future(
+                log_assistant_response(message.from_user.id, response_text)
+            )
             return True
 
         # ── Handle tool results from tool loop ───────────────────────
@@ -1400,6 +1628,7 @@ async def execute_maestro(
         # ответа, но итоговый ответ берём из final_response (LLM уже
         # синтезировала его с учётом результатов инструмента).
         response_text = pipeline_result.get("final_response", "")
+        _used_skills = pipeline_result.get("used_skills", [])
         if response_text:
             # ── Humanizer: post-process response ──────────────────────
             # Определяем контекстную подсказку из purpose плана
@@ -1416,17 +1645,23 @@ async def execute_maestro(
             except Exception:
                 style_block = None
 
-            # Stage 1: fast humanize (clip endings, add context followup)
-            humanized = humanize_response(
-                response_text,
+            # Stage 1: Anti-AI mode (off/log/fix). Fix clips endings and applies light replacements.
+            anti_ai_mode = await _get_anti_ai_mode(owner_telegram_id)
+            original_response_text = response_text
+            humanized = await _humanize_assistant_response(
+                original_response_text,
+                owner_telegram_id=owner_telegram_id,
                 context_hint=context_hint,
                 style_profile=style_block or "",
+                source="free_text_pipeline.final_response",
+                mode=anti_ai_mode,
             )
 
             # Stage 2: deep humanize if still too AI-like
             score, _ = analyze_ai_score(humanized)
             if (
-                score > 0.3
+                anti_ai_mode == "fix"
+                and score > 0.3
                 and len(humanized) > 100
                 and _safe_for_deep_humanize(humanized, context_hint=context_hint)
             ):
@@ -1442,6 +1677,29 @@ async def execute_maestro(
 
             response_text = humanized
             _cache_last_humanized(owner_telegram_id, response_text)
+
+            # ── Self-correction loop: re-generate if too AI-like ──────
+            if anti_ai_mode == "fix" and response_text and len(response_text) > 50:
+                for _ in range(2):
+                    score_before, _ = analyze_ai_score(response_text)
+                    if score_before < 0.3:
+                        break
+                    correction_prompt = (
+                        f"Твой ответ вышел слишком AI-шаблонным (score={score_before:.2f}). "
+                        f"Перепиши его естественно, как человек:\n\n{response_text[:1000]}"
+                    )
+                    try:
+                        rewritten = await provider.chat(
+                            [ChatMessage(role="user", content=correction_prompt)],
+                            task_type=TaskType.HUMANIZE,
+                        )
+                        if rewritten and len(rewritten) > 20:
+                            rewritten = _preservation_check(response_text, rewritten)
+                            response_text = rewritten
+                    except Exception:
+                        break
+            # ── End Self-correction ────────────────────────────────────
+
             # ── End Humanizer ─────────────────────────────────────────
 
             # Auto-save: fire-and-forget сохранение фактов о пользователе
@@ -1466,6 +1724,20 @@ async def execute_maestro(
             if tool_result and not response_text:
                 extra_suffix = f"\n\n<code>⚙️ {json.dumps(tool_result, default=str, ensure_ascii=False)[:200]}</code>"
 
+            trace = dict(pipeline_result.get("trace") or {})
+            log_response_trace(
+                route="maestro",
+                owner_id=owner_telegram_id,
+                memory_context=getattr(plan, "memory_context", "") or "",
+                context_sources=trace.get("context_sources", []),
+                tools_proposed=trace.get("tools_proposed", []),
+                tools_executed=trace.get("tools_executed", []),
+                tools_blocked=trace.get("tools_blocked", []),
+                guardrail_decision=trace.get("guardrail_decision", {}),
+                humanizer_mode=anti_ai_mode,
+                humanizer_changed=response_text != original_response_text,
+                extra={"used_skills": _used_skills},
+            )
             await safe_answer(
                 message,
                 sanitize_html(response_text + extra_suffix),
@@ -1477,6 +1749,7 @@ async def execute_maestro(
                 route_mode="maestro",
                 intent_json={"intent": "maestro"},
                 actions_json=pipeline_result.get("plan", []),
+                used_skills_json=_used_skills,
                 response_text=response_text,
                 success=True,
                 error="; ".join(errors) if errors else None,
@@ -1497,7 +1770,13 @@ async def execute_maestro(
                     plan=pipeline_result.get("plan", []),
                 )
             except Exception:
-                pass  # hooks are optional, never break core flow
+                pass
+            # Log assistant response to session
+            from src.core.scheduling.session_logger import log_assistant_response
+
+            asyncio.ensure_future(
+                log_assistant_response(message.from_user.id, response_text)
+            )
             return True
         return False
     except Exception:

@@ -29,6 +29,9 @@ class UserSettings(Base):
     auto_reply_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     llm_provider: Mapped[str] = mapped_column(String(24), default="openai")
     use_heavy_model: Mapped[bool] = mapped_column(Boolean, default=False)
+    model_overrides: Mapped[str | None] = mapped_column(
+        Text, nullable=True, default=None
+    )  # JSON: {"maestro": "deepseek-reasoner", "draft": "deepseek-chat"}
     timezone: Mapped[str] = mapped_column(
         String(64), default="UTC"
     )  # IANA tz, например Europe/Moscow
@@ -102,6 +105,11 @@ class UserSettings(Base):
         String(16), default="off"
     )  # "off" | "log" | "fix"
 
+    # Vision / multimodal
+    vision_model: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, default=None
+    )  # Модель для мультимодального анализа изображений
+
     user: Mapped[User] = relationship(back_populates="settings")
 
 
@@ -153,6 +161,15 @@ class LlmKeySlot(Base):
     label: Mapped[str | None] = mapped_column(
         String(64), nullable=True
     )  # человекочитаемая метка "основной", "для черновиков"
+    endpoint: Mapped[str | None] = mapped_column(
+        String(256), nullable=True
+    )  # custom base_url for OpenAI-compatible APIs
+    model: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )  # конкретная модель (gpt-4o, claude-3-5-sonnet)
+    category: Mapped[str] = mapped_column(
+        String(16), default="llm", server_default="llm"
+    )  # llm | stt | tts | vision
     key_enc: Mapped[str] = mapped_column(Text)
     priority: Mapped[int] = mapped_column(
         Integer, default=0

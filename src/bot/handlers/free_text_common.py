@@ -3,15 +3,18 @@
 
 import asyncio
 import logging
+import re
 import time
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.reply_dedup import dedup
+from src.config import settings
+from src.core.infra.formatting import auto_format
 
 # ── Telegram message length safety ─────────────────────────────────────
-TELEGRAM_SAFE_MAX = 4000  # Telegram hard limit is 4096 chars
+TELEGRAM_SAFE_MAX = settings.safe_message_length  # Telegram hard limit is 4096 chars
 
 
 def _smart_split(text: str, max_len: int = TELEGRAM_SAFE_MAX) -> list[str]:
@@ -84,8 +87,31 @@ async def safe_answer(
     """Send ``text`` via ``message.answer()``, splitting into multiple messages if too long.
     ``reply_markup`` (if any) is attached only to the last message.
     """
+    # Reaction engine: short responses → emoji reaction instead of text
+    _REACTION_MAP = {
+        "👍": ["ок", "ладно", "хорошо", "принято", "да", "ага", "угу"],
+        "👎": ["нет", "не", "не надо", "отмена", "не так"],
+        "❤️": ["спасибо", "благодарю", "отлично", "супер", "круто"],
+        "😢": ["жаль", "грустно", "печаль", "сочувствую"],
+        "😡": ["бесит", "злюсь", "раздражён"],
+        "🎉": ["ура", "поздравляю", "йоу"],
+    }
+    if len(text) < 50 and "```" not in text:
+        text_lower = text.lower().rstrip(".!,?;: \n")
+        for emoji, triggers in _REACTION_MAP.items():
+            if text_lower in triggers:
+                try:
+                    from aiogram.types import ReactionTypeEmoji
+
+                    await message.react([ReactionTypeEmoji(emoji=emoji)])
+                    return  # Don't send text
+                except Exception:
+                    break  # Fall through to normal text send
+
     if dedup.is_duplicate(message.chat.id, text):
         return
+    # Apply auto-formatting for Telegram HTML
+    text = auto_format(text)
     parts = _smart_split(text, max_len)
     for i, part in enumerate(parts):
         final_kwargs = {}
@@ -101,6 +127,9 @@ from src.db.repo import get_or_create_user
 from src.db.session import get_session
 
 logger = logging.getLogger(__name__)
+
+# ── Model name validation ─────────────────────────────────────────────
+_MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9@/_.:-]{1,128}$")
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +221,20 @@ def _coerce_setting_value(spec: str, raw):
         if isinstance(raw, str) and raw.strip() in opts:
             return raw.strip(), None
         return None, f"допустимые значения: {', '.join(sorted(opts))}"
+    if spec == "model":
+        if not isinstance(raw, str):
+            return None, "ожидаю строку (имя модели)"
+        val = raw.strip()
+        if not val or val.lower() in ("default", "по умолчанию", "сброс", "сбросить"):
+            return "", None  # clear override
+        if len(val) > 128:
+            return None, "имя модели слишком длинное (макс. 128)"
+        if not _MODEL_NAME_RE.match(val):
+            return None, (
+                "недопустимые символы в имени модели. "
+                "Допустимы: буквы, цифры, @ / _ . : -"
+            )
+        return val, None
     return None, "неизвестный тип"
 
 
@@ -334,6 +377,18 @@ def _summarize_intent_for_memory(intent: dict) -> str:
         return "извлёк факты из переписки"
     if kind == "check_memories":
         return "проверил актуальность памяти"
+    if kind == "update_memory":
+        return "обновил факт в памяти"
+    if kind == "link_memories":
+        return "связал два факта в памяти"
+    if kind == "show_memory_health":
+        return "посмотрел здоровье памяти"
+    if kind == "show_memory_graph":
+        return "посмотрел граф памяти"
+    if kind == "show_sessions":
+        return "посмотрел историю сессий"
+    if kind == "show_suggestions":
+        return "посмотрел паттерны памяти"
     if kind == "change_auto_mode":
         return "изменил авто-режим"
     if kind == "set_quiet_hours":
@@ -456,7 +511,7 @@ async def _post_turn_optimize(
                     user_message=user_message,
                     assistant_response=assistant_response,
                 )
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             logger.debug("post_turn_optimize skipped", exc_info=True)
 
     existing = _post_turn_tasks.get(telegram_id)

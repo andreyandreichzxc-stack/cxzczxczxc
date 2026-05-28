@@ -37,7 +37,7 @@ async def check_burnout(owner_telegram_id: int) -> str | None:
             select(Message)
             .where(
                 Message.user_id == owner.id,
-                Message.is_outgoing == True,
+                Message.is_outgoing.is_(True),
                 Message.date >= three_days_ago,
             )
             .order_by(desc(Message.date))

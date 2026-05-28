@@ -12,14 +12,13 @@ import hashlib
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from difflib import SequenceMatcher
 
 from src.core.contacts.chat_service import messages_to_transcript
 from src.core.memory.memory_extractor import MEMORIES_SYSTEM, _parse_json_array
 from src.core.memory.memory_queue import MemoryJob, enqueue
 from src.db.repo import fetch_chat_messages, get_or_create_user, list_memories
 from src.db.session import get_session
-from src.llm.base import ChatMessage, LLMProvider
+from src.llm.base import ChatMessage, LLMProvider, TaskType
 from src.bot.pending_questions import add_question
 
 logger = logging.getLogger(__name__)
@@ -326,7 +325,7 @@ async def _extract_llm_filtered(
                 ChatMessage(role="system", content=MEMORIES_SYSTEM),
                 ChatMessage(role="user", content=user_prompt),
             ],
-            heavy=False,
+            task_type=TaskType.MEMORY,
         )
     except (ConnectionError, OSError, ValueError):
         logger.exception("Smart memory LLM call failed")
@@ -340,6 +339,14 @@ async def _extract_llm_filtered(
     contact_id = contact.peer_id if contact else None
     valid: list[dict] = []
     skipped = 0
+
+    # Batch-load memories once for dedup (avoids N separate DB queries)
+    async with get_session() as session:
+        owner = await get_or_create_user(session, telegram_id)
+        all_memories = await list_memories(session, owner, contact_id=contact_id)
+
+    # Precompute hash set once for all facts (avoids O(N*M) rebuild)
+    existing_hashes = _build_fact_hashes(all_memories)
 
     for item in items:
         if not isinstance(item, dict):
@@ -355,7 +362,13 @@ async def _extract_llm_filtered(
             continue
 
         # --- Дедупликация ---
-        if await _is_duplicate(telegram_id, contact_id, fact):
+        if await _is_duplicate(
+            telegram_id,
+            contact_id,
+            fact,
+            existing_memories=all_memories,
+            existing_hashes=existing_hashes,
+        ):
             skipped += 1
             logger.debug("Skipped duplicate fact: %r", fact[:80])
             continue
@@ -491,18 +504,34 @@ def _parse_date_match(match: re.Match) -> datetime | None:
     return None
 
 
+def _build_fact_hashes(memories: list) -> set[str]:
+    """Precompute MD5 hashes (first 10 words) for a list of memories. Call once, reuse for all facts."""
+    hashes: set[str] = set()
+    for mem in memories:
+        if not mem.is_active or not mem.fact:
+            continue
+        e_norm = " ".join(mem.fact.lower().strip().split()[:10])
+        hashes.add(hashlib.md5(e_norm.encode()).hexdigest())
+    return hashes
+
+
 async def _is_duplicate(
     telegram_id: int,
     contact_id: int | None,
     fact_text: str,
+    existing_memories: list | None = None,
+    existing_hashes: set[str] | None = None,
 ) -> bool:
     """Проверяет, есть ли похожий факт в БД (через hash)."""
-    async with get_session() as session:
-        owner = await get_or_create_user(session, telegram_id)
-        existing = await list_memories(session, owner, contact_id=contact_id)
+    if existing_memories is None:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, telegram_id)
+            existing_memories = await list_memories(
+                session, owner, contact_id=contact_id
+            )
 
     fact_lower = fact_text.lower().strip()
-    for mem in existing:
+    for mem in existing_memories:
         if not mem.is_active or not mem.fact:
             continue
         if fact_lower == mem.fact.lower().strip():
@@ -511,12 +540,10 @@ async def _is_duplicate(
     # Hash-based fuzzy dedup (first 10 words normalized)
     norm = " ".join(fact_lower.split()[:10])
     f_hash = hashlib.md5(norm.encode()).hexdigest()
-    existing_hashes: set[str] = set()
-    for mem in existing:
-        if not mem.is_active or not mem.fact:
-            continue
-        e_norm = " ".join(mem.fact.lower().split()[:10])
-        existing_hashes.add(hashlib.md5(e_norm.encode()).hexdigest())
+
+    # Use precomputed hashes if available, otherwise build once
+    if existing_hashes is None:
+        existing_hashes = _build_fact_hashes(existing_memories)
 
     if f_hash in existing_hashes:
         logger.debug(
@@ -542,7 +569,7 @@ async def _save_facts_to_queue(
 
     async with get_session() as session:
         owner = await get_or_create_user(session, telegram_id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.MEMORY)
 
     if provider:
         texts = [f["fact"] for f in facts]

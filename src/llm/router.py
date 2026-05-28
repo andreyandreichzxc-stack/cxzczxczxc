@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -7,18 +8,7 @@ import enum
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-
-def _ensure_utc(dt: datetime | None) -> datetime | None:
-    """Приводит naive datetime к UTC-aware.
-
-    SQLite с DateTime(timezone=True) возвращает aware datetime для новых записей,
-    но старые записи без TZ в ISO-строке приходят как naive.
-    """
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
+from src.core.infra.timeutil import ensure_utc as _ensure_utc
 
 
 from src.crypto import decrypt
@@ -27,14 +17,21 @@ from src.db.repo import get_active_keys, get_api_keys, mark_key_failure, mark_ke
 from src.db.session import get_session
 from collections.abc import AsyncGenerator
 
-from src.llm.base import ChatMessage, LLMProvider
+from src.llm.base import ChatMessage, LLMProvider, TaskType
+from src.llm.anthropic_provider import AnthropicProvider
 from src.llm.cloudflare_provider import CloudflareProvider
 from src.llm.gemini_provider import GeminiProvider
 from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
 from src.llm.openrouter_provider import OpenRouterProvider
+from src.llm.deepseek_provider import DeepSeekProvider
 
 logger = logging.getLogger(__name__)
+
+# Sentinel to distinguish "heavy not passed" from "heavy=False".
+# Used so that `_default_heavy` (from user's use_heavy_model setting)
+# is respected when callers don't explicitly specify heavy/light.
+_UNSET = object()
 
 
 class ExhaustedError(Exception):
@@ -205,7 +202,7 @@ def _score_provider(name: str, now: float) -> float:
     return metrics.score(now)
 
 
-PROVIDER_ORDER = ("openrouter", "openai", "gemini", "mistral", "cloudflare")
+PROVIDER_ORDER = ("deepseek", "openrouter", "openai", "gemini", "mistral", "cloudflare")
 RETRYABLE_MARKERS = (
     "429",
     "500",
@@ -270,6 +267,18 @@ def release_purpose_slot(sem: asyncio.Semaphore) -> None:
 
 def _is_retryable_llm_error(exc: Exception) -> bool:
     """True for transient capacity/rate-limit/server errors worth trying another key/provider."""
+    # Timeouts are always retryable — rotate key / fallback to next provider.
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    # httpx timeout exceptions (ReadTimeout, ConnectTimeout, etc.)
+    if type(exc).__name__ in (
+        "TimeoutException",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "WriteTimeout",
+        "PoolTimeout",
+    ):
+        return True
     status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
     if status in {429, 500, 503}:
         return True
@@ -414,6 +423,8 @@ class MultiKeyProvider:
         provider_class: type,
         keys: list[str],
         slot_ids: list[int] | None = None,
+        endpoints: list[str | None] | None = None,
+        models: list[str | None] | None = None,
         session_provider: Callable[[], tuple[AsyncSession, object]] | None = None,
         purpose: str = "main",
         **kwargs: object,
@@ -424,14 +435,35 @@ class MultiKeyProvider:
         self._provider_class = provider_class
         self._keys = keys
         self._slot_ids = slot_ids or []
+        self._endpoints = endpoints or []
+        self._models = models or []
         self._session_provider = session_provider
         self._kwargs = kwargs
         self._idx = 0
+        self._idx_lock = asyncio.Lock()
         self._semaphore = asyncio.Semaphore(len(self._keys))
         self._current_purpose = purpose
+        self._model: str | None = None  # global override; None = use per-slot model
+        self._default_heavy: bool = False  # overridden by use_heavy_model setting
         self.name = f"{provider_name}(×{len(self._keys)})"
 
-    async def _try_with_retry(self, operation, *args: object, **kwargs: object):
+    async def _reserve_start_idx(self) -> int:
+        async with self._idx_lock:
+            start_idx = self._idx
+            self._idx = (self._idx + 1) % len(self._keys)
+            return start_idx
+
+    async def _advance_idx_after_success(self, idx: int) -> None:
+        async with self._idx_lock:
+            self._idx = (idx + 1) % len(self._keys)
+
+    async def _try_with_retry(
+        self,
+        operation,
+        *args: object,
+        model_override: str | None = None,
+        **kwargs: object,
+    ):
         """Пробует операцию со всеми ключами по очереди.
 
         Пропускает ключи, которые фейлились менее 60 секунд назад.
@@ -446,8 +478,8 @@ class MultiKeyProvider:
         last_error: Exception | None = None
         now = start_time
 
-        # Round-robin: фиксируем стартовый индекс
-        start_idx = self._idx
+        # Round-robin: reserve a unique start index for concurrent calls.
+        start_idx = await self._reserve_start_idx()
 
         skipped = 0
         for attempt in range(len(self._keys)):
@@ -467,7 +499,21 @@ class MultiKeyProvider:
                     continue
             # Create provider instance — handle creation failure separately
             try:
-                provider = self._provider_class(key, **self._kwargs)
+                endpoint = (
+                    self._endpoints[idx]
+                    if self._endpoints and idx < len(self._endpoints)
+                    else None
+                )
+                provider_kwargs = dict(self._kwargs)
+                if endpoint:
+                    provider_kwargs["base_url"] = endpoint
+                if model_override:
+                    provider_kwargs["model"] = model_override
+                elif self._model:
+                    provider_kwargs["model"] = self._model
+                elif self._models and idx < len(self._models):
+                    provider_kwargs["model"] = self._models[idx]
+                provider = self._provider_class(key, **provider_kwargs)
             except Exception as exc:
                 last_error = exc
                 continue
@@ -475,7 +521,9 @@ class MultiKeyProvider:
             try:
                 for retry in range(MAX_RETRIES_PER_KEY):
                     try:
-                        result = await operation(provider, *args, **kwargs)
+                        result = await asyncio.wait_for(
+                            operation(provider, *args, **kwargs), timeout=90.0
+                        )
                     except Exception as exc:
                         if not _is_retryable_llm_error(exc):
                             raise
@@ -521,7 +569,7 @@ class MultiKeyProvider:
                                 self.provider_name,
                             )
                         # Round-robin: advance to the next key for load distribution
-                        self._idx = (idx + 1) % len(self._keys)
+                        await self._advance_idx_after_success(idx)
                         return result
             except Exception as exc:
                 if _is_retryable_llm_error(exc):
@@ -554,7 +602,10 @@ class MultiKeyProvider:
                     continue
                 raise
             finally:
-                await provider.close()
+                try:
+                    await provider.close()
+                except Exception:
+                    pass  # close failures should never mask the actual result
         if last_error:
             try:
                 await _record_provider_failure(self.provider_name)
@@ -578,42 +629,70 @@ class MultiKeyProvider:
             f"Все {len(self._keys)} ключей {self.provider_name} в кулдауне"
         )
 
-    async def chat(self, messages, *, heavy: bool = False) -> str:
+    async def chat(
+        self, messages, *, heavy=_UNSET, task_type: str = TaskType.DEFAULT
+    ) -> str:
         sem = await acquire_purpose_slot(self._current_purpose)
         try:
-            return await self._chat_with_retry(messages, heavy=heavy)
+            return await self._chat_with_retry(
+                messages, heavy=heavy, task_type=task_type
+            )
         finally:
             release_purpose_slot(sem)
 
-    async def _chat_with_retry(self, messages, *, heavy: bool = False) -> str:
+    async def _chat_with_retry(
+        self, messages, *, heavy=_UNSET, task_type: str = TaskType.DEFAULT
+    ) -> str:
         await self._semaphore.acquire()
         try:
-            return await self._retry_inner(messages, heavy=heavy)
+            return await self._retry_inner(messages, heavy=heavy, task_type=task_type)
         finally:
             self._semaphore.release()
 
-    async def _retry_inner(self, messages, *, heavy: bool = False) -> str:
+    async def _retry_inner(
+        self, messages, *, heavy=_UNSET, task_type: str = TaskType.DEFAULT
+    ) -> str:
         """Core retry logic WITHOUT semaphore acquisition.
 
         Both chat_stream (which already holds the semaphore) and
         _chat_with_retry (which acquires it) call this.
         """
-        return await self._try_with_retry(lambda p: p.chat(messages, heavy=heavy))
+        # Resolve heavy: explicit True/False wins; if not passed, use _default_heavy
+        # (set from user's use_heavy_model setting by build_provider).
+        effective_heavy = self._default_heavy if heavy is _UNSET else heavy
+        model_override = self._resolve_model_for_task(task_type)
+        return await self._try_with_retry(
+            lambda p: p.chat(messages, heavy=effective_heavy),
+            model_override=model_override,
+        )
+
+    def _resolve_model_for_task(self, task_type: str) -> str | None:
+        """Resolve model for task type.
+
+        Returns model name or None to use provider default.
+        Priority: _model (set by build_provider from task overrides) > None
+        """
+        if self._model:
+            return self._model
+        return None
 
     async def chat_stream(
-        self, messages, *, heavy: bool = False
+        self, messages, *, heavy=_UNSET, task_type: str = TaskType.DEFAULT
     ) -> AsyncGenerator[str, None]:
         """Stream chat output token by token with key rotation.
         Falls back to regular chat() if no provider supports streaming."""
+        # Resolve heavy: explicit True/False wins; if not passed, use _default_heavy
+        effective_heavy = self._default_heavy if heavy is _UNSET else heavy
         global _CIRCUIT_BREAKERS_LOCK
         if _CIRCUIT_BREAKERS_LOCK is None:
             _CIRCUIT_BREAKERS_LOCK = asyncio.Lock()
+        model_override = self._resolve_model_for_task(task_type)
         sem = await acquire_purpose_slot(self._current_purpose)
         try:
             await self._semaphore.acquire()
             try:
                 start_time = asyncio.get_running_loop().time()
-                start_idx = self._idx
+                start_idx = await self._reserve_start_idx()
                 last_error: Exception | None = None
                 for attempt in range(len(self._keys)):
                     idx = (start_idx + attempt) % len(self._keys)
@@ -631,12 +710,30 @@ class MultiKeyProvider:
                         _ = cb.try_half_open(now)
                         if not cb.is_ready(now):
                             continue
-                    provider = self._provider_class(key, **self._kwargs)
+                    endpoint = (
+                        self._endpoints[idx]
+                        if self._endpoints and idx < len(self._endpoints)
+                        else None
+                    )
+                    provider_kwargs = dict(self._kwargs)
+                    if endpoint:
+                        provider_kwargs["base_url"] = endpoint
+                    if model_override:
+                        provider_kwargs["model"] = model_override
+                    elif self._model:
+                        provider_kwargs["model"] = self._model
+                    elif self._models and idx < len(self._models):
+                        provider_kwargs["model"] = self._models[idx]
+                    provider = self._provider_class(key, **provider_kwargs)
                     try:
                         total_text = ""
-                        async for token in provider.chat_stream(messages, heavy=heavy):
-                            total_text += token
-                            yield token
+                        # 180s overall timeout; httpx 60s socket-level timeout per read
+                        async with asyncio.timeout(180):
+                            async for token in provider.chat_stream(
+                                messages, heavy=effective_heavy
+                            ):
+                                total_text += token
+                                yield token
                         # Stream completed successfully — record metrics
                         # Circuit breaker: record success
                         async with _CIRCUIT_BREAKERS_LOCK:
@@ -664,7 +761,7 @@ class MultiKeyProvider:
                                 "Failed to record provider success metric for %s",
                                 self.provider_name,
                             )
-                        self._idx = idx
+                        await self._advance_idx_after_success(idx)
                         return
                     except (AttributeError, NotImplementedError):
                         continue
@@ -701,7 +798,10 @@ class MultiKeyProvider:
                             continue
                         raise
                     finally:
-                        await provider.close()
+                        try:
+                            await provider.close()
+                        except Exception:
+                            pass  # close failures should never mask the actual result
                 # All streaming attempts failed — record failure and fallback
                 if last_error:
                     try:
@@ -711,7 +811,9 @@ class MultiKeyProvider:
                             "Failed to record provider failure metric for %s",
                             self.provider_name,
                         )
-                yield await self._retry_inner(messages, heavy=heavy)
+                yield await self._retry_inner(
+                    messages, heavy=effective_heavy, task_type=task_type
+                )
             finally:
                 self._semaphore.release()
         finally:
@@ -751,6 +853,15 @@ class MultiKeyProvider:
         """MultiKeyProvider is a factory — instances are closed in _try_with_retry."""
         pass
 
+    async def list_models(self) -> list[str]:
+        """Delegate to underlying provider. Not key-rotated — uses first key."""
+        key = self._keys[0]
+        provider = self._provider_class(key)
+        try:
+            return await provider.list_models()
+        finally:
+            await provider.close()
+
 
 @dataclass
 class ProviderFallback:
@@ -771,7 +882,33 @@ class ProviderFallback:
     def primary(self) -> MultiKeyProvider:
         return self.providers[0]
 
-    async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
+    @property
+    def _model(self) -> str | None:
+        """Global model override propagated from settings (e.g. maestro_model)."""
+        return self.providers[0]._model if self.providers else None
+
+    @_model.setter
+    def _model(self, value: str | None) -> None:
+        for p in self.providers:
+            p._model = value
+
+    @property
+    def _default_heavy(self) -> bool:
+        """Default heavy flag propagated from user's use_heavy_model setting."""
+        return self.providers[0]._default_heavy if self.providers else False
+
+    @_default_heavy.setter
+    def _default_heavy(self, value: bool) -> None:
+        for p in self.providers:
+            p._default_heavy = value
+
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy=_UNSET,
+        task_type: str = TaskType.DEFAULT,
+    ) -> str:
         """Chat c адаптивным выбором провайдера.
 
         Сортирует провайдеров по композитному score (успешность + латентность)
@@ -787,7 +924,7 @@ class ProviderFallback:
         )
         for provider in sorted_providers:
             try:
-                return await provider.chat(messages, heavy=heavy)
+                return await provider.chat(messages, heavy=heavy, task_type=task_type)
             except Exception as exc:
                 if not isinstance(exc, ExhaustedError) and not _is_retryable_llm_error(
                     exc
@@ -802,7 +939,11 @@ class ProviderFallback:
         raise last_error or RuntimeError("All LLM providers failed")
 
     async def chat_stream(
-        self, messages: list[ChatMessage], *, heavy: bool = False
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy=_UNSET,
+        task_type: str = TaskType.DEFAULT,
     ) -> AsyncGenerator[str, None]:
         """Stream chat with adaptive provider fallback. Falls back to regular chat."""
         now = asyncio.get_running_loop().time()
@@ -813,7 +954,9 @@ class ProviderFallback:
         )
         for provider in sorted_providers:
             try:
-                async for token in provider.chat_stream(messages, heavy=heavy):
+                async for token in provider.chat_stream(
+                    messages, heavy=heavy, task_type=task_type
+                ):
                     yield token
                 return
             except (AttributeError, NotImplementedError):
@@ -829,7 +972,7 @@ class ProviderFallback:
                     str(exc)[:200],
                 )
         # All streaming failed — fallback to regular chat
-        yield await self.chat(messages, heavy=heavy)
+        yield await self.chat(messages, heavy=heavy, task_type=task_type)
 
     async def embed(self, text: str) -> list[float]:
         """Embed с fallback по цепочке провайдеров.
@@ -915,29 +1058,99 @@ class ProviderFallback:
             if hasattr(p, "close"):
                 await p.close()
 
+    async def list_models(self) -> list[str]:
+        """Delegate to primary provider's list_models."""
+        return await self.primary.list_models()
+
 
 # ─── Хелперы ──────────────────────────────────────────────────────────
 
 
-def _provider_class_for(name: str) -> type:
+def _provider_class_for(name: str) -> type | None:
     """Маппинг имени провайдера → класс."""
     return {
+        "deepseek": DeepSeekProvider,
         "openrouter": OpenRouterProvider,
         "openai": OpenAIProvider,
+        "anthropic": AnthropicProvider,
         "gemini": GeminiProvider,
         "mistral": MistralProvider,
         "cloudflare": CloudflareProvider,
-    }[name]
+    }.get(name)
 
 
 def _provider_order(primary: str) -> list[str]:
     return [primary] + [name for name in PROVIDER_ORDER if name != primary]
 
 
+# ─── Task-type model resolution ──────────────────────────────────────
+
+# Mapping TaskType → Settings attribute name for agent-specific overrides.
+_TASK_TYPE_TO_SETTINGS_ATTR: dict[str, str] = {
+    TaskType.MAESTRO: "maestro_model",
+    TaskType.DRAFT: "draft_model",
+    TaskType.MEMORY: "memory_model",
+    TaskType.SEARCH: "search_model",
+    TaskType.STT: "stt_model",
+    TaskType.HUMANIZE: "humanize_model",
+    TaskType.CLASSIFY: "classify_model",
+    TaskType.SUMMARIZE: "summarize_model",
+    TaskType.SKILLS: "skills_model",
+    TaskType.BACKGROUND: "background_model",
+    TaskType.VISION: "vision_model",
+}
+
+
+def _parse_user_model_overrides(user: User) -> dict[str, str] | None:
+    """Parse user.settings.model_overrides JSON safely."""
+    if not user.settings or not user.settings.model_overrides:
+        return None
+    try:
+        parsed = json.loads(user.settings.model_overrides)
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+    except (json.JSONDecodeError, TypeError):
+        logger.warning(
+            "Failed to parse model_overrides for user %s",
+            user.telegram_id,
+        )
+        return None
+
+
+def _resolve_model_for_task(
+    task_type: str,
+    user_overrides: dict[str, str] | None,
+) -> str | None:
+    """Resolve model name for a given task type.
+
+    Priority: user.model_overrides[task_type] > Settings agent override > None
+    (use provider default).
+    """
+    from src.config import settings
+
+    # 1. User overrides (highest priority)
+    if user_overrides:
+        model = user_overrides.get(task_type, "")
+        if model:
+            return model
+
+    # 2. Settings agent overrides
+    settings_attr = _TASK_TYPE_TO_SETTINGS_ATTR.get(task_type)
+    if settings_attr:
+        model = getattr(settings, settings_attr, "")
+        if model:
+            return model
+
+    # 3. None = use provider default
+    return None
+
+
 async def build_provider(
     session: AsyncSession,
     user: User,
     purpose: str = "main",
+    task_type: str = TaskType.DEFAULT,
 ) -> LLMProvider | None:
     """Строит провайдер с авто-ротацией ключей из LlmKeySlot.
 
@@ -949,12 +1162,13 @@ async def build_provider(
     # Проверка кэша
     from src.core.context_cache import get as cache_get
 
-    cache_key = f"provider:{user.telegram_id}:{purpose}"
+    cache_key = f"provider:{user.telegram_id}:{purpose}:{task_type}"
     cached = await cache_get(cache_key)
     if cached is not None:
         return cached
 
     provider_name = user.settings.llm_provider if user.settings else "openai"
+    use_heavy = user.settings.use_heavy_model if user.settings else False
 
     # Попытка через новую систему LlmKeySlot
     try:
@@ -966,13 +1180,21 @@ async def build_provider(
                 continue
             keys = [decrypt(s.key_enc) for s in slots]
             slot_ids = [s.id for s in slots]
+            endpoints = [s.endpoint for s in slots]
+            models = [s.model for s in slots]
             all_slot_ids.extend(slot_ids)
+            provider_class = _provider_class_for(name)
+            if provider_class is None:
+                logger.warning("Unknown provider class for %s, skipping", name)
+                continue
             providers.append(
                 MultiKeyProvider(
                     name,
-                    _provider_class_for(name),
+                    provider_class,
                     keys,
                     slot_ids=slot_ids,
+                    endpoints=endpoints,
+                    models=models,
                     # сессия для DB-трекинга открывается внутри _try_with_retry
                     # (lambda захватывает user для совместимости, session не используется)
                     session_provider=lambda: (None, user),
@@ -989,8 +1211,21 @@ async def build_provider(
                 )
             from src.core.context_cache import put as cache_put
 
-            await cache_put(cache_key, ProviderFallback(providers), ttl=300)
-            return ProviderFallback(providers)
+            result = ProviderFallback(providers)
+            result._default_heavy = use_heavy
+            # Resolve model for task_type (user overrides > settings > provider default)
+            if task_type != TaskType.DEFAULT:
+                user_overrides = _parse_user_model_overrides(user)
+                resolved_model = _resolve_model_for_task(task_type, user_overrides)
+                if resolved_model:
+                    result._model = resolved_model
+                    logger.debug(
+                        "build_provider: task_type=%s → model=%s (from overrides)",
+                        task_type,
+                        resolved_model,
+                    )
+            await cache_put(cache_key, result, ttl=300)
+            return result
     except Exception:
         logger.exception("LlmKeySlot lookup failed, falling back to old ApiKey table")
 
@@ -1000,9 +1235,11 @@ async def build_provider(
         keys = await get_api_keys(session, user, name)
         if not keys:
             continue
-        providers.append(
-            MultiKeyProvider(name, _provider_class_for(name), keys, purpose=purpose)
-        )
+        provider_class = _provider_class_for(name)
+        if provider_class is None:
+            logger.warning("Unknown provider class for %s, skipping", name)
+            continue
+        providers.append(MultiKeyProvider(name, provider_class, keys, purpose=purpose))
     if not providers:
         # Проверяем: есть слоты но все в кулдауне?
         try:
@@ -1058,8 +1295,21 @@ async def build_provider(
         )
     from src.core.context_cache import put as cache_put
 
-    await cache_put(cache_key, ProviderFallback(providers), ttl=300)
-    return ProviderFallback(providers)
+    result = ProviderFallback(providers)
+    result._default_heavy = use_heavy
+    # Resolve model for task_type (user overrides > settings > provider default)
+    if task_type != TaskType.DEFAULT:
+        user_overrides = _parse_user_model_overrides(user)
+        resolved_model = _resolve_model_for_task(task_type, user_overrides)
+        if resolved_model:
+            result._model = resolved_model
+            logger.debug(
+                "build_provider: task_type=%s → model=%s (from overrides, legacy)",
+                task_type,
+                resolved_model,
+            )
+    await cache_put(cache_key, result, ttl=300)
+    return result
 
 
 class ExhaustedProvider:
@@ -1073,11 +1323,21 @@ class ExhaustedProvider:
     async def validate_key(self) -> bool:
         return False
 
-    async def chat(self, messages: object, *, heavy: bool = False) -> str:
+    async def chat(
+        self,
+        messages: object,
+        *,
+        heavy: bool = False,
+        task_type: str = TaskType.DEFAULT,
+    ) -> str:
         raise ExhaustedError(self._reason)
 
     async def chat_stream(
-        self, messages: object, *, heavy: bool = False
+        self,
+        messages: object,
+        *,
+        heavy: bool = False,
+        task_type: str = TaskType.DEFAULT,
     ) -> AsyncGenerator[str, None]:
         raise ExhaustedError(self._reason)
 

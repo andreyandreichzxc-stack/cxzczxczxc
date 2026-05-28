@@ -22,7 +22,7 @@ from src.db.models import InstructionProfile, InstructionCandidate
 from src.db.repo import get_or_create_user
 from src.db.session import SessionLocal
 from src.core.scheduling.notification_queue import notification_queue
-from src.llm.base import ChatMessage
+from src.llm.base import ChatMessage, TaskType
 from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,10 @@ class InstructionOptimizer:
         if user_obj:
             try:
                 provider = await build_provider(
-                    session, user_obj, purpose="instructions"
+                    session,
+                    user_obj,
+                    purpose="instructions",
+                    task_type=TaskType.BACKGROUND,
                 )
                 if provider:
                     prompt = (
@@ -133,7 +136,8 @@ class InstructionOptimizer:
                         ' "consolidated": [str]}'
                     )
                     response = await provider.chat(
-                        [ChatMessage(role="user", content=prompt)]
+                        [ChatMessage(role="user", content=prompt)],
+                        task_type=TaskType.BACKGROUND,
                     )
                     # Извлекаем JSON из ответа (может быть обёрнут в ```json)
                     json_str = _extract_json_from_llm_response(response)
@@ -226,7 +230,9 @@ class InstructionOptimizer:
 
         # LLM анализ диалога
         try:
-            provider = await build_provider(session, user_obj, purpose="instructions")
+            provider = await build_provider(
+                session, user_obj, purpose="instructions", task_type=TaskType.BACKGROUND
+            )
             if provider:
                 prompt = (
                     "Проанализируй диалог и предложи улучшения правил ассистента:\n\n"
@@ -239,7 +245,8 @@ class InstructionOptimizer:
                     '{"conflicts": [str], "suggestions": [str], "tone_changes": [str]}'
                 )
                 response = await provider.chat(
-                    [ChatMessage(role="user", content=prompt)]
+                    [ChatMessage(role="user", content=prompt)],
+                    task_type=TaskType.BACKGROUND,
                 )
                 json_str = _extract_json_from_llm_response(response)
                 llm_result = json.loads(json_str)

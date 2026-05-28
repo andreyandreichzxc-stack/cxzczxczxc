@@ -18,9 +18,10 @@ from src.core.intelligence.agent_orchestrator import (
 )
 from src.db.repo import get_or_create_user, list_contacts, search_memories
 from src.db.session import get_session
-from src.llm.base import ChatMessage
+from src.llm.base import ChatMessage, TaskType
 from src.llm.router import ExhaustedError
 
+from src.core.actions import register_builtin_tools
 from src.core.actions.tool_registry import tool_registry
 from src.core.intelligence.guardrails import evaluate as guardrail_evaluate
 
@@ -44,6 +45,20 @@ FALLBACK_HINTS = (
     "📰 /news тема — дайджест каналов\n\n"
     "Или просто напиши обычным языком — я попробую понять."
 )
+
+
+def _extract_json_object(raw: str) -> dict | None:
+    """Return the first valid JSON object embedded in model output."""
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", raw):
+        try:
+            value, _end = decoder.raw_decode(raw[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
 
 MAESTRO_SYSTEM = """Ты — главный AI-ассистент владельца Telegram. Ты общаешься с ним как живой собеседник.
 
@@ -83,6 +98,11 @@ MAESTRO_SYSTEM = """Ты — главный AI-ассистент владель
 - **digest** — дайджест входящих
 - **commitment** — извлеки обещания, дедлайны
 - **urgency** — насколько срочное сообщение
+- **delegate** — создай динамического суб-агента для анализа подзадачи.
+  Параметры: `task` (что анализировать), `instructions` (как анализировать),
+  `context` (доп. данные), `contact` (привязать к чату).
+  Используй для декомпозиции: разбей сложный запрос на 2-3 подзадачи
+  и запусти каждую через отдельного `delegate`-агента параллельно.
 
 ## Все доступные действия (intents) — полный каталог
 
@@ -90,6 +110,7 @@ MAESTRO_SYSTEM = """Ты — главный AI-ассистент владель
 - **send_message** — отправить сообщение контакту
 - **draft_reply** — черновик ответа для контакта
 - **summarize_chat** — саммари переписки с контактом
+- **ask_chat** — проанализировать переписку, ответить на вопрос о ней, дать оценку/вывод
 - **catchup** — восстановить контекст переписки (где остановились)
 - **tasks_for_chat** — извлечь задачи/обещания из переписки
 - **add_reminders_from_chat** — извлечь напоминания из чата
@@ -170,6 +191,47 @@ MAESTRO_SYSTEM = """Ты — главный AI-ассистент владель
   Например: «Кстати, ты говорил что у тебя отпуск в июле! 🌴» или «Помню, ты упоминал про проект с Артёмом».
   Не натягивай — только если факт реально связан с темой разговора.
 - Твой стиль общения может быть изменён владельцем через «ТВОЙ СТИЛЬ ОБЩЕНИЯ» в промпте. Следуй этим правилам.
+
+## Делегирование суб-агентам (декомпозиция задач)
+Когда пользователь даёт **сложный, многосоставной запрос** — разбей его на подзадачи
+и запусти суб-агентов. Есть два способа:
+
+### Способ 1: `delegate_task` инструмент (в tool-loop)
+Вызови инструмент `delegate_task` с параметрами:
+```json
+{"tool": "delegate_task", "params": {
+  "task": "что анализировать",
+  "instructions": "как анализировать (роль, угол, фокус)",
+  "context": "дополнительные данные для анализа",
+  "contact": "имя контакта (опционально)"
+}}
+```
+Каждый вызов `delegate_task` создаёт нового суб-агента с собственным LLM-контекстом.
+Используй для последовательного анализа: сначала один, потом другой на основе результата.
+
+### Способ 2: `delegate` агент (в agents_to_call, параллельно)
+Укажи в `agents_to_call` нескольких `delegate`-агентов с разными задачами:
+```json
+{
+  "plan": ["проанализировать тон", "оценить срочность", "извлечь задачи"],
+  "agents_to_call": [
+    {"agent": "delegate", "task": "Проанализируй тон и эмоции", "instructions": "Ты аналитик тона", "contact": "Иван"},
+    {"agent": "delegate", "task": "Оцени срочность сообщений", "instructions": "Ты оцениваешь приоритеты", "contact": "Иван"},
+    {"agent": "delegate", "task": "Извлеки задачи и дедлайны", "instructions": "Ты извлекаешь action items", "contact": "Иван"}
+  ],
+  "final_response": "Анализирую в трёх разрезах..."
+}
+```
+Все `delegate`-агенты запустятся **параллельно** — каждый со своим LLM-контекстом.
+Результаты соберутся и отдадутся тебе для синтеза финального ответа.
+
+### Когда использовать декомпозицию
+- **Сложный анализ**: «что думаешь об отношениях с коллегой?» → разбей на tone + sentiment + tasks
+- **Много вопросов в одном**: «кто, когда, почему?» → каждый вопрос отдельному агенту
+- **Разные углы**: формальный анализ + интуитивная оценка + факт-чекинг
+- **Сравнение**: «сравни переписки с Аней и с Петей» → два delegate параллельно, потом синтез
+- **Не используй** для простых запросов (погода, привет, одно действие) — оверхед не нужен
+- Твой стиль общения может быть изменён владельцем через «ТВОЙ СТИЛЬ ОБЩЕНИЯ» в промпте. Следуй этим правилам.
 """
 
 MAESTRO_AFTER_AGENTS = """Ты — главный AI-ассистент. Ты запросил информацию у агентов. Результаты:
@@ -191,6 +253,7 @@ async def process(
     *,
     owner_id: int | None = None,
     history_block: str | None = None,
+    memory_context: str | None = None,
     global_style: str | None = None,
     self_profile: str | None = None,
     rag_enabled: bool = True,
@@ -198,6 +261,15 @@ async def process(
     userbot_manager: Any | None = None,
 ) -> dict[str, Any]:
     """Главная точка входа. Maestro понимает пользователя и составляет план."""
+    register_builtin_tools()
+
+    # Override provider model if maestro_model is configured
+    if settings.maestro_model and not getattr(provider, "_model", None):
+        try:
+            provider._model = settings.maestro_model  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            pass
+
     ctx_parts = []
     if global_style:
         ctx_parts.append(f"Твой стиль общения:\n{global_style}")
@@ -315,15 +387,20 @@ async def process(
             confirmed_rules=confirmed_rules,
             anti_ai=anti_ai,
             history_block=history_block or "",
+            memory_context=memory_context or "",
+            self_profile=self_profile or "",
             correction_context=correction_context,
         )
+        _used_skills_meta: list[dict] = []
         if owner_id is not None:
             try:
                 from src.core.intelligence.skills import build_skill_index
 
-                ctx.skill_index = (
-                    await build_skill_index(owner_id, user_text, "maestro")
-                )[0]
+                skill_str, skill_meta = await build_skill_index(
+                    owner_id, user_text, "maestro"
+                )
+                ctx.skill_index = skill_str
+                _used_skills_meta = skill_meta
             except Exception:
                 logger.debug("Failed to build skill index", exc_info=True)
 
@@ -341,7 +418,12 @@ async def process(
                     mode="normal",
                 )
                 if _recall_result.facts:
-                    _lines = ["[Память (топ-3)]"]
+                    _lines = [
+                        "[ПАМЯТЬ] Ниже факты о пользователе и его контактах. "
+                        "Используй их ЕСТЕСТВЕННО в ответе — не перечисляй списком, "
+                        "не говори «я помню» или «по моим данным». "
+                        "Вплетай в речь как само собой разумеющееся."
+                    ]
                     for _f in _recall_result.facts:
                         _lines.append(f"[{_f.reason}] {_f.fact}")
                     ctx.frozen_snapshot = "\n".join(_lines)
@@ -365,6 +447,34 @@ async def process(
             except Exception:
                 logger.debug("Frozen snapshot recall failed, skipping", exc_info=True)
 
+        context_chunks = []
+
+        # --- ContextEngine: pluggable context providers ---
+        # Keep the legacy recall paths above for compatibility, but also let
+        # registered providers contribute a compact unified context block.
+        if owner_id is not None:
+            try:
+                from src.core.context.engine import engine as context_engine
+
+                context_chunks = await context_engine.gather(
+                    user_text,
+                    telegram_id=owner_id,
+                    contact_id=contact_id,
+                    limit=6,
+                )
+            except Exception:
+                logger.debug("ContextEngine gather failed, skipping", exc_info=True)
+
+        from src.core.context.runtime_bundle import build_runtime_context
+
+        runtime_context = build_runtime_context(
+            memory_context=ctx.memory_context,
+            self_profile=ctx.self_profile,
+            chunks=context_chunks[:10],
+        )
+        ctx.memory_context = runtime_context.memory_context
+        ctx.self_profile = runtime_context.self_profile
+
         # --- Contact-specific rules (pre-load for prompt injection) ---
         if contact_id and contact_id > 0 and owner_id is not None:
             try:
@@ -375,6 +485,19 @@ async def process(
                     ctx.contact_rules_block = _block
             except Exception:
                 logger.debug("Failed to load contact rules block", exc_info=True)
+
+        # --- DSM: cross-session project memory (pre-load for prompt injection) ---
+        try:
+            from src.core.intelligence.dsm import dsm_get_recent
+
+            dsm_entries = await dsm_get_recent(limit=5)
+            if dsm_entries:
+                ctx.dsm_context = "[ПРОЕКТНАЯ ПАМЯТЬ]\n" + "\n".join(
+                    f"- [{r['tags'] or 'общее'}] {r['content'][:200]}"
+                    for r in dsm_entries
+                )
+        except Exception:
+            logger.debug("Failed to load DSM context", exc_info=True)
 
         system = prompt_assembler.assemble(ctx)
     except Exception:
@@ -387,6 +510,8 @@ async def process(
                 + "\n\nРелевантный контекст из истории переписок:\n"
                 + rag_context
             )
+        if memory_context:
+            system = system + "\n\nФакты из памяти:\n" + memory_context
         if owner_id is not None:
             try:
                 from src.core.intelligence.adaptive_instructions import (
@@ -421,7 +546,7 @@ async def process(
         '`{"tool": "имя", "params": {...}}`.\n'
         "### Для обычного ответа используй "
         '`{"final_response": "твой ответ"}`.\n\n'
-        + tool_registry.list_for_prompt()
+        + tool_registry.format_tools_with_schemas()
         + "\n\n"
         "### Факт-чекинг\n"
         "Если тебя спрашивают о факте, который мог измениться"
@@ -431,7 +556,7 @@ async def process(
         '2. Вызови `mcp_web` c `action="fetch"` — получи детали с лучшего результата.\n'
         "3. Ответь на основе полученных данных, укажи источник.\n"
         "Не полагайся на свои внутренние знания для вопросов,"
-        " ответ на которые мог устареть."
+        " ответ на который мог устареть."
     )
     if frozen_snapshot_injected:
         tools_section += (
@@ -456,11 +581,29 @@ async def process(
         ChatMessage(role="system", content=system),
         ChatMessage(role="user", content=user_msg),
     ]
+    trace: dict[str, Any] = {
+        "route": "maestro",
+        "context_sources": [],
+        "memory_facts_count": 0,
+        "tools_proposed": [],
+        "tools_executed": [],
+        "tools_blocked": [],
+        "guardrail_decision": {},
+    }
+    if ctx.memory_context:
+        trace["memory_facts_count"] = sum(
+            1
+            for line in ctx.memory_context.splitlines()
+            if line.strip().startswith(("-", "*", "•", "["))
+        )
+        for marker in ("recall_context", "context_engine", "self_profile"):
+            if marker in ctx.memory_context:
+                trace["context_sources"].append(marker)
 
     for iteration in range(MAX_TOOL_ITERATIONS):
         try:
             raw = await asyncio.wait_for(
-                provider.chat(messages, heavy=True),
+                provider.chat(messages, task_type=TaskType.MAESTRO),
                 timeout=60.0,
             )
         except ExhaustedError:
@@ -508,24 +651,14 @@ async def process(
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
             raw = re.sub(r"\n?\s*```\s*$", "", raw)
-        m = re.search(r"\{[\s\S]*\}", raw)
-        if not m:
+        parsed = _extract_json_object(raw)
+        if parsed is None:
             # Non‑JSON → treat as final_response text
             return {
                 "understood": raw,
                 "plan": [],
                 "agents_to_call": [],
                 "final_response": raw,
-            }
-
-        try:
-            parsed = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            return {
-                "understood": m.group(0),
-                "plan": [],
-                "agents_to_call": [],
-                "final_response": m.group(0),
             }
 
         # ── Tool call? ──
@@ -538,10 +671,17 @@ async def process(
         ):
             tool_name = parsed["tool"]
             tool_params = parsed["params"]
+            trace["tools_proposed"].append(tool_name)
 
             # Guardrails evaluate
             gr = guardrail_evaluate(tool_name, tool_params)
+            trace["guardrail_decision"] = {
+                "tool": tool_name,
+                "risk": gr.risk.value,
+                "needs_confirm": gr.needs_confirm,
+            }
             if gr.needs_confirm:
+                trace["tools_blocked"].append(tool_name)
                 return {
                     "understood": f"tool_confirmation: {tool_name}",
                     "plan": [],
@@ -552,6 +692,7 @@ async def process(
                     "confirm_message": gr.confirm_message,
                     "tool": tool_name,
                     "tool_params": gr.sanitized_params,
+                    "trace": trace,
                 }
 
             # Execute tool with runtime dependencies
@@ -583,6 +724,7 @@ async def process(
                 )
 
             # Feed result back to LLM
+            trace["tools_executed"].append(tool_name)
             result_str = json.dumps(result, ensure_ascii=False, default=str)
             if len(result_str) > 4000:
                 result_str = result_str[:4000] + "…"
@@ -603,9 +745,13 @@ async def process(
                 "agents_to_call": parsed.get("agents_to_call", []),
                 "final_response": parsed["final_response"],
                 "needs_clarification": parsed.get("needs_clarification"),
+                "used_skills": _used_skills_meta,
+                "trace": trace,
             }
 
         # Fallback: return full parsed JSON (backward compat)
+        parsed["used_skills"] = _used_skills_meta
+        parsed["trace"] = trace
         return parsed
 
     # ── Max iterations exhausted ──
@@ -617,6 +763,8 @@ async def process(
         "plan": [],
         "agents_to_call": [],
         "final_response": "Я зациклился на вызове инструментов. Попробуй переформулировать запрос покороче.",
+        "used_skills": _used_skills_meta,
+        "trace": trace,
     }
 
 
@@ -703,6 +851,62 @@ async def _invoke_skill_creator(func, provider, query, owner_id, **kwargs):
     return {"data": data, "success": True}
 
 
+async def _invoke_delegate(
+    func: Any, provider, query: str, owner_id: int, **kwargs: Any
+) -> dict:
+    """Invokes a dynamic sub-agent with its own LLM call.
+
+    The sub-agent receives a task description, optional instructions,
+    and context, then runs an independent LLM analysis.
+
+    Agent spec fields used:
+        task (str): what to analyse (overrides query)
+        instructions (str|None): custom system prompt additions
+        context (str|None): additional data to analyse
+        contact (str|None): optional contact to scope analysis
+    """
+    agent_spec = kwargs.get("agent_spec", {})
+    task = agent_spec.get("task", query)
+    instructions = agent_spec.get("instructions", "")
+    context_data = agent_spec.get("context", "")
+
+    system = (
+        "Ты — аналитический суб-агент. Выполни анализ задачи и верни "
+        "структурированный ответ. Будь точен, аргументирован и лаконичен."
+    )
+    if instructions:
+        system += f"\n\nДополнительные инструкции:\n{instructions}"
+
+    user_prompt = f"Задача: {task}"
+    if context_data:
+        user_prompt += f"\n\nКонтекст:\n{context_data}"
+
+    try:
+        from src.llm.base import ChatMessage
+
+        raw = await asyncio.wait_for(
+            provider.chat(
+                [
+                    ChatMessage(role="system", content=system),
+                    ChatMessage(role="user", content=user_prompt),
+                ],
+                task_type=TaskType.DEFAULT,
+            ),
+            timeout=90.0,
+        )
+        return {
+            "data": {"analysis": raw.strip(), "task": task},
+            "success": True,
+        }
+    except Exception:
+        logger.exception("delegate agent failed: %s", task)
+        return {
+            "data": {},
+            "success": False,
+            "error": "Sub-agent analysis failed",
+        }
+
+
 _AGENT_INVOKERS: dict[str, Any] = {
     "search": _invoke_search,
     "memory": _invoke_memory,
@@ -712,6 +916,7 @@ _AGENT_INVOKERS: dict[str, Any] = {
     "draft": _invoke_draft,
     "digest": _invoke_digest,
     "skill_creator": _invoke_skill_creator,
+    "delegate": _invoke_delegate,
 }
 
 
@@ -745,6 +950,35 @@ async def _execute_agent(
     agent_type = agent_spec.get("agent", "")
     query = agent_spec.get("query", "")
 
+    # --- Special case: delegate (dynamic sub-agent) ---
+    # The delegate agent doesn't need AGENT_REGISTRY entry or an import.
+    # It creates its own LLM call via _invoke_delegate.
+    if agent_type == "delegate":
+        invoker = _AGENT_INVOKERS.get("delegate")
+        if invoker is None:
+            logger.error("Delegate invoker not found")
+            return {
+                "agent": "delegate",
+                "data": {},
+                "success": False,
+                "error": "Delegate invoker not found",
+            }
+        try:
+            result = await invoker(
+                None, provider, query, owner_id, agent_spec=agent_spec
+            )
+            result["agent"] = "delegate"
+            return result
+        except Exception as e:
+            logger.exception("Delegate agent failed")
+            return {
+                "agent": "delegate",
+                "data": {},
+                "success": False,
+                "error": str(e),
+            }
+
+    # --- Normal agent lookup ---
     agent_info = AGENT_REGISTRY.get(agent_type)
     if agent_info is None:
         logger.warning("Unknown agent type: %s", agent_type)
@@ -814,6 +1048,7 @@ async def run_pipeline(
     *,
     owner_id: int,
     history_block: str | None = None,
+    memory_context: str | None = None,
     global_style: str | None = None,
     self_profile: str | None = None,
     rag_enabled: bool = True,
@@ -850,6 +1085,7 @@ async def run_pipeline(
         user_text,
         owner_id=owner_id,
         history_block=history_block,
+        memory_context=memory_context,
         global_style=global_style,
         self_profile=self_profile,
         rag_enabled=rag_enabled,
@@ -935,7 +1171,7 @@ async def run_pipeline(
         # Try streaming for fallback response
         stream = None
         try:
-            stream = provider.chat_stream(fallback_messages, heavy=True)
+            stream = provider.chat_stream(fallback_messages, task_type=TaskType.MAESTRO)
         except (AttributeError, NotImplementedError):
             pass
 
@@ -950,7 +1186,7 @@ async def run_pipeline(
 
         try:
             raw = await asyncio.wait_for(
-                provider.chat(fallback_messages, heavy=True),
+                provider.chat(fallback_messages, task_type=TaskType.MAESTRO),
                 timeout=60.0,
             )
             return {
@@ -1023,7 +1259,9 @@ async def run_pipeline(
         # Try streaming for final response
         stream = None
         try:
-            stream = provider.chat_stream(synthesis_messages, heavy=True)
+            stream = provider.chat_stream(
+                synthesis_messages, task_type=TaskType.MAESTRO
+            )
         except (AttributeError, NotImplementedError):
             pass
 
@@ -1038,16 +1276,15 @@ async def run_pipeline(
 
         try:
             raw = await asyncio.wait_for(
-                provider.chat(synthesis_messages, heavy=True),
+                provider.chat(synthesis_messages, task_type=TaskType.MAESTRO),
                 timeout=60.0,
             )
             raw = raw.strip()
             if raw.startswith("```"):
                 raw = re.sub(r"^```(?:json|JSON)?\s*\n?", "", raw)
                 raw = re.sub(r"\n?\s*```\s*$", "", raw)
-            m = re.search(r"\{[\s\S]*\}", raw)
-            if m:
-                parsed = json.loads(m.group(0))
+            parsed = _extract_json_object(raw)
+            if parsed is not None:
                 return {
                     "final_response": sanitize_html(parsed.get("final_response", raw)),
                     "plan": plan.get("plan", []),

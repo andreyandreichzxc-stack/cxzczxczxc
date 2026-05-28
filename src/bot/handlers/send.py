@@ -23,6 +23,7 @@ from src.db.repo import (
 )
 from src.db.session import get_session
 from src.llm.base import ChatMessage
+from src.llm.base import TaskType
 from src.llm.router import build_provider
 from src.userbot import get_active_telethon_client
 from src.userbot.manager import UserbotManager
@@ -124,7 +125,7 @@ async def cmd_send(
     if not recipient_query or not text:
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-            provider = await build_provider(session, owner)
+            provider = await build_provider(session, owner, task_type=TaskType.DEFAULT)
         if provider is None:
             await message.answer(
                 "Нужен LLM-ключ для NL-парсинга. Добавь в /settings или используй формат «получатель | текст»."
@@ -135,7 +136,7 @@ async def cmd_send(
                 ChatMessage(role="system", content=PARSE_SYSTEM),
                 ChatMessage(role="user", content=raw),
             ],
-            heavy=False,
+            task_type=TaskType.DEFAULT,
         )
         parsed = _parse_json(parsed_raw)
         recipient_query = parsed.get("recipient") or recipient_query

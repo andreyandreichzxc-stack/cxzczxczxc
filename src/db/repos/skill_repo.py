@@ -140,6 +140,13 @@ async def upsert_skill(
         )
     except Exception:
         pass  # hooks are optional, never break core flow
+    # Invalidate skill index cache so next prompt picks up changes
+    try:
+        from src.core.context_cache import invalidate as cache_invalidate
+
+        await cache_invalidate(f"skills:{user.telegram_id}:")
+    except Exception:
+        pass
     return skill
 
 
@@ -187,6 +194,13 @@ async def set_skill_enabled(
         skill.review_status = review_status
     skill.updated_at = datetime.now(timezone.utc)
     await session.flush()
+    # Invalidate skill index cache so next prompt picks up changes
+    try:
+        from src.core.context_cache import invalidate as cache_invalidate
+
+        await cache_invalidate(f"skills:{user.telegram_id}:")
+    except Exception:
+        pass
     return skill
 
 

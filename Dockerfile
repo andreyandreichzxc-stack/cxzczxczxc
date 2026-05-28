@@ -1,7 +1,7 @@
 # ============================================================================
 # Stage 1: Builder — install deps + pip packages
 # ============================================================================
-FROM python:3.12-slim AS builder
+FROM python:3.13-slim AS builder
 
 # Build dependencies (needed for ctranslate2, torch, etc.)
 RUN apt-get update \
@@ -29,7 +29,7 @@ RUN python -m venv /venv \
 # ============================================================================
 # Stage 2: Runner — minimal production image
 # ============================================================================
-FROM python:3.12-slim AS runner
+FROM python:3.13-slim AS runner
 
 # Runtime only — no build tools
 RUN apt-get update \
@@ -55,6 +55,8 @@ COPY --from=builder /venv /venv
 
 # Copy application code
 COPY src/ ./src/
+COPY skills/ ./skills/
+COPY docs/ ./docs/
 COPY main.py healthcheck.py ./
 COPY alembic.ini .
 COPY alembic/ alembic/

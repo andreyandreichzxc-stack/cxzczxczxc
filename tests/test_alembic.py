@@ -27,7 +27,7 @@ def _minimal_env() -> dict[str, str]:
     return {
         "BOT_TOKEN": "test:token",
         "OWNER_TELEGRAM_ID": "123456789",
-        "ENCRYPTION_KEY": "HmsOzSAxuyfb7zet2nmwhFkgWfH5z6Lsr3tW7MO8GDI=",
+        "ENCRYPTION_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         "PYTHONUNBUFFERED": "1",
     }
 

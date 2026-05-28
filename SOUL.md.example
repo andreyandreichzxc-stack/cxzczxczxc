@@ -1,0 +1,7 @@
+# Assistant Personality Template
+
+Copy this file to `SOUL.md` to override the default assistant personality block.
+`SOUL.md` is intentionally ignored because it can contain private preferences.
+
+Keep local content concise and avoid secrets. The application reads `SOUL.md`
+from the repository root when present.

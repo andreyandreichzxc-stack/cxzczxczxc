@@ -77,13 +77,23 @@ def guard_intent(intent: dict[str, Any]) -> GuardResult:
     if kind == "set_setting":
         key = str(schema.intent.get("key") or "")
         if key not in ALLOWED_SETTING_KEYS:
-            return GuardResult(False, schema.intent, f"Настройка `{key}` не разрешена.", "high")
+            return GuardResult(
+                False, schema.intent, f"Настройка `{key}` не разрешена.", "high"
+            )
 
     if kind == "forget_memory" and not schema.intent.get("confirm_multi"):
         query = str(schema.intent.get("query") or "")
-        broad = query.strip().lower() in {"all", "все", "всё", "*"} or len(query.strip()) < 3
+        broad = (
+            query.strip().lower() in {"all", "все", "всё", "*"}
+            or len(query.strip()) < 3
+        )
         if broad:
-            return GuardResult(False, schema.intent, "Слишком широкий запрос на удаление памяти.", "critical")
+            return GuardResult(
+                False,
+                schema.intent,
+                "Слишком широкий запрос на удаление памяти.",
+                "critical",
+            )
 
     tier = "context" if schema.risk_level in {"high", "critical"} else "volatile"
     try:
@@ -92,7 +102,8 @@ def guard_intent(intent: dict[str, Any]) -> GuardResult:
         if not allowed:
             return GuardResult(False, schema.intent, reason, schema.risk_level)
     except Exception:
-        return GuardResult(False, schema.intent, "Safety gate failed.", schema.risk_level)
+        return GuardResult(
+            False, schema.intent, "Safety gate failed.", schema.risk_level
+        )
 
     return schema
-

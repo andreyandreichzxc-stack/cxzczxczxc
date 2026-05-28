@@ -145,7 +145,6 @@ async def count_new_personal_facts_since(
     Personal facts are those with contact_id IS NULL and is_active=True.
     If since is None, counts ALL active personal facts.
     """
-    from sqlalchemy import func
 
     from src.db.models import Memory
 
@@ -212,3 +211,54 @@ async def update_persona(session: AsyncSession, persona: AdaptivePersona, **kwar
             setattr(persona, k, v)
     persona.updated_at = datetime.now(timezone.utc)
     await session.flush()
+
+
+async def search_session_messages(
+    session: AsyncSession, owner: User, query: str, limit: int = 5
+) -> list[dict]:
+    """FTS5 search across all session messages for this owner.
+
+    Uses the ``agent_session_messages_fts`` external-content virtual table
+    to find messages matching *query*.
+
+    Args:
+        session: Active SQLAlchemy async session.
+        owner: The ``User`` whose sessions to search.
+        query: Free-text search query (FTS5-escaped internally).
+        limit: Maximum number of results to return (default 5).
+
+    Returns:
+        List of dicts with keys: ``content``, ``role``, ``timestamp``,
+        ``session_id``.  Returns an empty list if the query is empty or
+        no results match.
+    """
+    from sqlalchemy import text
+    from src.core.memory.context_files import _fts5_simple_query
+
+    fts_q = _fts5_simple_query(query)
+    if not fts_q:
+        return []
+
+    rows = await session.execute(
+        text(
+            """
+            SELECT m.content, m.role, m.created_at, s.id as session_id
+            FROM agent_session_messages m
+            JOIN agent_sessions s ON m.session_id = s.id
+            WHERE agent_session_messages_fts MATCH :q
+              AND s.user_id = :uid
+            ORDER BY rank
+            LIMIT :lim
+            """
+        ),
+        {"q": fts_q, "uid": owner.id, "lim": limit},
+    )
+    return [
+        {
+            "content": r[0][:300] if r[0] else "",
+            "role": r[1],
+            "timestamp": r[2].isoformat() if r[2] else "",
+            "session_id": r[3],
+        }
+        for r in rows.fetchall()
+    ]

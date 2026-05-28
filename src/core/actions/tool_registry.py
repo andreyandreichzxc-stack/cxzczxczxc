@@ -26,6 +26,7 @@ Usage::
 
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import dataclass, field
 from functools import wraps
@@ -33,17 +34,48 @@ from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
-# Module-level: cached import of dateutil for _tool_set_reminder
-try:
-    from dateutil.parser import parse as _dateparse
+CONFIRMATION_RISKS = {"high", "critical"}
 
-    _HAS_DATEUTIL = True
-except ImportError:
-    _dateparse = None  # type: ignore[assignment]
-    _HAS_DATEUTIL = False
 
+def _handler_accepts_kwarg(handler: Callable[..., Awaitable[dict]], name: str) -> bool:
+    try:
+        signature = inspect.signature(handler)
+    except (TypeError, ValueError):
+        return False
+    return any(
+        param.kind == inspect.Parameter.VAR_KEYWORD or param.name == name
+        for param in signature.parameters.values()
+    )
 
 # ── ToolSpec ─────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ToolActionSpec:
+    """Optional per-action metadata for multi-action tools."""
+
+    name: str
+    description: str = ""
+    risk: str = "low"
+    read_only: bool = True
+    destructive: bool = False
+    idempotent: bool = True
+    requires_confirmation: bool = False
+    open_world: bool = False
+    user_content: bool = True
+
+
+@dataclass(frozen=True)
+class ToolActionMetadata:
+    """Optional per-action metadata for multi-action tools."""
+
+    risk: str | None = None
+    requires_confirmation: bool | None = None
+    read_only: bool | None = None
+    destructive: bool | None = None
+    idempotent: bool | None = None
+    open_world: bool | None = None
+    user_content: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +100,71 @@ class ToolSpec:
     risk: str = "low"
     requires_confirmation: bool = False
     params: dict[str, str] = field(default_factory=dict)
+    input_schema: dict[str, Any] | None = None  # JSON Schema for params
+    output_schema: dict[str, Any] | None = None  # JSON Schema for return value
+    action_metadata: dict[str, ToolActionMetadata] = field(default_factory=dict)
+
+    def get_action_metadata(self, action: Any) -> ToolActionMetadata | None:
+        action_spec = self.action_spec(action) if self.actions else None
+        if action_spec is not None:
+            return ToolActionMetadata(
+                risk=action_spec.risk,
+                requires_confirmation=action_spec.requires_confirmation,
+                read_only=action_spec.read_only,
+                destructive=action_spec.destructive,
+                idempotent=action_spec.idempotent,
+                open_world=action_spec.open_world,
+                user_content=action_spec.user_content,
+            )
+        if action is None:
+            return None
+        return self.action_metadata.get(str(action).strip().lower())
+
+    def effective_risk(self, action: Any = None) -> str:
+        metadata = self.get_action_metadata(action)
+        return (metadata.risk if metadata and metadata.risk is not None else self.risk).strip().lower()
+
+    def effective_requires_confirmation(self, action: Any = None) -> bool:
+        metadata = self.get_action_metadata(action)
+        if metadata and metadata.requires_confirmation is not None:
+            return metadata.requires_confirmation
+        return self.requires_confirmation
+
+    def effective_read_only(self, action: Any = None) -> bool:
+        metadata = self.get_action_metadata(action)
+        if metadata and metadata.read_only is not None:
+            return metadata.read_only
+        return self.effective_risk(action) == "low" and not self.effective_requires_confirmation(action)
+
+    def effective_destructive(self, action: Any = None) -> bool:
+        metadata = self.get_action_metadata(action)
+        if metadata and metadata.destructive is not None:
+            return metadata.destructive
+        return self.effective_risk(action) in CONFIRMATION_RISKS
+
+    def effective_idempotent(self, action: Any = None) -> bool:
+        metadata = self.get_action_metadata(action)
+        if metadata and metadata.idempotent is not None:
+            return metadata.idempotent
+        return self.effective_read_only(action)
+
+    def effective_open_world(self, action: Any = None) -> bool:
+        metadata = self.get_action_metadata(action)
+        if metadata and metadata.open_world is not None:
+            return metadata.open_world
+        return False
+
+    def effective_user_content(self, action: Any = None) -> bool:
+        metadata = self.get_action_metadata(action)
+        if metadata and metadata.user_content is not None:
+            return metadata.user_content
+        return True
+    actions: dict[str, ToolActionSpec] = field(default_factory=dict)
+
+    def action_spec(self, action: Any) -> ToolActionSpec | None:
+        if not action:
+            return None
+        return self.actions.get(str(action).strip().lower())
 
 
 # ── ToolRegistry ─────────────────────────────────────────────────────────
@@ -140,7 +237,81 @@ class ToolRegistry:
                 if spec.params:
                     params_str = ", ".join(f"{k}: {v}" for k, v in spec.params.items())
                     lines.append(f"  params: {params_str}")
+                if spec.input_schema:
+                    lines.append(f"  input_schema: {spec.input_schema}")
+                if spec.output_schema:
+                    lines.append(f"  output_schema: {spec.output_schema}")
             lines.append("")
+        return "\n".join(lines).rstrip()
+
+    def format_tools_with_schemas(self) -> str:
+        """Generate a compact text description of each tool with its JSON schemas.
+
+        The output is designed for LLM prompt injection — it describes what
+        each tool returns (output schema) and expects as input (input schema).
+
+        Example::
+
+            recall_memory (memory):
+              input:  {"query": "str", "limit": "int (default 8)", "mode": "normal|light|deep"}
+              output: {"ok": bool, "facts": [{fact, confidence, reason}], "found": int}
+        """
+        lines: list[str] = []
+        for category, tools in sorted(self.list_by_category().items()):
+            lines.append(f"## {category}")
+            for spec in sorted(tools, key=lambda s: s.name):
+                confirm = " ⚠️ confirmation" if spec.requires_confirmation else ""
+                lines.append(
+                    f"### {spec.name} ({spec.risk}{confirm})\n{spec.description}"
+                )
+                if spec.params:
+                    params_str = ", ".join(f"{k}: {v}" for k, v in spec.params.items())
+                    lines.append(f"  params: {params_str}")
+                if spec.input_schema:
+                    # Compact input schema description
+                    props = spec.input_schema.get("properties", {})
+                    required = set(spec.input_schema.get("required", []))
+                    param_descs: list[str] = []
+                    for pname, pinfo in props.items():
+                        typ = pinfo.get("type", "any")
+                        desc = pinfo.get("description", "")
+                        default = pinfo.get("default", None)
+                        extras = []
+                        if pname in required:
+                            extras.append("required")
+                        if default is not None:
+                            extras.append(f"default={default}")
+                        if pinfo.get("enum"):
+                            extras.append(f"enum={pinfo['enum']}")
+                        suffix = f" ({', '.join(extras)})" if extras else ""
+                        param_descs.append(f"    {pname}: {typ}{suffix} — {desc}")
+                    if param_descs:
+                        lines.append("  input_schema:")
+                        lines.extend(param_descs)
+                if spec.output_schema:
+                    # Compact output schema description
+                    props = spec.output_schema.get("properties", {})
+                    required = set(spec.output_schema.get("required", []))
+                    out_descs: list[str] = []
+                    for pname, pinfo in props.items():
+                        typ = pinfo.get("type", "any")
+                        desc = pinfo.get("description", "")
+                        extras = []
+                        if pname in required:
+                            extras.append("required")
+                        if pinfo.get("items"):
+                            items = pinfo["items"]
+                            if isinstance(items, dict):
+                                item_props = items.get("properties", {})
+                                if item_props:
+                                    sub = ", ".join(item_props.keys())
+                                    extras.append(f"items: {{{sub}}}")
+                        suffix = f" ({', '.join(extras)})" if extras else ""
+                        out_descs.append(f"    {pname}: {typ}{suffix} — {desc}")
+                    if out_descs:
+                        lines.append("  output_schema:")
+                        lines.extend(out_descs)
+                lines.append("")
         return "\n".join(lines).rstrip()
 
     # ------------------------------------------------------------------
@@ -170,10 +341,16 @@ class ToolRegistry:
         if spec is None:
             return {"error": f"Tool '{name}' not found"}
 
-        # Enforce requires_confirmation — caller must pass _confirmed=True
+        # Enforce confirmation for declared high-risk tools even if a spec
+        # forgot to set requires_confirmation.
         confirmed = params.pop("_confirmed", False)
-        if spec.requires_confirmation and not confirmed:
+        action_name = params.get("action")
+        risk = spec.effective_risk(action_name)
+        requires_confirmation = spec.effective_requires_confirmation(action_name)
+        if (requires_confirmation or risk in CONFIRMATION_RISKS) and not confirmed:
             return {"error": "requires confirmation"}
+        if _handler_accepts_kwarg(spec.handler, "_confirmed"):
+            params["_confirmed"] = confirmed
 
         try:
             result = await spec.handler(**params)
@@ -201,6 +378,10 @@ def tool(
     risk: str = "low",
     requires_confirmation: bool = False,
     params: dict[str, str] | None = None,
+    input_schema: dict[str, Any] | None = None,
+    output_schema: dict[str, Any] | None = None,
+    actions: dict[str, ToolActionSpec | dict[str, Any]] | None = None,
+    action_metadata: dict[str, ToolActionMetadata | dict[str, Any]] | None = None,
 ) -> Callable[[Callable[..., Awaitable[dict]]], Callable[..., Awaitable[dict]]]:
     """Decorator that registers an async function as a tool.
 
@@ -216,6 +397,8 @@ def tool(
             executing this tool (e.g. for destructive actions).
         params: Dict mapping parameter name → type hint string.
                 Example: ``{"query": "str", "limit": "int|None"}``.
+        input_schema: Optional JSON Schema describing input parameters.
+        output_schema: Optional JSON Schema describing the return value.
 
     Example::
 
@@ -229,6 +412,8 @@ def tool(
             return {"ok": True, "query": query}
     """
     tool_params = dict(params or {})
+    tool_actions = _normalize_tool_actions(actions)
+    normalized_action_metadata = _normalize_action_metadata(action_metadata)
 
     def decorator(
         func: Callable[..., Awaitable[dict]],
@@ -241,6 +426,10 @@ def tool(
             requires_confirmation=requires_confirmation,
             params=tool_params,
             handler=func,
+            input_schema=input_schema,
+            output_schema=output_schema,
+            action_metadata=normalized_action_metadata,
+            actions=tool_actions,
         )
         tool_registry.register(spec)
 
@@ -253,415 +442,40 @@ def tool(
     return decorator
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# Pre-populated tools
-# ══════════════════════════════════════════════════════════════════════════
-#
-# These wrap existing agent / service functions with the ``@tool``
-# decorator, providing standardised metadata and parameter interfaces.
-#
-# In production the caller injects runtime dependencies (provider, client,
-# session, …) via keyword arguments that the handler forwards as ``**kwargs``
-# to the underlying agent function.
-#
-# Every pre-populated tool follows the same contract:
-#   async def handler(param1: type, ..., **kwargs) -> dict
-# ══════════════════════════════════════════════════════════════════════════
+def _normalize_tool_actions(
+    values: dict[str, ToolActionSpec | dict[str, Any]] | None,
+) -> dict[str, ToolActionSpec]:
+    if not values:
+        return {}
+    normalized: dict[str, ToolActionSpec] = {}
+    for action, spec in values.items():
+        key = str(action).strip().lower()
+        if not key:
+            continue
+        if isinstance(spec, ToolActionSpec):
+            normalized[key] = spec
+            continue
+        payload = dict(spec)
+        payload.setdefault("name", key)
+        normalized[key] = ToolActionSpec(**payload)
+    return normalized
 
 
-@tool(
-    name="search_messages",
-    description=(
-        "Search messages by text query across chats. "
-        "Returns matching messages with surrounding context."
-    ),
-    category="search",
-    risk="low",
-    requires_confirmation=False,
-    params={"query": "str", "contact": "str|None", "limit": "int"},
-)
-async def _tool_search_messages(
-    query: str,
-    contact: str | None = None,
-    limit: int = 20,
-    **kwargs: Any,
-) -> dict[str, Any]:
-    """Search messages by text query across chats.
-
-    Resolves *contact* (fuzzy name match) to scope the search to a
-    single chat, then performs FTS5 full-text search over stored messages
-    via ``cross_chat_search``.
-
-    Runtime dependencies expected in **kwargs**:
-        session (:class:`sqlalchemy.ext.asyncio.AsyncSession`)
-        user (:class:`src.db.models.User`)
-        client (:class:`telethon.TelegramClient`, optional — for contact resolution)
-    """
-    session = kwargs["session"]
-    user = kwargs["user"]
-    client = kwargs.get("client")
-
-    # Resolve contact name → peer_id if specified
-    peer_id: int | None = None
-    if contact:
-        if client is None:
-            return {
-                "ok": False,
-                "error": "No Telegram client available for contact resolution",
-            }
-        try:
-            from src.core.contacts.contact_resolver import resolve as resolve_contact
-
-            candidates = await resolve_contact(client, user, contact, limit=1)
-            if candidates:
-                peer_id = candidates[0].peer_id
-        except Exception:
-            logger.exception(
-                "search_messages: contact resolution failed for %r", contact
-            )
-            return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
-
-    try:
-        from src.db.repo import cross_chat_search
-
-        results = await cross_chat_search(
-            session,
-            user,
-            query,
-            limit=limit,
-            peer_id=peer_id,
-        )
-        return {"ok": True, "results": results, "query": query}
-    except Exception:
-        logger.exception("search_messages: FTS search failed for %r", query)
-        return {"ok": False, "error": f"Search failed for '{query}'"}
-
-
-@tool(
-    name="summarize_chat",
-    description=(
-        "Summarise recent conversation with a contact. "
-        "Returns a concise summary of key topics and action items."
-    ),
-    category="chat",
-    risk="medium",
-    requires_confirmation=False,
-    params={"contact": "str", "limit": "int"},
-)
-async def _tool_summarize_chat(
-    contact: str,
-    limit: int = 100,
-    **kwargs: Any,
-) -> dict[str, Any]:
-    """Summarise recent conversation with a contact via LLM.
-
-    Resolves *contact* to a peer, fetches recent messages, converts them
-    to a transcript, and calls ``summarizer_agent.summarize``.
-
-    Runtime dependencies expected in **kwargs**:
-        session (:class:`sqlalchemy.ext.asyncio.AsyncSession`)
-        user (:class:`src.db.models.User`)
-        client (:class:`telethon.TelegramClient`, optional — for contact resolution)
-        provider (LLM provider with ``chat()`` method)
-    """
-    session = kwargs["session"]
-    user = kwargs["user"]
-    client = kwargs.get("client")
-    provider = kwargs.get("provider")
-
-    if provider is None:
-        return {"ok": False, "error": "No LLM provider available"}
-
-    # Resolve contact → peer_id
-    if client is None:
-        return {
-            "ok": False,
-            "error": "No Telegram client available for contact resolution",
-        }
-    try:
-        from src.core.contacts.contact_resolver import resolve as resolve_contact
-
-        candidates = await resolve_contact(client, user, contact, limit=1)
-    except Exception:
-        logger.exception("summarize_chat: contact resolution failed for %r", contact)
-        return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
-
-    if not candidates:
-        return {"ok": False, "error": f"Contact '{contact}' not found"}
-    peer_id = candidates[0].peer_id
-    display_name = candidates[0].display_name
-
-    # Fetch messages
-    try:
-        from src.db.repo import fetch_chat_messages
-
-        messages = await fetch_chat_messages(session, user, peer_id, limit=limit)
-    except Exception:
-        logger.exception("summarize_chat: fetch failed for peer_id=%s", peer_id)
-        return {"ok": False, "error": "Failed to fetch messages"}
-
-    if not messages:
-        return {
-            "ok": True,
-            "summary": None,
-            "contact": display_name,
-            "note": "No messages found",
-        }
-
-    # Convert to transcript text
-    try:
-        from src.core.contacts.chat_service import messages_to_transcript
-
-        text = messages_to_transcript(messages)
-    except Exception:
-        logger.exception("summarize_chat: transcript conversion failed")
-        return {"ok": False, "error": "Failed to convert messages to transcript"}
-
-    # Summarise via LLM
-    try:
-        from src.agents.summarizer_agent import summarize
-
-        result = await summarize(provider, text)
-        return {
-            "ok": True,
-            "summary": result.get("summary", ""),
-            "contact": display_name,
-            "message_count": len(messages),
-        }
-    except Exception:
-        logger.exception("summarize_chat: LLM summarization failed")
-        return {"ok": False, "error": "LLM summarization failed"}
-
-
-@tool(
-    name="draft_reply",
-    description=(
-        "Draft a reply message for a given contact and incoming message. "
-        "Returns suggested text with tone label."
-    ),
-    category="chat",
-    risk="medium",
-    requires_confirmation=True,
-    params={"contact": "str", "message": "str", "style": "str|None"},
-)
-async def _tool_draft_reply(
-    contact: str,
-    message: str,
-    style: str | None = None,
-    **kwargs: Any,
-) -> dict[str, Any]:
-    """Draft a reply to an incoming message from a contact via LLM.
-
-    Resolves *contact* to a peer, fetches recent conversation history
-    as context, and calls ``draft_agent.draft`` with optional style hint.
-
-    Runtime dependencies expected in **kwargs**:
-        session (:class:`sqlalchemy.ext.asyncio.AsyncSession`)
-        user (:class:`src.db.models.User`)
-        client (:class:`telethon.TelegramClient`, optional — for contact resolution)
-        provider (LLM provider with ``chat()`` method)
-    """
-    session = kwargs["session"]
-    user = kwargs["user"]
-    client = kwargs.get("client")
-    provider = kwargs.get("provider")
-
-    if provider is None:
-        return {"ok": False, "error": "No LLM provider available"}
-
-    # Resolve contact
-    if client is None:
-        return {
-            "ok": False,
-            "error": "No Telegram client available for contact resolution",
-        }
-    try:
-        from src.core.contacts.contact_resolver import resolve as resolve_contact
-
-        candidates = await resolve_contact(client, user, contact, limit=1)
-    except Exception:
-        logger.exception("draft_reply: contact resolution failed for %r", contact)
-        return {"ok": False, "error": f"Contact resolution failed for '{contact}'"}
-
-    if not candidates:
-        return {"ok": False, "error": f"Contact '{contact}' not found"}
-    peer_id = candidates[0].peer_id
-    sender_name = candidates[0].display_name
-
-    # Fetch history for context
-    history_text: str | None = None
-    try:
-        from src.db.repo import fetch_chat_messages
-        from src.core.contacts.chat_service import messages_to_transcript
-
-        history = await fetch_chat_messages(session, user, peer_id, limit=20)
-        if history:
-            history_text = messages_to_transcript(history)
-    except Exception:
-        logger.exception("draft_reply: history fetch failed for peer_id=%s", peer_id)
-        # Non-fatal: proceed without history
-
-    # Draft via LLM
-    try:
-        from src.agents.draft_agent import draft
-
-        result = await draft(
-            provider,
-            sender_name,
-            message,
-            history_text=history_text,
-            style_hint=style,
-        )
-        return {
-            "ok": True,
-            "draft": result.get("draft", ""),
-            "tone": result.get("tone", ""),
-            "contact": sender_name,
-        }
-    except Exception:
-        logger.exception("draft_reply: LLM drafting failed")
-        return {"ok": False, "error": "LLM draft generation failed"}
-
-
-@tool(
-    name="set_reminder",
-    description=(
-        "Create a reminder with optional due time. "
-        "Reminders are persisted and checked automatically by the scheduler."
-    ),
-    category="reminder",
-    risk="medium",
-    requires_confirmation=False,
-    params={"text": "str", "when": "str|None"},
-)
-async def _tool_set_reminder(
-    text: str,
-    when: str | None = None,
-    **kwargs: Any,
-) -> dict[str, Any]:
-    """Create a reminder (commitment) with optional due date/time.
-
-    Parses *when* via ``dateutil.parser`` (supports "tomorrow",
-    "in 2 hours", ISO-8601, etc.) and persists as a ``Commitment``
-    row via ``add_commitment``.
-
-    Runtime dependencies expected in **kwargs**:
-        session (:class:`sqlalchemy.ext.asyncio.AsyncSession`)
-        user (:class:`src.db.models.User`)
-    """
-    session = kwargs["session"]
-    user = kwargs["user"]
-
-    # Parse deadline
-    deadline = None
-    if when:
-        try:
-            if _HAS_DATEUTIL and _dateparse is not None:
-                deadline = _dateparse(when)
-            else:
-                # Fallback: ISO-format only (e.g. "2026-05-25T14:00:00")
-                from datetime import datetime as _dt
-
-                s2 = when.strip().replace("Z", "+00:00")
-                deadline = _dt.fromisoformat(s2)
-
-            if deadline.tzinfo is None:
-                from datetime import timezone
-
-                deadline = deadline.replace(tzinfo=timezone.utc)
-        except Exception:
-            logger.exception("set_reminder: cannot parse date %r", when)
-            return {"ok": False, "error": f"Cannot parse date/time: {when}"}
-
-    # Store commitment
-    try:
-        from src.db.repo import add_commitment
-
-        c = await add_commitment(
-            session,
-            user_id=user.id,
-            peer_id=0,
-            peer_name="self",
-            message_id=0,
-            direction="mine",
-            text=text,
-            deadline_at=deadline,
-        )
-        return {
-            "ok": True,
-            "id": c.id,
-            "text": text,
-            "deadline": deadline.isoformat() if deadline else None,
-        }
-    except Exception:
-        logger.exception("set_reminder: failed to persist commitment")
-        return {"ok": False, "error": "Failed to save reminder"}
-
-
-@tool(
-    name="list_contacts",
-    description=(
-        "Search the user's contact list by name or username. "
-        "Returns matching contacts with display name and peer info."
-    ),
-    category="contacts",
-    risk="low",
-    requires_confirmation=False,
-    params={"query": "str|None", "limit": "int"},
-)
-async def _tool_list_contacts(
-    query: str | None = None,
-    limit: int = 20,
-    **kwargs: Any,
-) -> dict[str, Any]:
-    """List or search the user's synced contacts.
-
-    When *query* is provided, resolves via fuzzy matching
-    (``contact_resolver.resolve``).  When *query* is omitted, returns
-    contacts from the local database (``list_contacts`` in repo).
-
-    Runtime dependencies expected in **kwargs**:
-        session (:class:`sqlalchemy.ext.asyncio.AsyncSession`)
-        user (:class:`src.db.models.User`)
-        client (:class:`telethon.TelegramClient`, optional — for contact resolution)
-    """
-    session = kwargs["session"]
-    user = kwargs["user"]
-    client = kwargs.get("client")
-
-    try:
-        if query:
-            if client is None:
-                return {
-                    "ok": False,
-                    "error": "No Telegram client available for contact search",
-                }
-            from src.core.contacts.contact_resolver import resolve as resolve_contact
-
-            candidates = await resolve_contact(client, user, query, limit=limit)
-            results = [
-                {
-                    "peer_id": c.peer_id,
-                    "name": c.display_name,
-                    "username": c.username,
-                    "score": c.score,
-                }
-                for c in candidates
-            ]
+def _normalize_action_metadata(
+    values: dict[str, ToolActionMetadata | dict[str, Any]] | None,
+) -> dict[str, ToolActionMetadata]:
+    if not values:
+        return {}
+    normalized: dict[str, ToolActionMetadata] = {}
+    for action, metadata in values.items():
+        key = str(action).strip().lower()
+        if not key:
+            continue
+        if isinstance(metadata, ToolActionMetadata):
+            normalized[key] = metadata
         else:
-            from src.db.repo import list_contacts as db_list_contacts
+            normalized[key] = ToolActionMetadata(**metadata)
+    return normalized
 
-            contacts = await db_list_contacts(session, user)
-            results = [
-                {
-                    "peer_id": c.peer_id,
-                    "name": c.display_name,
-                    "username": c.username,
-                    "kind": c.peer_kind,
-                }
-                for c in contacts[:limit]
-            ]
-        return {"ok": True, "contacts": results, "count": len(results)}
-    except Exception:
-        logger.exception("list_contacts: failed for query=%r", query)
-        return {"ok": False, "error": "Failed to list contacts"}
+
+# ══════════════════════════════════════════════════════════════════════════

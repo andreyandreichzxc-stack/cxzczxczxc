@@ -258,7 +258,15 @@ class Trajectory(Base):
 
 
 class Skill(Base):
-    """Prompt-level procedural memory. V1 skills are hints, not executable code."""
+    """Prompt-level procedural memory. V1 skills are hints, not executable code.
+
+    V2 additions (SkillOpt-inspired):
+    - version: semver versioning for skill evolution tracking
+    - edit_history_json: bounded edit history (append/insert/replace/delete)
+    - rejected_edits_json: rejected-edit buffer for negative feedback
+    - validation_score: last validation gate score (0.0-1.0)
+    - best_body: best-performing body snapshot (like best_skill.md)
+    """
 
     __tablename__ = "skills"
 
@@ -285,6 +293,25 @@ class Skill(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+    # ── V2: SkillOpt-inspired fields ──
+    version: Mapped[str] = mapped_column(
+        String(32), default="1.0.0", nullable=False
+    )  # semver version for skill evolution
+    edit_history_json: Mapped[list | None] = mapped_column(
+        JSON, nullable=True
+    )  # [{op, target, content, timestamp, score_before, score_after}]
+    rejected_edits_json: Mapped[list | None] = mapped_column(
+        JSON, nullable=True
+    )  # [{op, target, content, reason, timestamp}] — negative feedback buffer
+    validation_score: Mapped[float | None] = mapped_column(
+        nullable=True
+    )  # last validation gate score (0.0-1.0), None = never validated
+    best_body: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # best-performing body snapshot (auto-saved on validation success)
+    last_compressed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, default=None
+    )  # timestamp of last skill body compression
 
 
 class SkillUsage(Base):

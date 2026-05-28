@@ -23,6 +23,7 @@ from src.core.contacts.send_guard import store_undo
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import get_or_create_user as _get_or_create_user
 from src.db.session import get_session
+from src.llm.base import TaskType
 from src.llm.router import build_provider
 from src.userbot import get_active_telethon_client
 
@@ -272,7 +273,7 @@ async def show_draft_variants(
     """Генерирует 3 варианта черновика и показывает их с клавиатурой выбора."""
     async with get_session() as session:
         owner = await _get_or_create_user(session, callback.from_user.id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.DRAFT)
     if provider is None:
         await callback.answer("Не задан LLM-ключ.", show_alert=True)
         return
@@ -381,7 +382,7 @@ async def cb_draft_improve(callback: CallbackQuery) -> None:
 
     async with get_session() as session:
         owner = await _get_or_create_user(session, callback.from_user.id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.DRAFT)
     if provider is None:
         await callback.answer("Не задан LLM-ключ.", show_alert=True)
         return

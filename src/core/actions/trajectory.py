@@ -67,6 +67,17 @@ async def record_trajectory(
                 except Exception:
                     logger.debug("Pattern cache recording skipped", exc_info=True)
 
+            # Feature 3: Record skill usage telemetry
+            if used_skills_json and row.id:
+                try:
+                    from src.core.intelligence.skills import record_skill_usages
+
+                    await record_skill_usages(
+                        telegram_id, used_skills_json, row.id, success
+                    )
+                except Exception:
+                    logger.debug("Skill usage recording skipped", exc_info=True)
+
             return row.id
     except Exception:
         logger.debug("Failed to record trajectory", exc_info=True)

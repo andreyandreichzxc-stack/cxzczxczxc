@@ -23,6 +23,7 @@ class Gates:
         check: Callable[[], bool],
         fallback: str | None = None,
         description: str = "",
+        install_hint: str = "",
     ) -> "Gates":
         """Register a dependency check.
 
@@ -31,6 +32,7 @@ class Gates:
             check: callable that returns True if dependency is available
             fallback: what to use if check fails, e.g. "openai_whisper_api", None = disable
             description: human-readable name
+            install_hint: pip install command for the missing dependency
         """
         self._checks.append(
             {
@@ -38,6 +40,7 @@ class Gates:
                 "check": check,
                 "fallback": fallback,
                 "description": description or name,
+                "install_hint": install_hint,
                 "result": None,
             }
         )
@@ -79,6 +82,28 @@ class Gates:
         for entry in self._checks:
             if entry["name"] == name:
                 return entry.get("fallback") if entry["result"] != "passed" else None
+        return None
+
+    def get_install_hint(self, name: str) -> str:
+        for entry in self._checks:
+            if entry["name"] == name:
+                return entry.get("install_hint", "")
+        return ""
+
+    @property
+    def missing_install_hints(self) -> list[dict]:
+        """Returns [{name, description, install_hint}] for all failed gates with hints."""
+        hints = []
+        for entry in self._checks:
+            if entry["result"] != "passed" and entry.get("install_hint"):
+                hints.append(
+                    {
+                        "name": entry["name"],
+                        "description": entry["description"],
+                        "install_hint": entry["install_hint"],
+                    }
+                )
+        return hints
         return None
 
     @property

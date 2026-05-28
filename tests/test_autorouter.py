@@ -6,7 +6,7 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
-os.environ.setdefault("ENCRYPTION_KEY", "HmsOzSAxuyfb7zet2nmwhFkgWfH5z6Lsr3tW7MO8GDI=")
+os.environ.setdefault("ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 os.environ.setdefault("BOT_TOKEN", "test:token")
 os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
 
@@ -134,10 +134,10 @@ class TestMakePlan:
 
         with (
             patch(
-                "src.core.intelligence.smart_autorouter.get_session"
+                "src.core.intelligence.routing.planner.get_session"
             ) as mock_get_session,
             patch(
-                "src.core.intelligence.smart_autorouter.get_or_create_user",
+                "src.core.intelligence.routing.planner.get_or_create_user",
                 return_value=mock_owner,
             ),
             patch(

@@ -6,7 +6,7 @@ import logging
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import get_or_create_user, list_memories
 from src.db.session import get_session
-from src.llm.base import ChatMessage
+from src.llm.base import ChatMessage, TaskType
 from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ async def tag_fact(
                     ),
                 ),
             ],
-            heavy=False,
+            task_type=TaskType.MEMORY,
         )
     except Exception:
         logger.exception("Tagging LLM call failed for fact: %r", fact[:60])
@@ -116,7 +116,7 @@ async def tag_facts_batch(
                     ),
                 ),
             ],
-            heavy=False,
+            task_type=TaskType.MEMORY,
         )
     except Exception:
         logger.exception("Batch tagging LLM call failed for %d facts", len(facts))
@@ -161,7 +161,7 @@ async def tag_all_untagged(owner_id: int) -> int:
     """Проставляет теги для всех нетэгированных фактов."""
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.MEMORY)
         if not provider:
             return 0
         memories = await list_memories(session, owner, limit=200)

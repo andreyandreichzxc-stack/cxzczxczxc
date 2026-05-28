@@ -8,6 +8,7 @@ import logging
 from src.db.models import Memory
 from src.db.repo import get_contact, get_or_create_user, list_memories
 from src.db.session import get_session
+from src.llm.base import TaskType
 from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ async def get_neighbors(owner_id: int, memory_id: int, limit: int = 3) -> list[d
 
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.SEARCH)
         mem = await session.get(Memory, memory_id)
         if not mem or mem.user_id != owner.id:
             return []
@@ -110,7 +111,7 @@ async def find_cross_contact_bridges(owner_id: int) -> list[dict]:
         if len(active) < 10:
             return []
 
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.SEARCH)
         if not provider:
             return []
 

@@ -27,6 +27,7 @@ from src.db.repo import (
     get_or_create_user,
 )
 from src.db.session import get_session
+from src.llm.base import TaskType
 from src.llm.router import build_provider
 from src.userbot.manager import UserbotManager
 
@@ -50,15 +51,19 @@ from .free_text_pipeline import (
 )
 from src.core.humanizer import record_humanizer_feedback, _pop_last_humanized
 from .rate_limiter import check_rate_limit
+from src.core.security.prompt_injection_scanner import scan_content
 
 
 logger = logging.getLogger(__name__)
 router = Router(name="free_text")
 router.message.filter(OwnerOnly())
 
+# Singalong search cache: user_id → list of search result dicts
+_singalong_search_cache: dict = {}
+
 
 # Voice transcription queue (non-blocking background processing)
-_voice_queue: asyncio.Queue = asyncio.Queue(maxsize=20)
+_voice_queue: asyncio.Queue = asyncio.Queue(maxsize=settings.max_voice_queue_size)
 _voice_worker_task: asyncio.Task | None = None
 
 # Per-user active tasks for priority preemption
@@ -256,6 +261,7 @@ async def _process_text_fallback(
             now_local=now_local_str,
             tz_name=tz_name,
             history_block=history_block,
+            memory_context=getattr(plan, "memory_context", "") or None,
             user_id=owner_telegram_id,
         )
     except Exception as e:
@@ -331,7 +337,6 @@ async def _process_text(
         await message.answer("⏳ Подожди пару секунд, обрабатываю предыдущий запрос…")
         return
 
-    _used_skills: list[dict] = []
     ctx = await _get_owner_context(message.from_user.id)
     tz_name = str(ctx["tz_name"])
     owner_telegram_id = int(ctx["owner_telegram_id"])  # type: ignore[arg-type]
@@ -480,6 +485,272 @@ async def _process_text(
         )
         return
 
+    # ── Stage 0e: Singalong — подпевание строчками из песен ───────────
+    # Flow: LLM определяет песню → спрашивает подтверждение → подпевает
+    # Если отказано → ищет через DuckDuckGo → снова спрашивает
+    # ⚠️ Ответ отправляется НАПРЯМУЮ через message.answer(), минуя humanizer.
+    # Все LLM output проходит через sanitize_html() для защиты от HTML injection.
+    from src.core.intelligence.singalong import (
+        _is_confirmation,
+        _looks_like_lyrics,
+        identify_and_get_next_line,
+        get_singalong_reply,
+        consume_pending_singalong,
+        peek_pending_singalong,
+        store_pending_singalong,
+    )
+
+    # Импорт _search_lyrics для denial flow
+    from src.core.intelligence.singalong import _search_lyrics
+
+    async def _singalong_identify(
+        text: str,
+        telegram_id: int,
+        use_heavy: bool,
+        *,
+        search_hint: str | None = None,
+    ) -> dict | None:
+        """Определить песню через LLM. Возвращает {song, artist, next_line} или None."""
+        async with get_session() as session:
+            owner = await get_or_create_user(session, telegram_id)
+            provider = await build_provider(
+                session, owner, purpose="main", task_type=TaskType.DEFAULT
+            )
+        if not provider:
+            return None
+        return await identify_and_get_next_line(
+            text, provider, heavy=use_heavy, search_hint=search_hint
+        )
+
+    async def _singalong_get_reply(
+        text: str,
+        telegram_id: int,
+        use_heavy: bool,
+    ) -> str | None:
+        """Получить следующую строчку через LLM."""
+        async with get_session() as session:
+            owner = await get_or_create_user(session, telegram_id)
+            provider = await build_provider(
+                session, owner, purpose="main", task_type=TaskType.DEFAULT
+            )
+        if not provider:
+            return None
+        return await get_singalong_reply(text, provider, heavy=use_heavy)
+
+    async def _ask_singalong_confirmation(
+        lyrics: str,
+        identified: dict | None,
+    ) -> None:
+        """Общий хелпер: сохранить pending и отправить подтверждение."""
+        if identified and identified.get("song"):
+            title = identified["song"]
+            artist = identified.get("artist", "")
+            display = f"{title}" + (f" — {artist}" if artist else "")
+            await store_pending_singalong(
+                owner_telegram_id,
+                lyrics,
+                song_title=display,
+                next_line=identified.get("next_line"),
+            )
+            await message.answer(sanitize_html(f"Это {display}? Подпевать? 🎵"))
+        else:
+            await store_pending_singalong(owner_telegram_id, lyrics)
+            await message.answer("Подпевать тебе? 🎵")
+
+    async def _try_singalong() -> bool:
+        """Stage 0e: попробовать обработать как текст песни. Возвращает True если сообщение consumed."""
+        try:
+            pending = await peek_pending_singalong(owner_telegram_id)
+
+            # ── Pending exists ──────────────────────────────────────
+            if pending:
+                # Новая песня при существующем pending — заменяем
+                if _looks_like_lyrics(raw):
+                    await consume_pending_singalong(owner_telegram_id)
+                    _singalong_search_cache.pop(owner_telegram_id, None)
+                    identified = await _singalong_identify(
+                        raw, owner_telegram_id, use_heavy
+                    )
+                    await _ask_singalong_confirmation(raw, identified)
+                    _fire_record_trajectory(
+                        owner_telegram_id,
+                        request_text=raw,
+                        route_mode="singalong_ask",
+                        intent_json={"intent": "singalong", "phase": "ask"},
+                        response_text="Подпевать тебе? 🎵",
+                        success=True,
+                        latency_ms=int((time.monotonic() - turn_started) * 1000),
+                    )
+                    return True
+
+                # Проверить confirmation/denial
+                decision = _is_confirmation(raw)
+
+                # ── Подтверждение ───────────────────────────────────
+                if decision is True:
+                    data = await consume_pending_singalong(owner_telegram_id)
+                    if not data:
+                        return False  # pending истёк
+
+                    if data.get("next_line"):
+                        await message.answer(sanitize_html(data["next_line"]))
+                        _fire_record_trajectory(
+                            owner_telegram_id,
+                            request_text=raw,
+                            route_mode="singalong",
+                            intent_json={"intent": "singalong"},
+                            response_text=data["next_line"],
+                            success=True,
+                            latency_ms=int((time.monotonic() - turn_started) * 1000),
+                        )
+                        return True
+
+                    # Нет next_line — вызываем LLM
+                    reply = await _singalong_get_reply(
+                        data["lyrics"], owner_telegram_id, use_heavy
+                    )
+                    if reply:
+                        await message.answer(sanitize_html(reply))
+                        _fire_record_trajectory(
+                            owner_telegram_id,
+                            request_text=raw,
+                            route_mode="singalong",
+                            intent_json={"intent": "singalong"},
+                            response_text=reply,
+                            success=True,
+                            latency_ms=int((time.monotonic() - turn_started) * 1000),
+                        )
+                        return True
+                    await message.answer("Не узнал эту песню \U0001f914")
+                    return True
+
+                # ── Отклонение ──────────────────────────────────────
+                if decision is False:
+                    data = await consume_pending_singalong(owner_telegram_id)
+                    if not data:
+                        return False  # pending истёк
+
+                    # Ищем через DuckDuckGo (общий хелпер из singalong)
+                    search_items = await _search_lyrics(data["lyrics"])
+
+                    if search_items:
+                        variants = []
+                        for i, item in enumerate(search_items[:3], 1):
+                            t = sanitize_html(item.get("title", "?"))
+                            variants.append(f"{i}. {t}")
+                        text = "Какая из этих?\n" + "\n".join(variants)
+                        await message.answer(text)
+
+                        # Сохраняем pending для numeric selection
+                        await store_pending_singalong(
+                            owner_telegram_id,
+                            data["lyrics"],
+                            song_title=search_items[0].get("title", ""),
+                            next_line=None,
+                        )
+                        _singalong_search_cache[owner_telegram_id] = search_items[:3]
+                        _fire_record_trajectory(
+                            owner_telegram_id,
+                            request_text=raw,
+                            route_mode="singalong_search",
+                            intent_json={"intent": "singalong", "phase": "search"},
+                            response_text=text,
+                            success=True,
+                            latency_ms=int((time.monotonic() - turn_started) * 1000),
+                        )
+                        return True
+
+                    await message.answer("Не нашёл такую песню в интернете \U0001f914")
+                    _fire_record_trajectory(
+                        owner_telegram_id,
+                        request_text=raw,
+                        route_mode="singalong_fail",
+                        intent_json={"intent": "singalong", "result": "not_found"},
+                        response_text="Не нашёл такую песню",
+                        success=True,
+                        latency_ms=int((time.monotonic() - turn_started) * 1000),
+                    )
+                    return True
+
+                # ── Numeric selection (1/2/3) после поиска ──────────
+                stripped_num = raw.strip()
+                if (
+                    stripped_num in ("1", "2", "3")
+                    and owner_telegram_id in _singalong_search_cache
+                ):
+                    cache = _singalong_search_cache.pop(owner_telegram_id)
+                    idx = int(stripped_num) - 1
+                    if 0 <= idx < len(cache):
+                        chosen = cache[idx]
+                        title = chosen.get("title", "")
+                        # Re-peek чтобы не использовать stale pending
+                        current = await peek_pending_singalong(owner_telegram_id)
+                        if not current:
+                            return False
+                        # Пытаемся определить next_line через LLM с контекстом
+                        identified = await _singalong_identify(
+                            current.get("lyrics", raw),
+                            owner_telegram_id,
+                            use_heavy,
+                            search_hint=title,
+                        )
+                        if identified and identified.get("next_line"):
+                            await message.answer(sanitize_html(identified["next_line"]))
+                            await consume_pending_singalong(owner_telegram_id)
+                            _fire_record_trajectory(
+                                owner_telegram_id,
+                                request_text=raw,
+                                route_mode="singalong",
+                                intent_json={"intent": "singalong", "selected": title},
+                                response_text=identified["next_line"],
+                                success=True,
+                                latency_ms=int(
+                                    (time.monotonic() - turn_started) * 1000
+                                ),
+                            )
+                            return True
+                        # LLM не смог — спрашиваем уточнение
+                        await consume_pending_singalong(owner_telegram_id)
+                        _singalong_search_cache.pop(owner_telegram_id, None)
+                        await message.answer(
+                            f"Не могу найти текст «{sanitize_html(title)}». Напиши название песни?"
+                        )
+                        return True
+                    # Неверный номер — очищаем кеш
+                    _singalong_search_cache.pop(owner_telegram_id, None)
+
+                # decision is None + не numeric — другое сообщение, идём дальше
+                return False
+
+            # ── Нет pending — новое сообщение ───────────────────────
+            # Clean stale search cache from previous sessions
+            _singalong_search_cache.pop(owner_telegram_id, None)
+
+            if _looks_like_lyrics(raw):
+                identified = await _singalong_identify(
+                    raw, owner_telegram_id, use_heavy
+                )
+                await _ask_singalong_confirmation(raw, identified)
+                _fire_record_trajectory(
+                    owner_telegram_id,
+                    request_text=raw,
+                    route_mode="singalong_ask",
+                    intent_json={"intent": "singalong", "phase": "ask"},
+                    response_text="Подпевать тебе? 🎵",
+                    success=True,
+                    latency_ms=int((time.monotonic() - turn_started) * 1000),
+                )
+                return True
+
+            return False
+
+        except Exception:
+            logger.warning("singalong check failed", exc_info=True)
+            return False
+
+    if await _try_singalong():
+        return
+
     # Stage 1: Adaptive instructions
     if await check_instructions(raw, owner_telegram_id, message):
         return
@@ -534,10 +805,14 @@ async def _process_text(
     purpose = plan.tasks[0].purpose.value if plan.tasks else "main"
     async with get_session() as session:
         owner_db = await get_or_create_user(session, owner_telegram_id)
-        provider = await build_provider(session, owner_db, purpose=purpose)
+        provider = await build_provider(
+            session, owner_db, purpose=purpose, task_type=TaskType.DEFAULT
+        )
         if provider is None and purpose != "main":
             logger.debug("No key for purpose '%s', falling back to main", purpose)
-            provider = await build_provider(session, owner_db, purpose="main")
+            provider = await build_provider(
+                session, owner_db, purpose="main", task_type=TaskType.DEFAULT
+            )
 
     if provider is None:
         await message.answer(
@@ -610,7 +885,6 @@ async def _process_text(
                     )
             except asyncio.CancelledError:
                 logger.debug("Maestro task cancelled for user %s", owner_telegram_id)
-                await message.answer("⏯ Предыдущий запрос отменён.")
             except Exception as e:
                 logger.exception(
                     "Maestro background task failed for user %s", owner_telegram_id
@@ -671,27 +945,42 @@ async def free_text(
     if not raw:
         return
 
-    # 🎭 Onboarding: первый контакт → предложить настроить личность
     uid = message.from_user.id
+
+    # Scan for prompt injection in user input
+    scan_result = scan_content(raw, f"user:{uid}")
+    if scan_result.blocked:
+        logger.warning(
+            "Prompt injection blocked from user %d: %s (%s)",
+            uid,
+            scan_result.category,
+            scan_result.match,
+        )
+        await message.answer(
+            "⚠️ Сообщение содержит потенциально опасные конструкции и было заблокировано.\n"
+            "Если это ошибка — переформулируйте запрос."
+        )
+        return
+
+    # 🎭 Onboarding: первый контакт → предложить настроить личность
     from src.db.repo import get_persona
 
+    is_new = False
     async with get_session() as session:
         owner = await get_or_create_user(session, uid)
-        p = await get_persona(session, owner)
 
-        is_new = p.total_interactions == 0
+        # Atomically: UPDATE ... SET total_interactions=1 WHERE total_interactions=0
+        # If rowcount==1, this is a new user (no race condition possible)
+        from src.db.models._learning import AdaptivePersona
+        from sqlalchemy import update as sa_update
 
-        if is_new:
-            # Атомарно: сразу ставим 1 чтобы избежать двойного onboarding при race
-            from src.db.models._learning import AdaptivePersona
-            from sqlalchemy import update as sa_update
-
-            await session.execute(
-                sa_update(AdaptivePersona)
-                .where(AdaptivePersona.user_id == owner.id)
-                .values(total_interactions=1)
-            )
-            await session.commit()
+        result = await session.execute(
+            sa_update(AdaptivePersona)
+            .where(AdaptivePersona.user_id == owner.id)
+            .where(AdaptivePersona.total_interactions == 0)
+            .values(total_interactions=1)
+        )
+        is_new = result.rowcount > 0
 
     if is_new:
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -758,6 +1047,18 @@ async def free_text(
             pass  # hooks are optional, never break core flow
         raise
 
+    # ── Session recording (non-blocking, best-effort) ─────────────────
+    try:
+        from src.core.memory.session_recorder import record_turn
+
+        async with get_session() as rec_session:
+            await record_turn(rec_session, uid, "user", raw[:4000])
+            await record_turn(rec_session, uid, "assistant", "(ответ отправлен)")
+    except Exception:
+        logger.warning(
+            "Failed to record conversation turn for user %s", uid, exc_info=True
+        )
+
 
 @router.message(F.voice | F.audio)
 async def free_voice(
@@ -815,7 +1116,7 @@ async def free_voice(
                     mistral_key,
                 )
             ),
-            timeout=10.0,
+            timeout=settings.voice_queue_timeout,
         )
     except asyncio.TimeoutError:
         logger.warning(

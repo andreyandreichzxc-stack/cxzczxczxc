@@ -11,6 +11,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from src.bot.filters import OwnerOnly
+from src.core.infra.formatting import bold
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import (
     cross_chat_search,
@@ -48,7 +49,7 @@ async def cmd_timeline(
             hits = await fts_search(session, owner.id, query, limit=20)
 
         if not hits:
-            await message.answer(f"По теме «{query}» ничего не найдено.")
+            await message.answer(f"По теме «{sanitize_html(query)}» ничего не найдено.")
             return
 
         # Группировка по peer_id
@@ -64,7 +65,7 @@ async def cmd_timeline(
                 lines.append("⚠ Показаны первые 5 чатов.")
                 break
             name = peer_hits[0].peer_name or peer_hits[0].sender_name or str(peer_id)
-            lines.append(f"🧑 {sanitize_html(name)} ({len(peer_hits)} совпад.)")
+            lines.append(f"🧑 {bold(sanitize_html(name))} ({len(peer_hits)} совпад.)")
             for h in peer_hits[:3]:
                 date_str = h.date.strftime("%d.%m") if h.date else ""
                 snippet = (h.snippet or "")[:80]
@@ -86,7 +87,7 @@ async def cmd_timeline(
             lines.append("⚠ Показаны первые 5 чатов.")
             break
         name = r["display_name"] or str(r["peer_id"])
-        lines.append(f"🧑 {sanitize_html(name)} ({r['total_matches']} совпад.)")
+        lines.append(f"🧑 {bold(sanitize_html(name))} ({r['total_matches']} совпад.)")
         for s in r["snippets"]:
             date_str = s["date"].strftime("%d.%m") if s.get("date") else ""
             text = (s["text"] or "")[:80]

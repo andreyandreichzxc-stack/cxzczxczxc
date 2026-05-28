@@ -22,6 +22,7 @@ from src.core.infra.timeutil import (
     fmt_local,
 )
 from src.core.services.chat_actions import (
+    ask_chat_action,
     catchup_action,
     draft_reply_action,
     extract_tasks_action,
@@ -43,7 +44,9 @@ from src.db.repo import (
     upsert_contact,
 )
 from src.db.session import get_session
-from src.llm.router import _ensure_utc, build_provider, _provider_class_for
+from src.llm.base import TaskType
+from src.core.infra.timeutil import ensure_utc as _ensure_utc
+from src.llm.router import build_provider, _provider_class_for
 from src.userbot import get_active_telethon_client
 
 from .free_text_common import (
@@ -58,6 +61,12 @@ from .free_text_memory import (
     _exec_list_memories,
     _exec_extract_memories,
     _exec_check_memories,
+    _exec_update_memory,
+    _exec_link_memories,
+    _exec_show_memory_health,
+    _exec_show_memory_graph,
+    _exec_show_sessions,
+    _exec_show_suggestions,
 )
 from .free_text_settings import (
     _exec_set_setting,
@@ -78,6 +87,12 @@ exec_forget_memory = _exec_forget_memory
 exec_list_memories = _exec_list_memories
 exec_extract_memories = _exec_extract_memories
 exec_check_memories = _exec_check_memories
+exec_update_memory = _exec_update_memory
+exec_link_memories = _exec_link_memories
+exec_show_memory_health = _exec_show_memory_health
+exec_show_memory_graph = _exec_show_memory_graph
+exec_show_sessions = _exec_show_sessions
+exec_show_suggestions = _exec_show_suggestions
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +154,7 @@ async def find_chats_and_offer(message, client, query: str, action: str) -> None
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.DEFAULT)
     if provider is None:
         await message.answer("Нужен LLM-ключ (/settings → 🔑).")
         return
@@ -293,7 +308,7 @@ async def exec_add_reminders_from_chat(intent, message, userbot_manager) -> None
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.DEFAULT)
     if provider is None:
         await message.answer("Нужен LLM-ключ (/settings → 🔑).")
         return
@@ -441,7 +456,9 @@ async def exec_full_analysis(intent, message) -> None:
     async def _run():
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
-            provider = await build_provider(session, owner)
+            provider = await build_provider(
+                session, owner, task_type=TaskType.SUMMARIZE
+            )
             if not provider:
                 await status_msg.edit_text("❌ Нет LLM провайдера.")
                 return
@@ -486,12 +503,17 @@ async def exec_add_api_key(intent: dict, message: Message) -> None:
 
     if not provider or not keys_raw:
         await message.answer(
-            "🤷 Не хватает данных: укажи провайдера (openai/gemini/mistral) и ключ."
+            "🤷 Укажи провайдера и ключ.\n"
+            "Например: <i>openai sk-abc123</i>\n"
+            "С кастомным API: <i>openai sk-abc https://мой-api.com/v1</i>\n"
+            "Подробнее: /docs endpoints"
         )
         return
 
-    if provider not in ("openai", "gemini", "mistral"):
-        await message.answer("❌ Провайдер: openai, gemini или mistral")
+    if provider not in ("openai", "gemini", "mistral", "cloudflare", "openrouter"):
+        await message.answer(
+            "❌ Провайдер: openai, gemini, mistral, cloudflare, openrouter"
+        )
         return
 
     # Split by comma for bulk
@@ -499,6 +521,15 @@ async def exec_add_api_key(intent: dict, message: Message) -> None:
     if not keys:
         await message.answer("❌ Пустой список ключей.")
         return
+
+    # Detect endpoint from keys_raw: if first key contains https:// in the value
+    endpoint: str | None = None
+    for k in keys:
+        parts = k.split(None, 1)  # split key from potential endpoint
+        if len(parts) == 2 and parts[1].startswith("http"):
+            endpoint = parts[1]
+            keys = [parts[0]]  # only the first key part
+            break
 
     # Delete message with keys from chat (security).
     # In private chats bots can't delete user messages — we ask
@@ -526,6 +557,7 @@ async def exec_add_api_key(intent: dict, message: Message) -> None:
                 purpose=purpose,
                 label=f"{provider}/{purpose}",
                 priority=i,
+                endpoint=endpoint,
             )
             last_slot_id = slot.id
             if not is_new:
@@ -694,7 +726,9 @@ async def exec_show_style(intent: dict, message: Message) -> None:
             ]
             if matched:
                 target = matched[0]
-                provider = await build_provider(session, owner)
+                provider = await build_provider(
+                    session, owner, task_type=TaskType.CLASSIFY
+                )
                 if provider:
                     profile = await update_style_profile_for_contact(
                         provider, message.from_user.id, target.peer_id
@@ -897,7 +931,7 @@ async def exec_classic_send_message(
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.DEFAULT)
 
     recipient = (intent.get("recipient") or "").strip()
     text = (intent.get("text") or "").strip()
@@ -1082,6 +1116,27 @@ async def exec_classic_catchup(
     result = await catchup_action(message.from_user.id, peer_id, userbot_manager)
     if result is None:
         await message.answer("⚠️ Не удалось подготовить контекст.")
+        return
+    await message.answer(sanitize_html(result.html), reply_markup=result.markup)
+
+
+async def exec_classic_ask_chat(
+    intent: dict, message: Message, state, userbot_manager, *, tz_name: str
+) -> None:
+    peer_id = await classic_resolve_contact(intent, message, userbot_manager)
+    if peer_id is None:
+        return
+    query = (intent.get("query") or "").strip()
+    await message.answer("🤖 Анализирую чат…")
+    result = await ask_chat_action(
+        telegram_id=message.from_user.id,
+        peer_id=peer_id,
+        userbot_manager=userbot_manager,
+        user_query=query,
+        limit=50,
+    )
+    if result is None:
+        await message.answer("⚠️ Не удалось загрузить сообщения.")
         return
     await message.answer(sanitize_html(result.html), reply_markup=result.markup)
 

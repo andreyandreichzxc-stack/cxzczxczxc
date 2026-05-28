@@ -12,7 +12,7 @@ import json
 import os
 
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
-os.environ.setdefault("ENCRYPTION_KEY", "HmsOzSAxuyfb7zet2nmwhFkgWfH5z6Lsr3tW7MO8GDI=")
+os.environ.setdefault("ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 os.environ.setdefault("BOT_TOKEN", "test:token")
 os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
 
@@ -26,6 +26,7 @@ from src.core.intelligence.maestro import (
     _agent_result_as_text,
     _execute_agent,
     _execute_agents_parallel,
+    _extract_json_object,
 )
 
 
@@ -58,8 +59,12 @@ class FakeLLMProvider:
     def __init__(self, response_text: str = "{}"):
         self._response = response_text
         self.name = "fake"
+        self.messages = None
 
-    async def chat(self, messages, *, heavy: bool = False) -> str:
+    async def chat(
+        self, messages, *, heavy: bool = False, task_type: str = "default"
+    ) -> str:
+        self.messages = messages
         return self._response
 
     async def embed(self, text: str) -> list[float]:
@@ -121,6 +126,26 @@ class TestProcess:
         result = await process(provider, "ok", owner_id=None, rag_enabled=False)
         assert result["understood"] == "bare"
 
+    def test_extract_json_object_uses_first_valid_object(self):
+        raw = 'before {not json} {"final_response": "ok"} {"final_response": "late"}'
+
+        assert _extract_json_object(raw) == {"final_response": "ok"}
+
+    @pytest.mark.asyncio
+    async def test_parses_first_json_when_multiple_objects_present(self):
+        response = (
+            "noise {not json} "
+            '{"understood": "first", "plan": [], "agents_to_call": [], '
+            '"final_response": "ok", "needs_clarification": null} '
+            '{"understood": "second"}'
+        )
+        provider = FakeLLMProvider(response)
+
+        result = await process(provider, "ok", owner_id=None, rag_enabled=False)
+
+        assert result["understood"] == "first"
+        assert result["final_response"] == "ok"
+
     @pytest.mark.asyncio
     async def test_with_agents_to_call(self):
         """Plan includes agents → agents_to_call list populated."""
@@ -165,7 +190,7 @@ class TestProcess:
         class ExhaustingProvider:
             name = "exhausted"
 
-            async def chat(self, messages, *, heavy=False):
+            async def chat(self, messages, *, heavy=False, task_type="default"):
                 raise ExhaustedError("no keys left")
 
             async def embed(self, text):
@@ -184,7 +209,7 @@ class TestProcess:
         class TimeoutProvider:
             name = "timeout"
 
-            async def chat(self, messages, *, heavy=False):
+            async def chat(self, messages, *, heavy=False, task_type="default"):
                 raise asyncio.TimeoutError("timed out")
 
             async def embed(self, text):
@@ -201,7 +226,7 @@ class TestProcess:
         class OverflowProvider:
             name = "overflow"
 
-            async def chat(self, messages, *, heavy=False):
+            async def chat(self, messages, *, heavy=False, task_type="default"):
                 raise RuntimeError("context_length exceeded: too many tokens")
 
             async def embed(self, text):
@@ -218,7 +243,7 @@ class TestProcess:
         class RateLimitProvider:
             name = "ratelimit"
 
-            async def chat(self, messages, *, heavy=False):
+            async def chat(self, messages, *, heavy=False, task_type="default"):
                 raise RuntimeError("rate limit exceeded")
 
             async def embed(self, text):
@@ -344,7 +369,7 @@ class TestProcess:
         class GenericErrorProvider:
             name = "generic_error"
 
-            async def chat(self, messages, *, heavy=False):
+            async def chat(self, messages, *, heavy=False, task_type="default"):
                 raise RuntimeError("something unexpected happened")
 
             async def embed(self, text):
@@ -491,6 +516,65 @@ class TestRunPipeline:
             assert result["used_agents"] == []
             assert result["agent_errors"] == []
             assert "Привет" in result["final_response"]
+
+    @pytest.mark.asyncio
+    async def test_run_pipeline_forwards_memory_context(self):
+        """RoutingPlan memory must reach Maestro process."""
+        seen_kwargs = {}
+
+        async def fake_process(_provider, _user_text, **kwargs):
+            seen_kwargs.update(kwargs)
+            return {
+                "understood": "memory aware",
+                "plan": [],
+                "agents_to_call": [],
+                "final_response": "Помню контекст",
+                "needs_clarification": None,
+            }
+
+        with mock.patch(
+            "src.core.intelligence.maestro.process", side_effect=fake_process
+        ):
+            await run_pipeline(
+                FakeLLMProvider(),
+                "что у меня с проектом?",
+                owner_id=123456789,
+                memory_context="<recall_context>важный факт</recall_context>",
+                self_profile="",
+            )
+
+        assert seen_kwargs["memory_context"] == (
+            "<recall_context>важный факт</recall_context>"
+        )
+
+    @pytest.mark.asyncio
+    async def test_process_puts_memory_and_self_profile_in_system_prompt(self):
+        provider = FakeLLMProvider(
+            json.dumps(
+                {
+                    "understood": "memory aware",
+                    "plan": [],
+                    "agents_to_call": [],
+                    "final_response": "ok",
+                    "needs_clarification": None,
+                }
+            )
+        )
+
+        await process(
+            provider,
+            "what do you remember?",
+            owner_id=None,
+            rag_enabled=False,
+            memory_context="<recall_context>system-only fact</recall_context>",
+            self_profile="[self-profile] system-only profile",
+        )
+
+        system_prompt = provider.messages[0].content
+        user_prompt = provider.messages[1].content
+        assert "<recall_context>system-only fact</recall_context>" in system_prompt
+        assert "[self-profile] system-only profile" in system_prompt
+        assert "<recall_context>system-only fact</recall_context>" not in user_prompt
 
     @pytest.mark.asyncio
     async def test_clarification_response(self):

@@ -1,6 +1,5 @@
 """Runtime-статистика humanizer'а."""
 
-
 _stats: dict[str, int | float] = {
     "total_checks": 0,
     "total_humanized": 0,

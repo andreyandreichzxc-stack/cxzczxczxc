@@ -17,12 +17,16 @@ from src.db.repo import (
     add_memory_candidate,
     delete_memory,
     get_contact,
+    get_graph_stats,
     get_or_create_user,
+    link_memories,
     list_memories,
     search_memories,
 )
 from src.db.session import get_session
 from src.userbot import get_active_telethon_client
+
+from .free_text_common import safe_answer
 
 
 logger = logging.getLogger(__name__)
@@ -235,6 +239,223 @@ async def _exec_check_memories(intent, message) -> None:
         await message.answer(
             sanitize_html(f"🤔 {question}"), reply_markup=kb.as_markup()
         )
+
+
+# ── Новые intent-хендлеры (Phase 5.2) ────────────────────────────────
+
+
+async def _exec_update_memory(intent, message) -> None:
+    """Update an existing memory fact by ID or search query."""
+    from src.db.models import Memory
+
+    memory_id = intent.get("memory_id")
+    query = (intent.get("query") or "").strip()
+    new_fact = (intent.get("new_fact") or "").strip()
+    new_sentiment = (intent.get("new_sentiment") or "").strip()
+    new_importance = intent.get("new_importance")
+
+    if not memory_id and not query:
+        await message.answer("🤷 Укажи ID факта или поисковый запрос для обновления.")
+        return
+    if not new_fact:
+        await message.answer("🤷 Что написать вместо старого факта? Укажи new_fact.")
+        return
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+
+        target = None
+        if memory_id:
+            target = await session.get(Memory, int(memory_id))
+            if target is None or target.user_id != owner.id or not target.is_active:
+                target = None
+        elif query:
+            found = await search_memories(session, owner, query)
+            if found:
+                target = found[0]
+
+        if target is None:
+            await message.answer("🙅 Не нашёл такой факт в памяти.")
+            return
+
+        # Обновляем поля
+        target.fact = new_fact
+        if new_sentiment in ("positive", "negative", "neutral"):
+            target.sentiment = new_sentiment
+        if new_importance is not None:
+            try:
+                target.importance = float(new_importance)
+            except (TypeError, ValueError):
+                pass
+        await session.flush()
+
+    await safe_answer(
+        message,
+        sanitize_html(f"✏️ Факт #{target.id} обновлён:\n<i>{new_fact}</i>"),
+    )
+
+
+async def _exec_link_memories(intent, message) -> None:
+    """Create a relationship between two memory facts."""
+    source_id = intent.get("source_id")
+    target_id = intent.get("target_id")
+    relation_type = (intent.get("relation_type") or "").strip() or None
+
+    if not source_id or not target_id:
+        await message.answer("🤷 Укажи source_id и target_id — ID двух фактов.")
+        return
+
+    try:
+        source_id = int(source_id)
+        target_id = int(target_id)
+    except (TypeError, ValueError):
+        await message.answer("❌ source_id и target_id должны быть числами.")
+        return
+
+    if source_id == target_id:
+        await message.answer("🤷 Нельзя связать факт с самим собой.")
+        return
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        link = await link_memories(
+            session,
+            owner,
+            source_id=source_id,
+            target_id=target_id,
+            relation_type=relation_type,
+        )
+
+    if link is None:
+        await message.answer("🙅 Один из фактов не найден или не принадлежит тебе.")
+        return
+
+    rel = f" ({relation_type})" if relation_type else ""
+    await safe_answer(
+        message,
+        sanitize_html(f"🔗 Факты #{source_id} ↔ #{target_id} связаны{rel}."),
+    )
+
+
+async def _exec_show_memory_health(intent, message) -> None:
+    """Display memory health metrics."""
+    from src.core.memory.memory_health import calculate_health_score
+
+    health = await calculate_health_score(message.from_user.id)
+
+    emoji = health.get("emoji", "🟡")
+    label = health.get("label", "Средне")
+    score = health["score"]
+
+    lines = [f"{emoji} <b>Здоровье памяти:</b> {score}/100 — {label}", ""]
+    # Компоненты
+    lines.append(f"  📊 Уверенность:      {health.get('confidence_score', 0)}/100")
+    lines.append(f"  📊 Покрытие:         {health.get('coverage_score', 0)}/100")
+    lines.append(f"  📊 Свежесть:         {health.get('freshness_score', 0)}/100")
+    lines.append(f"  📊 Структура:        {health.get('structure_score', 0)}/100")
+    lines.append(f"  📊 Теги:             {health.get('tag_score', 0)}/100")
+    lines.append("")
+    lines.append(f"  📦 Всего фактов:      {health.get('total_facts', 0)}")
+    lines.append(f"  👤 Контактов:        {health.get('total_contacts', 0)}")
+    # Диагностика
+    diag = health.get("diagnostics", [])
+    if diag:
+        lines.append("")
+        lines.append("💡 <b>Рекомендации:</b>")
+        for d in diag[:3]:
+            lines.append(f"  • {d}")
+
+    await safe_answer(message, sanitize_html("\n".join(lines)))
+
+
+async def _exec_show_memory_graph(intent, message) -> None:
+    """Display memory graph statistics."""
+    async with get_session() as session:
+        owner = await get_or_create_user(session, message.from_user.id)
+        stats = await get_graph_stats(session, owner.id)
+
+    lines = [
+        "🔗 <b>Граф памяти</b>",
+        "",
+        f"  Узлов:                {stats['node_count']}",
+        f"  Рёбер (всего):        {stats['total_edges']}",
+        f"  Средняя степень:      {stats['avg_degree']:.2f}",
+        f"  Компонент связности:  {stats['components']}",
+        f"  Изолированных узлов:  {stats['isolated_nodes']}",
+    ]
+
+    # Типы связей
+    ebt = stats.get("edges_by_type", {})
+    if ebt:
+        lines.append("")
+        lines.append("📌 <b>Типы связей:</b>")
+        for rel_type, cnt in sorted(ebt.items(), key=lambda x: -x[1]):
+            lines.append(f"  {rel_type}: {cnt}")
+
+    # Top-хабы
+    hubs = stats.get("top_hubs", [])
+    if hubs:
+        lines.append("")
+        lines.append("⭐ <b>Ключевые узлы:</b>")
+        for h in hubs[:3]:
+            fact = sanitize_html(h.get("fact", "")[:80])
+            lines.append(f"  #{h['memory_id']} (degree {h['degree']}): {fact}")
+
+    await safe_answer(message, "\n".join(lines))
+
+
+async def _exec_show_sessions(intent, message) -> None:
+    """Show recent conversation sessions."""
+    from src.core.memory.session_recorder import get_session_history
+
+    limit = intent.get("limit", 5)
+
+    async with get_session() as session:
+        history = await get_session_history(
+            session, message.from_user.id, limit=int(limit)
+        )
+
+    if not history:
+        await safe_answer(message, "📭 Нет записанных сессий.")
+        return
+
+    lines = ["📋 <b>Последние сессии:</b>", ""]
+    for s in history:
+        start = s.get("started_at", "?")[:16] if s.get("started_at") else "?"
+        sid = s.get("session_id", "?")
+        turns = s.get("turn_count", 0)
+        summary = s.get("summary", "")
+        line = f"  #{sid} — {start} ({turns} сообщ.)"
+        if summary:
+            line += f"\n    📝 {sanitize_html(summary[:100])}"
+        lines.append(line)
+
+    await safe_answer(message, "\n".join(lines))
+
+
+async def _exec_show_suggestions(intent, message) -> None:
+    """Show proactive memory-based patterns and suggestions."""
+    from src.core.memory.memory_patterns import detect_patterns
+
+    patterns = await detect_patterns(message.from_user.id)
+
+    if not patterns:
+        await safe_answer(message, "💡 Нет активных паттернов или предложений.")
+        return
+
+    lines = ["💡 <b>Паттерны и предложения:</b>", ""]
+    for p in patterns:
+        title = sanitize_html(p.get("title", p.get("type", "?")))
+        detail = sanitize_html(p.get("detail", ""))
+        action = sanitize_html(p.get("action", ""))
+        lines.append(f"• <b>{title}</b>")
+        if detail:
+            lines.append(f"  {detail}")
+        if action:
+            lines.append(f"  🔹 {action}")
+        lines.append("")
+
+    await safe_answer(message, "\n".join(lines))
 
 
 # ── Memory callbacks ───────────────────────────────────────────────────

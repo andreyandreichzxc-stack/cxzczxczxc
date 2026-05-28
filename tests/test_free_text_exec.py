@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
-os.environ.setdefault("ENCRYPTION_KEY", "HmsOzSAxuyfb7zet2nmwhFkgWfH5z6Lsr3tW7MO8GDI=")
+os.environ.setdefault("ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 os.environ.setdefault("BOT_TOKEN", "test:token")
 os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
 
@@ -285,7 +285,7 @@ class TestDBHandlers:
         await exec_add_api_key(intent, msg)
         msg.answer.assert_called_once()
         call_text = msg.answer.call_args[0][0]
-        assert "Не хватает данных" in call_text
+        assert "Укажи провайдера" in call_text
 
     @pytest.mark.asyncio
     async def test_add_api_key_wrong_provider(self):

@@ -4,6 +4,7 @@ from collections import Counter
 
 from .vocabulary import (
     AI_MARKERS,
+    MARKER_EXCEPTIONS,
     REPEAT_PENALTY,
     REPEAT_THRESHOLD,
     MAX_THEORETICAL_SCORE,
@@ -25,10 +26,15 @@ def analyze_ai_score(text: str) -> tuple[float, dict]:
 
     # 1. Markers
     for phrase, weight in AI_MARKERS.items():
-        if phrase.lower() in text_lower:
-            score += weight
-            if weight >= 0.3:
-                breakdown["markers"].append({"phrase": phrase, "weight": weight})
+        if phrase.lower() not in text_lower:
+            continue
+        # Skip markers that match an exception phrase (case-insensitive)
+        exceptions = MARKER_EXCEPTIONS.get(phrase, [])
+        if any(exc in text_lower for exc in exceptions):
+            continue
+        score += weight
+        if weight >= 0.3:
+            breakdown["markers"].append({"phrase": phrase, "weight": weight})
 
     # 2. Patterns
     for pattern, weight, label in AI_PATTERNS:

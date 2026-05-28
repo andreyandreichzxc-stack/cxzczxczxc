@@ -47,7 +47,7 @@ class PairingManager:
         code = secrets.token_hex(3)  # 6-char hex, e.g. "a1b2c3"
         with self._lock:
             self._pending[sender_id] = code
-        logger.info("Pairing started for sender %d (code: %s)", sender_id, code)
+        logger.info("Pairing started for sender %d", sender_id)
         return code
 
     async def approve(self, sender_id: int, code: str) -> bool:

@@ -9,6 +9,7 @@ from src.bot.filters import OwnerOnly
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.session import get_session
 from src.db.repo import get_or_create_user, list_contacts
+from src.llm.base import TaskType
 from src.llm.router import build_provider
 from src.core.infra.full_analyzer import (
     run_full_analysis,
@@ -73,7 +74,7 @@ async def cmd_analyze(message: Message, userbot_manager=None):
 
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.SUMMARIZE)
 
         import json
 

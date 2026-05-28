@@ -1,10 +1,12 @@
 """LLM package — re-exports provider builder and core types."""
 
-from src.llm.base import ChatMessage, LLMProvider
+from src.llm.base import ChatMessage, LLMProvider, TaskType, VisionProvider
 from src.llm.router import build_provider
 
 __all__ = [
     "build_provider",
     "ChatMessage",
     "LLMProvider",
+    "TaskType",
+    "VisionProvider",
 ]

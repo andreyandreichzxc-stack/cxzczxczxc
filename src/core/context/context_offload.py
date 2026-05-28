@@ -97,7 +97,7 @@ async def _stage2_summarise(
         return messages
 
     try:
-        from src.llm.base import ChatMessage
+        from src.llm.base import ChatMessage, TaskType
         from src.llm.router import build_provider
 
         # Build summary text
@@ -107,7 +107,10 @@ async def _stage2_summarise(
         )
 
         provider = await build_provider(
-            session=session, user=user, purpose="background"
+            session=session,
+            user=user,
+            purpose="background",
+            task_type=TaskType.SUMMARIZE,
         )
         if provider:
             chat_messages: list[ChatMessage] = [

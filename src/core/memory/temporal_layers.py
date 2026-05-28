@@ -52,17 +52,70 @@ def utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def classify_layer(created_at: datetime, now: datetime | None = None) -> str:
-    """Определяет временной слой факта по дате создания."""
+def compute_retention(
+    memory,
+    now: datetime | None = None,
+    decay_base: float = 0.07,
+    access_weight: float = 0.5,
+) -> float:
+    """Compute Ebbinghaus retention score for a memory fact.
+
+    retention(t) = e^(-decay_rate * t * access_boost)
+
+    where:
+    - t = days since last_used_at (or created_at if never recalled)
+    - decay_rate = memory.decay_rate or decay_base
+    - access_boost = 1.0 / (1.0 + access_weight * log(1 + use_count))
+
+    Returns value in [0, 1]. Higher = better retained.
+    """
+    import math
+
     if now is None:
         now = utcnow_naive()
-    age_days = (utc_naive(now) - utc_naive(created_at)).days
-    if age_days <= 7:
-        return "recent"
-    elif age_days <= 30:
-        return "medium"
-    else:
+
+    # Reference time: last recall or creation
+    ref_time = memory.last_used_at or memory.created_at
+    if ref_time is None:
+        return 1.0  # brand new fact
+
+    t_days = max(0.0, (utc_naive(now) - utc_naive(ref_time)).total_seconds() / 86400.0)
+
+    decay_rate = memory.decay_rate if memory.decay_rate is not None else decay_base
+    use_count = memory.use_count or 0
+
+    # Access boost: each recall slows down forgetting
+    access_boost = 1.0 / (1.0 + access_weight * math.log(1 + use_count))
+
+    retention = math.exp(-decay_rate * t_days * access_boost)
+    return max(0.0, min(1.0, retention))
+
+
+def classify_layer(memory_or_dt, now: datetime | None = None, **kwargs) -> str:
+    """Определяет временной слой факта по retention score (Ebbinghaus).
+
+    Accepts either a Memory object (with decay_rate, use_count, last_used_at)
+    or a datetime for backward compatibility.
+    """
+    if now is None:
+        now = utcnow_naive()
+
+    # Backward compat: if passed a datetime, use age-based classification
+    if isinstance(memory_or_dt, datetime):
+        age_days = (utc_naive(now) - utc_naive(memory_or_dt)).days
+        if age_days <= 7:
+            return "recent"
+        elif age_days <= 30:
+            return "medium"
         return "longterm"
+
+    # New: retention-based classification
+    retention = compute_retention(memory_or_dt, now, **kwargs)
+    if retention >= 0.7:
+        return "recent"
+    elif retention >= 0.3:
+        return "medium"
+    return "longterm"
 
 
 def get_layer_config(layer: str) -> dict:
@@ -79,7 +132,7 @@ async def update_temporal_layers(owner_id: int) -> int:
         updated = 0
         for m in memories:
             if m.created_at and m.is_active:
-                new_layer = classify_layer(m.created_at, now)
+                new_layer = classify_layer(m, now)
                 if m.temporal_layer != new_layer:
                     m.temporal_layer = new_layer
                     updated += 1
@@ -104,7 +157,7 @@ async def get_layer_stats(owner_id: int) -> dict:
         now = utcnow_naive()
         for m in active:
             layer = m.temporal_layer or (
-                classify_layer(m.created_at, now) if m.created_at else "recent"
+                classify_layer(m, now) if m.created_at else "recent"
             )
             stats[layer] += 1  # type: ignore[literal-required]
         return stats
@@ -150,12 +203,20 @@ async def get_prompt_facts(
     )
     all_facts = list(result.scalars().all())
     buckets: dict[str, list] = {"recent": [], "medium": [], "longterm": []}
-    # Сортируем: pinned всегда первыми, затем по use_count, затем по confidence
-    all_facts.sort(key=lambda m: (m.pinned, m.use_count, m.confidence), reverse=True)
+    # Сортируем: pinned всегда первыми, затем по retention, затем use_count, затем confidence
+    all_facts.sort(
+        key=lambda m: (
+            m.pinned,
+            compute_retention(m, now),
+            m.use_count or 0,
+            m.confidence or 0,
+        ),
+        reverse=True,
+    )
 
     for m in all_facts:
         layer = m.temporal_layer or (
-            classify_layer(m.created_at, now) if m.created_at else "recent"
+            classify_layer(m, now) if m.created_at else "recent"
         )
         if len(buckets[layer]) < LAYER_CONFIG[layer]["max_facts_in_prompt"]:
             buckets[layer].append(m)
@@ -164,9 +225,6 @@ async def get_prompt_facts(
         picked.extend(buckets[layer])
         if len(picked) >= total_limit:
             break
-    for m in picked[:total_limit]:
-        m.use_count = (m.use_count or 0) + 1
-        m.last_used_at = utcnow_naive()
     if picked:
         await session.flush()
     return picked[:total_limit]

@@ -1,2 +1,9 @@
+target-version = "py313"
+extend-exclude = [
+    "check_*.py",
+    "test_proxy*.py",
+    "test_greenlet.py",
+]
+
 [lint]
 ignore = ["E402"]

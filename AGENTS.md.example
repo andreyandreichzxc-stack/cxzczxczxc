@@ -1,0 +1,11 @@
+# Repository Agent Notes
+
+Copy this file to `AGENTS.md` for local, machine-specific agent instructions.
+`AGENTS.md` is intentionally ignored so private workflow notes are not released.
+
+Suggested local content:
+
+- Project-specific coding constraints.
+- Commands that are safe to run on this machine.
+- Local services, ports, and test data notes.
+- Areas that should not be edited without explicit approval.

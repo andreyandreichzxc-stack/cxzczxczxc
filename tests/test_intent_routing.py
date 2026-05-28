@@ -9,7 +9,7 @@ import os
 # Environment: MUST be set BEFORE any src imports
 # ---------------------------------------------------------------------------
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
-os.environ.setdefault("ENCRYPTION_KEY", "HmsOzSAxuyfb7zet2nmwhFkgWfH5z6Lsr3tW7MO8GDI=")
+os.environ.setdefault("ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 os.environ.setdefault("BOT_TOKEN", "test:token")
 os.environ.setdefault("OWNER_TELEGRAM_ID", "123456789")
 
@@ -52,7 +52,13 @@ class FakeLLMProvider:
     def __init__(self, response: str = '{"intent": "chat", "reply": "ok"}'):
         self._response = response
 
-    async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
+    async def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        heavy: bool = False,
+        task_type: str = "default",
+    ) -> str:
         return self._response
 
     async def embed(self, text: str) -> list[float]:

@@ -354,15 +354,33 @@ async def check_contradiction_response(
     # Check if it looks like a direct short answer to our contradiction question
     # (strip punctuation for matching)
     cleaned = user_lower.strip(".,!?;: ")
+    first_word = cleaned.split()[0] if cleaned else ""
 
-    if cleaned in confirm_words or any(cleaned.startswith(w) for w in confirm_words):
-        # User confirms the change — return friendly acknowledgement
+    if cleaned in confirm_words or first_word in confirm_words:
+        # User confirms the change — mark old fact as inactive + contradictory
+        old_memory_id = pending.get("memory_id")
+        if old_memory_id:
+            try:
+                from src.db.models import Memory
+                from src.db.repo import get_or_create_user
+                from src.db.session import get_session
+
+                async with get_session() as link_session:
+                    link_owner = await get_or_create_user(link_session, telegram_id)
+                    old_mem = await link_session.get(Memory, old_memory_id)
+                    if old_mem is not None and old_mem.user_id == link_owner.id:
+                        old_mem.sentiment = "contradictory"
+                        old_mem.is_active = False
+                        await link_session.commit()
+            except Exception:
+                logger.debug("Failed to mark contradicted fact", exc_info=True)
+
         return (
             f"🧠 Понял! Запомню, что «{pending['contradicted_fact']}» "
             f"больше не актуально. Спасибо за уточнение!"
         )
 
-    if cleaned in deny_words or any(cleaned.startswith(w) for w in deny_words):
+    if cleaned in deny_words or first_word in deny_words:
         # User denies — fact stays as is
         return (
             "👍 Ок, оставляю как было. Если что — просто скажи «забудь про ...» "
@@ -370,7 +388,14 @@ async def check_contradiction_response(
         )
 
     # Message is too long/complex to be a direct answer to our question.
-    # Re-store the pending contradiction and return None (let normal pipeline handle it).
+    # Re-store the pending contradiction so next response can resolve it.
+    # Refresh stored_at to reset TTL.
+    import time as _time
+
+    pending["stored_at"] = _time.monotonic()
+    async with _pending_lock:
+        _pending_contradictions[telegram_id] = pending
+    return None
 
 
 # _BATCH_OPPOSITE_PAIRS for batch scanning (simple string pairs, not set-based)
@@ -389,9 +414,14 @@ _BATCH_OPPOSITE_PAIRS = [
 ]
 
 
-async def _scan_contradictions_batch(memories, owner_id: int) -> int:
+async def _scan_contradictions_batch(
+    memories, owner_id: int, *, session=None, owner=None
+) -> int:
     """Batch scan all memories for contradictions. No LLM — pure heuristic.
     Returns count of found contradiction pairs.
+
+    If *session* and *owner* are provided, creates MemoryLink edges
+    (relation_type='contradicts') for each detected contradiction pair.
     """
     found = 0
     _MAX_PAIRS = min(len(memories) * 50, 5000)
@@ -412,6 +442,21 @@ async def _scan_contradictions_batch(memories, owner_id: int) -> int:
             for pos, neg in _BATCH_OPPOSITE_PAIRS:
                 if (pos in f1 and neg in f2) or (neg in f1 and pos in f2):
                     found += 1
+                    # Create contradiction MemoryLink edge
+                    if session is not None and owner is not None:
+                        try:
+                            from src.db.repo import link_memories
+
+                            await link_memories(
+                                session,
+                                owner,
+                                source_id=m1.id,
+                                target_id=m2.id,
+                                relation_type="contradicts",
+                                weight=0.8,
+                            )
+                        except Exception:
+                            pass
                     break
             # Check 2: Negation mismatch
             if found < 100:
@@ -427,16 +472,21 @@ async def _scan_contradictions_batch(memories, owner_id: int) -> int:
                     )
                     if has_neg1 != has_neg2:
                         found += 1
+                        # Create contradiction MemoryLink edge
+                        if session is not None and owner is not None:
+                            try:
+                                from src.db.repo import link_memories
+
+                                await link_memories(
+                                    session,
+                                    owner,
+                                    source_id=m1.id,
+                                    target_id=m2.id,
+                                    relation_type="contradicts",
+                                    weight=0.7,
+                                )
+                            except Exception:
+                                pass
             if found >= 100:
                 return found
     return found
-    if len(user_text.split()) > 5:
-        await store_pending_contradiction(telegram_id, pending)
-        return None
-
-    # Medium-length message — could be an explanation. Assume user is addressing
-    # the contradiction but needs it stored.
-    return (
-        f"🧠 Принял к сведению! Обновляю: «{pending['contradicted_fact']}» "
-        f"→ учту изменения."
-    )

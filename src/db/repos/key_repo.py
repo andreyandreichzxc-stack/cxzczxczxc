@@ -87,6 +87,9 @@ async def add_key_slot(
     purpose: str = "main",
     label: str | None = None,
     priority: int = 0,
+    endpoint: str | None = None,
+    model: str | None = None,
+    category: str = "llm",
 ) -> tuple[LlmKeySlot, bool]:
     """Добавляет слот ключа.
 
@@ -94,30 +97,37 @@ async def add_key_slot(
       - is_new=True  — слот создан впервые
       - is_new=False — ключ с таким же значением уже существует (слот #N)
     """
-    # Проверка дубликатов: расшифровываем все существующие слоты пользователя
-    # и сравниваем с новым ключом
-    existing_slots = await list_key_slots(
-        session, user, provider=provider, purpose=purpose
-    )
-    for existing in existing_slots:
-        try:
-            existing_key = decrypt(existing.key_enc)
-            if existing_key == key:
-                return existing, False
-        except Exception:
-            continue
+    from src.db.repos.session_repo import _get_user_lock
 
-    slot = LlmKeySlot(
-        user_id=user.id,
-        provider=provider,
-        purpose=purpose,
-        label=label,
-        key_enc=encrypt(key),
-        priority=priority,
-    )
-    session.add(slot)
-    await session.flush()
-    return slot, True
+    lock = _get_user_lock(user.id)
+    async with lock:
+        # Проверка дубликатов: расшифровываем все существующие слоты пользователя
+        # и сравниваем с новым ключом
+        existing_slots = await list_key_slots(
+            session, user, provider=provider, purpose=purpose
+        )
+        for existing in existing_slots:
+            try:
+                existing_key = decrypt(existing.key_enc)
+                if existing_key == key:
+                    return existing, False
+            except Exception:
+                continue
+
+        slot = LlmKeySlot(
+            user_id=user.id,
+            provider=provider,
+            purpose=purpose,
+            label=label,
+            endpoint=endpoint,
+            model=model,
+            category=category,
+            key_enc=encrypt(key),
+            priority=priority,
+        )
+        session.add(slot)
+        await session.flush()
+        return slot, True
 
 
 async def list_key_slots(

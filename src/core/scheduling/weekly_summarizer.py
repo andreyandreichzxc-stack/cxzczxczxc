@@ -20,7 +20,7 @@ from src.db.repo import (
     upsert_memory_cluster,
 )
 from src.db.session import get_session
-from src.llm.base import ChatMessage
+from src.llm.base import ChatMessage, TaskType
 from src.config import settings
 from src.llm.router import build_provider
 
@@ -66,7 +66,7 @@ async def summarize_contact_week(
                         content=f"Контакт: {contact.display_name}\n\nПереписка:\n{transcript[:5000]}",
                     ),
                 ],
-                heavy=False,
+                task_type=TaskType.SUMMARIZE,
             )
             # Парсинг
             raw = raw.strip()
@@ -104,7 +104,9 @@ async def weekly_summary_loop(owner_id: int) -> None:
                 last_run_date = now.date()
                 async with get_session() as session:
                     owner_safe = await get_or_create_user(session, owner_id)
-                    provider = await build_provider(session, owner_safe)
+                    provider = await build_provider(
+                        session, owner_safe, task_type=TaskType.SUMMARIZE
+                    )
                     if not provider:
                         continue
 
@@ -307,7 +309,7 @@ async def consolidate_tier(
                             content=f"Сожми эти факты:\n{facts_text[:4000]}",
                         ),
                     ],
-                    heavy=False,
+                    task_type=TaskType.SUMMARIZE,
                 )
 
                 raw = raw.strip()

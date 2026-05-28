@@ -2,12 +2,19 @@
 .env.local
 .env.*.local
 data/
+logs/
+*.log
 *.db
 *.db-journal
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite3
 *.session
 *.session-journal
+*.pem
+*.p12
+*.pfx
 
 __pycache__/
 *.pyc
@@ -23,3 +30,15 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local tooling / diagnostics
+.codegraph/
+.serena/
+_tools_list.txt
+opencode.json
+opencode.json.disabled
+check_*.py
+test_proxy*.py
+test_greenlet.py
+AGENTS.md
+SOUL.md

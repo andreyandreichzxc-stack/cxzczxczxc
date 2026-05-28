@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from src.core.humanizer import analyze_ai_score, humanize_text, humanize_response
+from src.core.humanizer import (
+    analyze_ai_score,
+    apply_anti_ai_mode,
+    humanize_text,
+    humanize_response,
+    normalize_anti_ai_mode,
+)
 from src.core.humanizer.humanizer import _preservation_check
 
 
@@ -89,6 +95,35 @@ class TestHumanizeText:
 
 class TestHumanizeResponse:
     """Тесты функции humanize_response."""
+
+    def test_humanize_response_applies_light_marker_replacements(self):
+        """AI-маркеры из scorer реально заменяются, а не только влияют на score."""
+        text = "Конечно, безусловно, я понимаю вашу ситуацию. Встреча 15 мая в 14:00."
+        result = humanize_response(text)
+        lowered = result.lower()
+
+        assert "конечно" not in lowered
+        assert "безусловно" not in lowered
+        assert "я понимаю вашу" not in lowered
+        assert "15 мая" in result
+        assert "14:00" in result
+
+    def test_anti_ai_mode_off_log_fix_runtime_semantics(self, caplog):
+        text = "Конечно, я понимаю вашу ситуацию. Встреча 15 мая в 14:00."
+
+        assert normalize_anti_ai_mode("bad", enabled=False) == "off"
+        assert normalize_anti_ai_mode("", enabled=True) == "fix"
+        assert apply_anti_ai_mode(text, mode="off") == text
+
+        with caplog.at_level("INFO"):
+            assert apply_anti_ai_mode(text, mode="log", source="test") == text
+        assert "Anti-AI log" in caplog.text
+
+        fixed = apply_anti_ai_mode(text, mode="fix")
+        assert fixed != text
+        assert "конечно" not in fixed.lower()
+        assert "15 мая" in fixed
+        assert "14:00" in fixed
 
     def test_humanize_response_removes_cliches(self):
         """Удаляет шаблонные концовки из ответа."""

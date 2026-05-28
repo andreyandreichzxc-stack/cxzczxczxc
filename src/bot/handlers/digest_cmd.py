@@ -76,7 +76,10 @@ async def cmd_digest(message: Message, command: CommandObject) -> None:
 @router.message(Command("briefing"))
 async def cmd_briefing(message: Message) -> None:
     """Ручной запрос брифинга."""
-    from src.core.scheduling.proactive_briefing import collect_briefing_data, format_briefing
+    from src.core.scheduling.proactive_briefing import (
+        collect_briefing_data,
+        format_briefing,
+    )
 
     data = await collect_briefing_data(message.from_user.id)
     text = format_briefing(data, "Брифинг")
@@ -99,7 +102,10 @@ async def cmd_briefing(message: Message) -> None:
 @router.callback_query(F.data == "briefing:refresh")
 async def cb_briefing_refresh(callback: CallbackQuery) -> None:
     """Обновить брифинг."""
-    from src.core.scheduling.proactive_briefing import collect_briefing_data, format_briefing
+    from src.core.scheduling.proactive_briefing import (
+        collect_briefing_data,
+        format_briefing,
+    )
 
     data = await collect_briefing_data(callback.from_user.id)
     text = format_briefing(data, "Брифинг")
@@ -139,12 +145,13 @@ async def cmd_smart_digest(message: Message) -> None:
 async def cmd_weekly(message: Message) -> None:
     """Ручной запуск недельного саммари."""
     from src.core.scheduling.weekly_summarizer import summarize_contact_week
+    from src.llm.base import TaskType
     from src.llm.router import build_provider
 
     await message.answer("📊 Запускаю недельное саммари...")
     async with get_session() as session:
         owner = await get_or_create_user(session, message.from_user.id)
-        provider = await build_provider(session, owner)
+        provider = await build_provider(session, owner, task_type=TaskType.SUMMARIZE)
         if not provider:
             await message.answer("❌ Нет LLM провайдера.")
             return

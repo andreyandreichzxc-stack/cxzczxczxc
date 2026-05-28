@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from unittest.mock import patch
 
 import pytest
 from datetime import datetime, timedelta, timezone
-
-pytestmark = pytest.mark.usefixtures("_db_init")
 
 from src.db.session import get_session
 from src.db.repo import get_or_create_user, add_memory, add_commitment
@@ -21,6 +20,23 @@ from src.core.memory.memory_recall import (
     RecallResult,
 )
 from src.core.memory.hybrid_search import reciprocal_rank_fusion
+
+
+@pytest.fixture(autouse=True)
+def setup_db():
+    """Пересоздаёт таблицы перед каждым тестом."""
+    from src.db.session import engine, Base, init_db
+    from sqlalchemy import text
+
+    async def _recreate():
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+            await conn.execute(text("DROP TABLE IF EXISTS messages_fts"))
+            await conn.execute(text("DROP TABLE IF EXISTS memories_fts"))
+        await init_db()
+
+    asyncio.run(_recreate())
 
 
 def utc_naive():
@@ -183,7 +199,18 @@ async def test_recall_cache_hit():
         facts=[RecalledFact(fact="кешированный факт", reason="📌 закреплён")],
         meta={"cached": True},
     )
-    cache_key = "123456:test query:None:deep"
+    cache_key = mr_mod._make_recall_cache_key(
+        telegram_id=123456,
+        query="test query",
+        contact_id=None,
+        mode="deep",
+        limit=5,
+        include_self=True,
+        include_pinned=True,
+        include_tasks=True,
+        include_deep=True,
+        semantic_threshold=0.6,
+    )
 
     # Напрямую тестируем логику кеша: проверяем что свежая запись
     # (< 30 сек для результатов с фактами) считается валидной
@@ -205,7 +232,18 @@ async def test_recall_cache_expiry():
         facts=[RecalledFact(fact="просроченный кеш", reason="🆕 свежий")],
         meta={"cached": True},
     )
-    cache_key = "123457:stale:None:deep"
+    cache_key = mr_mod._make_recall_cache_key(
+        telegram_id=123457,
+        query="stale",
+        contact_id=None,
+        mode="deep",
+        limit=5,
+        include_self=True,
+        include_pinned=True,
+        include_tasks=True,
+        include_deep=True,
+        semantic_threshold=0.6,
+    )
 
     # Кеш с timestamp 31+ секунд назад — для результатов с фактами (TTL=30)
     # должен считаться невалидным
@@ -219,6 +257,26 @@ async def test_recall_cache_expiry():
         assert time.monotonic() - cached_ts >= 30, (
             f"Ожидалась просроченная запись, разница: {time.monotonic() - cached_ts:.1f}s"
         )
+
+
+@pytest.mark.asyncio
+async def test_recall_cache_key_includes_limit():
+    """Кеш не должен отдавать limit=1 на следующий запрос limit=5."""
+    import src.core.memory.memory_recall as mr_mod
+
+    telegram_id = 123477
+    with patch.object(mr_mod, "_recall_cache", {}):
+        async with get_session() as session:
+            owner = await get_or_create_user(session, telegram_id)
+            for i in range(5):
+                await add_memory(session, owner, fact=f"факт {i}", confidence=0.9)
+            await session.commit()
+
+        small = await recall(telegram_id, limit=1, mode="normal")
+        large = await recall(telegram_id, limit=5, mode="normal")
+
+    assert len(small.facts) == 1
+    assert len(large.facts) >= 5
 
 
 # ---------------------------------------------------------------------------

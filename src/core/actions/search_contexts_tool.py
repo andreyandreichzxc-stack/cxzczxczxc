@@ -38,6 +38,31 @@ logger = logging.getLogger(__name__)
         "query": "str — поисковый запрос (только для action='search')",
         "limit": "int=5 — максимум результатов (только для action='search')",
     },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "ok": {"type": "boolean"},
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "filename without .md",
+                        },
+                        "snippet": {
+                            "type": "string",
+                            "description": "Search result with <b>highlighting</b>",
+                        },
+                        "score": {"type": "number", "description": "Relevance score"},
+                    },
+                },
+            },
+            "count": {"type": "integer"},
+        },
+        "required": ["ok"],
+    },
 )
 async def _search_contexts_tool(
     action: str = "search",

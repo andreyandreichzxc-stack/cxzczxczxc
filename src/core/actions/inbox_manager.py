@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from src.llm.base import LLMProvider
 
 from src.db.session import get_session
+from src.llm.base import TaskType
 from src.llm.router import build_provider
 
 logger = logging.getLogger(__name__)
@@ -108,7 +109,9 @@ async def process_incoming(
         # Провайдер требует сессию — создаём временную
 
         async with get_session() as _session:
-            provider = await build_provider(_session, owner)
+            provider = await build_provider(
+                _session, owner, task_type=TaskType.CLASSIFY
+            )
 
     # 2. Классификация срочности (LLM если есть провайдер, иначе эвристика)
     from src.core.contacts.urgency_classifier import classify_urgency

@@ -28,16 +28,51 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Lint with ruff
-        run: ruff check src/ tests/
+        run: ruff check src/ tests/ --output-format=github
+
+      - name: Compile Python modules
+        run: python -m compileall -q src tests alembic
 
       - name: Type check with pyright (info only, non-blocking)
-        run: pyright src/ --outputjson > pyright-report.json || true
+        run: pyright --project pyrightconfig.json --outputjson > pyright-report.json
         continue-on-error: true
+
+      - name: Check alembic heads
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///test.db
+          ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          BOT_TOKEN: 123456:test
+          OWNER_TELEGRAM_ID: "123456789"
+          API_ID: "12345"
+          API_HASH: "0123456789abcdef0123456789abcdef"
+        run: python -m alembic heads
+
+      - name: Check alembic history
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///test.db
+          ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          BOT_TOKEN: 123456:test
+          OWNER_TELEGRAM_ID: "123456789"
+          API_ID: "12345"
+          API_HASH: "0123456789abcdef0123456789abcdef"
+        run: python -m alembic history
+
+      - name: Check clean alembic upgrade
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///clean-upgrade.db
+          ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          BOT_TOKEN: 123456:test
+          OWNER_TELEGRAM_ID: "123456789"
+          API_ID: "12345"
+          API_HASH: "0123456789abcdef0123456789abcdef"
+        run: python -m alembic upgrade head
 
       - name: Run tests
         env:
           DATABASE_URL: sqlite+aiosqlite:///test.db
-          ENCRYPTION_KEY: HmsOzSAxuyfb7zet2nmwhFkgWfH5z6Lsr3tW7MO8GDI=
+          ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
           BOT_TOKEN: 123456:test
           OWNER_TELEGRAM_ID: "123456789"
-        run: python -m pytest tests/ -v --tb=short
+          API_ID: "12345"
+          API_HASH: "0123456789abcdef0123456789abcdef"
+        run: python -m pytest -v --tb=short

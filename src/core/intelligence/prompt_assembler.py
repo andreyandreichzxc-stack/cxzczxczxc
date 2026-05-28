@@ -14,6 +14,7 @@ from typing import Optional
 from pathlib import Path
 
 from src.core.intelligence.soul_blocks import ANTI_AI_BLOCK, _load_blocks
+from src.core.security.prompt_injection_scanner import scan_content
 from src.db.repo import get_or_create_user, get_self_profile
 from src.db.session import get_session
 
@@ -47,7 +48,16 @@ _soul_md_path = Path(__file__).resolve().parent.parent.parent.parent / "SOUL.md"
 if _soul_md_path.exists():
     _SOUL_MD = _soul_md_path.read_text(encoding="utf-8").strip()
     if _SOUL_MD:
-        logger.info("SOUL.md loaded (%d chars)", len(_SOUL_MD))
+        # Scan for prompt injection before accepting
+        scan = scan_content(_SOUL_MD, _soul_md_path.name)
+        if scan.blocked:
+            logger.warning(
+                "SOUL.md blocked by prompt injection scanner: %s",
+                scan.message,
+            )
+            _SOUL_MD = scan.message  # inject blocking message instead
+        else:
+            logger.info("SOUL.md loaded (%d chars)", len(_SOUL_MD))
     else:
         _SOUL_MD = None
 
@@ -108,6 +118,10 @@ class AssemblyContext:
     contact_rules_block: str = ""
     # Recent user corrections (pre-loaded in maestro, injected into Tier 2)
     correction_context: str = ""
+    # DSM — project memory from previous sessions (pre-loaded in maestro)
+    dsm_context: str = ""
+    # Session replay summary (from session_recorder.py)
+    session_summary: str = ""
 
 
 class PromptAssembler:
@@ -161,6 +175,17 @@ class PromptAssembler:
             parts.append(
                 "Для сложных запросов — обрабатывай данные через tools, не загружай в контекст."
             )
+            # Tool usage hints — compact catalog reference (full list in SOUL.md)
+            if target == "maestro":
+                tool_hints = (
+                    "\n\n[ИНСТРУМЕНТЫ — 41 доступен]\n"
+                    "Категории: память(5), продуктивность(4), интернет(5), файлы(4), система(7), утилиты(4), медиа(3), почта(3), настройки(4), код(2).\n"
+                    "Правила: 1) память first 2) один вызов=один инструмент 3) комбинируй результаты.\n"
+                    "Полный список — в SOUL.md. "
+                    "Для деталей о каждом инструменте используй list_for_prompt() в туллупе.\n"
+                )
+                parts.append(tool_hints)
+
             # Correction learning — feed recent user corrections into prompt
             if ctx.correction_context:
                 parts.append("")
@@ -174,7 +199,14 @@ class PromptAssembler:
 
         # Anti-AI block (controlled by per-user setting)
         if ctx.anti_ai:
-            parts.append(ANTI_AI_BLOCK)
+            from src.core.humanizer.humanizer import get_few_shot_examples
+
+            anti_ai_block = ANTI_AI_BLOCK
+            if ctx.user_id:
+                few_shot = get_few_shot_examples(ctx.user_id)
+                if few_shot:
+                    anti_ai_block += "\n\n" + few_shot
+            parts.append(anti_ai_block)
 
         # Persona block (из adaptive_persona)
         if ctx.persona_block:
@@ -217,6 +249,10 @@ class PromptAssembler:
         if ctx.contact_rules_block:
             parts.append(ctx.contact_rules_block)
 
+        # DSM — cross-session project memory (pre-loaded in maestro)
+        if ctx.dsm_context:
+            parts.append(ctx.dsm_context)
+
         return "\n".join(parts)
 
     def _tier3_volatile(self, ctx: AssemblyContext) -> str:
@@ -239,6 +275,15 @@ class PromptAssembler:
         if ctx.deep_memory:
             parts.append(ctx.deep_memory)
 
+        # Memory context assembled by routing/ContextEngine must be in the
+        # system prompt, not only in the user message.
+        if ctx.memory_context:
+            parts.append(ctx.memory_context)
+
+        # Session replay hint (if available)
+        if ctx.session_summary:
+            parts.append(ctx.session_summary)
+
         # Conversation history
         if ctx.history_block:
             parts.append(ctx.history_block)
@@ -248,7 +293,7 @@ class PromptAssembler:
                 parts.append(f"История диалога:\n{history_text}")
 
         # Self profile (для agent)
-        if ctx.target == "agent" and ctx.self_profile:
+        if ctx.self_profile:
             parts.append(ctx.self_profile)
 
         # Frozen memory snapshot (top-3 facts pre-loaded)

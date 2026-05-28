@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Переопределяем DATABASE_URL на in-memory ДО импорта src-модулей
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
-os.environ["ENCRYPTION_KEY"] = "HmsOzSAxuyfb7zet2nmwhFkgWfH5z6Lsr3tW7MO8GDI="
+os.environ["ENCRYPTION_KEY"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 os.environ["BOT_TOKEN"] = "test:token"
 os.environ["OWNER_TELEGRAM_ID"] = "123456789"
 
@@ -220,7 +220,8 @@ async def test_get_prompt_facts_is_active():
 
 @pytest.mark.asyncio
 async def test_get_prompt_facts_skips_expired_and_tracks_usage():
-    """get_prompt_facts() пропускает expired и отмечает использованные факты."""
+    """get_prompt_facts() пропускает expired факты. use_count больше НЕ бампится здесь —
+    только в recall() (Phase 0.2: убран двойной бамп)."""
     async with get_session() as session:
         owner = await get_or_create_user(session, OWNER_TG_ID)
         await add_memory(session, owner, fact="Свежий факт", source="chat")
@@ -233,8 +234,8 @@ async def test_get_prompt_facts_skips_expired_and_tracks_usage():
         owner = await get_or_create_user(session, OWNER_TG_ID)
         facts = await get_prompt_facts(session, owner, total_limit=10)
         assert [m.fact for m in facts] == ["Свежий факт"]
-        assert facts[0].use_count == 1
-        assert facts[0].last_used_at is not None
+        # use_count НЕ бампится в get_prompt_facts — только в recall()
+        assert facts[0].use_count == 0
 
 
 @pytest.mark.asyncio

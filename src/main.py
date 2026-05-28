@@ -4,10 +4,9 @@ import logging
 from src.bot.app import run_bot
 from src.bot.handlers.free_text import start_voice_worker, stop_voice_worker
 from src.core.memory.memory_queue import start_worker, stop_worker
-from src.core.scheduling.notification_queue import notification_queue
 from src.core.infra.task_manager import task_manager, stop_ff_tasks
 from src.core.infra.update_notifier import check_and_notify_update
-from src.config import PROJECT_ROOT
+from src.config import PROJECT_ROOT, settings
 from src.db.session import init_db
 from src.userbot.manager import UserbotManager
 
@@ -40,9 +39,11 @@ def _register_background_tasks() -> None:
     import src.core.memory.memory_clusterer  # noqa: F401
     import src.core.intelligence.skills  # noqa: F401
     import src.core.intelligence.skills_curator  # noqa: F401
+    import src.core.intelligence.auto_evolve  # noqa: F401
     import src.core.intelligence.burnout_detector  # noqa: F401
     import src.core.scheduling.dream_cycle  # noqa: F401
     import src.core.scheduling.proactive_nudge  # noqa: F401
+    import src.core.scheduling.avito  # noqa: F401
 
 
 async def main() -> None:
@@ -54,6 +55,27 @@ async def main() -> None:
 
     await init_db()
 
+    # --- Cold-start skill seeding ---
+    if settings.skill_seed_on_startup:
+        from sqlalchemy import select as _s
+        from src.db.session import get_session
+        from src.db.models import User
+        from src.core.intelligence.skill_seeder import seed_skills_from_docs
+
+        async with get_session() as _session:
+            _r = await _session.execute(
+                _s(User.id).where(User.telegram_id == settings.owner_telegram_id)
+            )
+            _owner_id = _r.scalar_one_or_none()
+            if _owner_id is not None:
+                _count = await seed_skills_from_docs(_session, user_id=_owner_id)
+                logger.info("Seeded %d skills from SKILL.md files", _count)
+            else:
+                logger.warning(
+                    "Owner user (telegram_id=%d) not found — skipping skill seed",
+                    settings.owner_telegram_id,
+                )
+
     # --- Gating: check runtime dependencies ---
     from src.core.infra.gating import gates
     from src.core.infra.gating_checks import register_default_gates
@@ -61,18 +83,43 @@ async def main() -> None:
     register_default_gates()
     gates.run_all()
 
+    # Notify owner about missing dependencies with install hints
+    _missing = gates.missing_install_hints
+    if _missing:
+        _msgs = ["⚠️ **Не хватает зависимостей:**\n"]
+        for m in _missing:
+            _msgs.append(f"• {m['description']}: `{m['install_hint']}`")
+        _msgs.append("\nПроверь `/gates` для полной картины.")
+        # Fire-and-forget via notification queue
+        from src.core.scheduling.notification_queue import notification_queue
+
+        await notification_queue.enqueue(
+            topic="system",
+            text="\n".join(_msgs),
+            priority=1,
+        )
+
     # --- Context Engine: register pluggable providers ---
     from src.core.context.engine import engine
     from src.core.context.providers.memory_provider import MemoryProvider
     from src.core.context.providers.vector_provider import VectorProvider
     from src.core.context.providers.wiki_context_provider import WikiContextProvider
     from src.core.context.providers.frozen_provider import frozen_provider
+    from src.core.context.providers.subdirectory_hints import subdirectory_provider
 
     engine.register(MemoryProvider())
     engine.register(VectorProvider())
     engine.register(WikiContextProvider())
     engine.register(frozen_provider)
     logger.info("Context engine registered %d providers", len(engine.providers))
+
+    # SubdirectoryHintProvider is special — it doesn't go through engine.gather()
+    # It's called manually after tool calls via subdirectory_provider.on_tool_args()
+    logger.info(
+        "SubdirectoryHintProvider loaded (root=%s, visited={%s})",
+        subdirectory_provider.root,
+        subdirectory_provider.visited,
+    )
 
     from src.core.memory.context_files import index_contexts_to_fts, init_owner_context
 
@@ -109,8 +156,9 @@ async def main() -> None:
     task_manager.start_all()
 
     # Phase 2: регистрация MCP-инструментов в tool_registry
-    import src.core.actions.mcp_tools  # noqa: F401
-    import src.core.actions.cross_search_tool  # noqa: F401
+    from src.core.actions import register_builtin_tools
+
+    register_builtin_tools()
 
     try:
         await run_bot(userbot_manager)

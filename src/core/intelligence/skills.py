@@ -23,6 +23,7 @@ from src.db.repo import (
     upsert_skill,
 )
 from src.db.session import get_session
+from src.llm.base import TaskType
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,16 @@ def _matches(text: str, patterns: Iterable[str] | None) -> int:
         if p.lower() in low:
             score += 2
     return score
+
+
+def _extract_json_from_response(text: str) -> str:
+    m = re.search(r"```(?:json|JSON)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    brace_m = re.search(r"\{[\s\S]*\}", text)
+    if brace_m:
+        return brace_m.group(0)
+    return text.strip()
 
 
 async def list_relevant_skills(
@@ -85,6 +96,10 @@ def format_skill_index(skills: list[Skill]) -> str:
     for skill in skills[:5]:
         desc = (skill.description or "").strip()
         header = f"- {skill.name}"
+        # V2: show version if not default
+        ver = skill.version or "1.0.0"
+        if ver != "1.0.0":
+            header += f" v{ver}"
         if desc:
             header += f": {desc[:160]}"
         lines.append(header)
@@ -92,6 +107,17 @@ def format_skill_index(skills: list[Skill]) -> str:
         if body:
             lines.append(f"  procedure: {body[:700]}")
     lines.append("</skill_index>")
+
+    # Inject rejected edits feedback for LLM to avoid repeating failed patterns
+    from src.core.intelligence.skill_editor import format_rejected_edits
+
+    for skill in skills[:5]:
+        if skill.rejected_edits_json:
+            feedback = format_rejected_edits(skill.rejected_edits_json)
+            if feedback:
+                lines.append("")
+                lines.append(feedback)
+
     return "\n".join(lines)
 
 
@@ -193,16 +219,15 @@ async def suggest_skills_from_trajectories(telegram_id: int) -> int:
             examples.setdefault(key, row)
 
         created = 0
+        # Load existing skill names once to avoid N+1 queries
+        all_skills = await list_skills(session, owner, limit=200)
+        existing_names = {s.name for s in all_skills}
+
         for (route_mode, intent_name), count in buckets.items():
             if count < 3:
                 continue
             name = _safe_skill_name(route_mode, intent_name)
-            existing = [
-                s
-                for s in await list_skills(session, owner, limit=200)
-                if s.name == name
-            ]
-            if existing:
+            if name in existing_names:
                 continue
             sample = examples[(route_mode, intent_name)]
             body = (
@@ -229,47 +254,219 @@ async def suggest_skills_from_trajectories(telegram_id: int) -> int:
         return created
 
 
-async def propose_skills_from_analysis(owner_id: int) -> list[dict]:
-    """Вызывает skill_creator агента через LLM и создаёт предложенные навыки.
+async def _light_analysis(
+    owner_id: int,
+    messages: list[dict],
+    hint_patterns: list[str] | None = None,
+) -> list[dict]:
+    """Дешёвый анализ (~10 сообщений, ~500 токенов).
 
-    Фильтрует предложения по confidence > 0.7 и авто-создаёт их
-    сразу активными (enabled=True, review_status="approved").
+    Ищет только явные, однозначные паттерны. Если ничего не находит —
+    deep-анализ не запускается (экономия 3000+ токенов).
+
+    Hint-паттерны (regex, 0 токенов) передаются в начало списка сообщений
+    как контекст — существующий агент их обработает.
     """
     from src.agents.skill_creator_agent import propose as agent_propose
-    from src.db.repo import fetch_my_messages_global
     from src.llm.router import build_provider
-
-    proposals: list[dict] = []
-    created_skills: list[dict] = []
 
     try:
         async with get_session() as session:
             owner = await get_or_create_user(session, owner_id)
-            messages_raw = await fetch_my_messages_global(session, owner, limit=50)
-            recent_messages = [
+            provider = await build_provider(
+                session, owner, purpose="background", task_type=TaskType.SKILLS
+            )
+
+        # Light: только последние 10 сообщений (в 5 раз меньше токенов)
+        light_messages = messages[:10]
+
+        # Prepend hint as synthetic message (exploits existing agent interface)
+        if hint_patterns:
+            hint_text = (
+                "[PRE-ANALYSIS] Обнаружены повторяющиеся паттерны: "
+                + "; ".join(hint_patterns)
+            )
+            light_messages.insert(
+                0,
                 {
-                    "text": msg.text or "",
-                    "is_outgoing": msg.is_outgoing
-                    if hasattr(msg, "is_outgoing")
-                    else True,
-                    "timestamp": str(msg.date) if hasattr(msg, "date") else "",
-                }
-                for msg in messages_raw
-            ]
+                    "text": hint_text[:300],
+                    "is_outgoing": True,
+                    "timestamp": "",
+                },
+            )
 
-            if not recent_messages:
-                logger.debug("propose_skills_from_analysis: no messages to analyze")
-                return []
+        proposals = await agent_propose(provider, light_messages)
 
-            provider = await build_provider(session, owner)
-            proposals = await agent_propose(provider, recent_messages)
+        if not proposals:
+            logger.debug("_light_analysis: no patterns found")
+            return []
+
+        logger.info("_light_analysis: found %d candidate(s)", len(proposals))
+        return proposals
+
     except Exception:
-        logger.exception("propose_skills_from_analysis: agent call failed")
+        logger.exception("_light_analysis: failed")
         return []
 
-    # Фильтруем по confidence и создаём навыки
+
+async def _deep_analysis(
+    owner_id: int,
+    messages: list[dict],
+    hint_patterns: list[str],
+) -> list[dict]:
+    """Полный анализ (~50 сообщений, ~3000 токенов).
+
+    Запускается ТОЛЬКО если light-анализ что-то нашёл.
+    """
+    from src.agents.skill_creator_agent import propose as agent_propose
+    from src.llm.router import build_provider
+
+    try:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, owner_id)
+            provider = await build_provider(
+                session, owner, purpose="background", task_type=TaskType.SKILLS
+            )
+
+        # Deep: все 50 сообщений
+        deep_messages = messages[:50]
+
+        # Prepend hint with light analysis results as context
+        hint_text = (
+            "[DEEP-ANALYSIS] Light-анализ обнаружил паттерны: "
+            + "; ".join(hint_patterns[:10])
+            + ". Твоя задача: глубокий анализ. Предложи bounded edits или новые навыки."
+        )
+        deep_messages.insert(
+            0,
+            {
+                "text": hint_text[:300],
+                "is_outgoing": True,
+                "timestamp": "",
+            },
+        )
+
+        proposals = await agent_propose(provider, deep_messages)
+
+        if not proposals:
+            logger.debug("_deep_analysis: no proposals after deep analysis")
+            return []
+
+        logger.info("_deep_analysis: proposed %d changes", len(proposals))
+        return proposals
+
+    except Exception:
+        logger.exception("_deep_analysis: failed")
+        return []
+
+
+async def propose_skills_from_analysis(
+    owner_id: int,
+    *,
+    tier: str = "auto",
+    force: bool = False,
+) -> list[dict]:
+    """Tiered skill analysis: gatekeeper → light → deep.
+
+    V3: Адаптировано под real-time агента с минимизацией токенов.
+
+    Modes:
+    - auto (default): gatekeeper решает, запускать ли. Если да:
+        extract_light_patterns → light_analysis → deep_analysis (только если light нашёл)
+    - light: только дешёвый анализ (10 сообщений, medium-модель)
+    - deep: полный анализ (50 сообщений, heavy-модель). Пропускает gatekeeper.
+
+    Returns:
+        Список созданных навыков: [{"name": str, "id": int, "confidence": float}, ...]
+    """
+    from src.agents.skill_creator_agent import propose as agent_propose
+    from src.config import settings as cfg
+    from src.core.intelligence.skill_gatekeeper import (
+        detect_skill_conflicts,
+        extract_light_patterns,
+        format_conflict_warning,
+        get_gatekeeper,
+    )
+    from src.core.intelligence.skill_validator import validate_skill_candidate
+    from src.db.repo import fetch_my_messages_global
+    from src.llm.router import build_provider
+
+    # ── Tier routing ──
+    if tier == "auto" and not force:
+        gatekeeper = get_gatekeeper()
+        should_run, gate_reason = await gatekeeper.should_analyze(owner_id)
+        if not should_run:
+            logger.debug(
+                "propose_skills_from_analysis: gatekeeper skip — %s", gate_reason
+            )
+            return []
+        logger.info(
+            "propose_skills_from_analysis: gatekeeper approved — %s", gate_reason
+        )
+
+    # ── Fetch messages ──
     async with get_session() as session:
         owner = await get_or_create_user(session, owner_id)
+        messages_raw = await fetch_my_messages_global(session, owner, limit=50)
+        recent_messages = [
+            {
+                "text": msg.text or "",
+                "is_outgoing": msg.is_outgoing if hasattr(msg, "is_outgoing") else True,
+                "timestamp": str(msg.date) if hasattr(msg, "date") else "",
+            }
+            for msg in messages_raw
+        ]
+
+    if not recent_messages:
+        logger.debug("propose_skills_from_analysis: no messages to analyze")
+        return []
+
+    proposals: list[dict] = []
+
+    # ── Tiered analysis ──
+    if tier == "light":
+        proposals = await _light_analysis(owner_id, recent_messages)
+
+    elif tier == "deep":
+        # Deep без light-префильтра (форсированный режим)
+        async with get_session() as session:
+            owner = await get_or_create_user(session, owner_id)
+            provider = await build_provider(
+                session, owner, purpose="background", task_type=TaskType.SKILLS
+            )
+        proposals = await agent_propose(provider, recent_messages[:50])
+
+    else:  # auto
+        # Step 1: Free pre-analysis — extract patterns
+        msg_texts = [m["text"] for m in recent_messages]
+        hint_patterns = extract_light_patterns(msg_texts)
+
+        if not hint_patterns:
+            logger.debug(
+                "propose_skills_from_analysis: no regex patterns found, skipping"
+            )
+            return []
+
+        # Step 2: Light analysis (~500 tokens)
+        proposals = await _light_analysis(owner_id, recent_messages, hint_patterns)
+
+        # Step 3: Deep analysis only if light found something (~3000 tokens)
+        if proposals:
+            deep_proposals = await _deep_analysis(
+                owner_id, recent_messages, hint_patterns
+            )
+            if deep_proposals:
+                proposals = deep_proposals  # Replace with richer deep results
+
+    if not proposals:
+        return []
+
+    # ── Filter & create skills ──
+    created_skills: list[dict] = []
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, owner_id)
+        all_skills = await list_skills(session, owner, limit=200)
         for proposal in proposals:
             if not isinstance(proposal, dict):
                 continue
@@ -281,17 +478,58 @@ async def propose_skills_from_analysis(owner_id: int) -> list[dict]:
             if not name:
                 continue
 
-            # Проверяем, нет ли уже навыка с таким именем
-            existing = [
-                s
-                for s in await list_skills(session, owner, limit=200)
-                if s.name.lower() == name.lower()
-            ]
+            # Check for duplicates
+            existing = [s for s in all_skills if s.name.lower() == name.lower()]
             if existing:
                 logger.debug(
                     "propose_skills_from_analysis: skill %r already exists", name
                 )
                 continue
+
+            # Проверка конфликтов trigger-паттернов с существующими навыками
+            triggers = proposal.get("trigger_patterns") or []
+            if triggers:
+                skill_tuples = [(s.name, s.trigger_patterns_json) for s in all_skills]
+                conflicts = detect_skill_conflicts(name, triggers, skill_tuples)
+                if conflicts:
+                    conflict_msg = format_conflict_warning(conflicts)
+                    logger.info("Skill '%s' trigger conflicts: %s", name, conflict_msg)
+
+            body = str(proposal.get("body", ""))
+
+            # Validation gate
+            validation_result = None
+            if cfg.skill_validation_enabled:
+                validation_result = await validate_skill_candidate(
+                    owner_id,
+                    name,
+                    body,
+                )
+                if not validation_result.accepted:
+                    try:
+                        await upsert_skill(
+                            session,
+                            owner,
+                            name=name[:128],
+                            description=str(proposal.get("description", "")),
+                            trigger_patterns_json=proposal.get("trigger_patterns")
+                            or [],
+                            body=body,
+                            enabled=False,
+                            review_status="pending",
+                        )
+                        logger.info(
+                            "propose_skills_from_analysis: created %r as pending "
+                            "(validation: %s)",
+                            name,
+                            validation_result.summary,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "propose_skills_from_analysis: failed to upsert skill %r",
+                            name,
+                        )
+                    continue
 
             try:
                 skill = await upsert_skill(
@@ -300,10 +538,14 @@ async def propose_skills_from_analysis(owner_id: int) -> list[dict]:
                     name=name[:128],
                     description=str(proposal.get("description", "")),
                     trigger_patterns_json=proposal.get("trigger_patterns") or [],
-                    body=str(proposal.get("body", "")),
+                    body=body,
                     enabled=True,
                     review_status="approved",
                 )
+                if validation_result is not None:
+                    skill.validation_score = validation_result.score_after
+                    skill.best_body = body
+
                 created_skills.append(
                     {
                         "name": name,
@@ -324,10 +566,147 @@ async def propose_skills_from_analysis(owner_id: int) -> list[dict]:
     return created_skills
 
 
+async def propose_edits_from_corrections(
+    telegram_id: int,
+    provider=None,
+    max_corrections: int = 5,
+) -> list[dict]:
+    """Анализирует недавние коррекции пользователя и предлагает правки в навыки.
+
+    Если пользователь 3+ раза исправил поведение, связанное с навыком X —
+    предложить edit в навык X.
+
+    Возвращает список proposed edits (для последующей валидации).
+    Только если нашли связь correction → skill.
+    """
+    import json as _json
+
+    from src.core.intelligence.correction_learner import get_recent_corrections
+    from src.llm.base import ChatMessage
+    from src.llm.router import build_provider
+
+    corrections = await get_recent_corrections(telegram_id, limit=max_corrections)
+    if not corrections:
+        return []
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, telegram_id)
+        skills = await list_skills(session, owner, enabled=True, limit=100)
+
+    if not skills:
+        return []
+
+    # ── Map corrections to skills ──
+    skill_corrections: dict[int, list[dict]] = {}
+
+    for corr in corrections:
+        orig = (corr.get("original") or "").lower()
+        corr_text = (corr.get("corrected") or "").lower()
+        combined = f"{orig} {corr_text}"
+
+        best_skill = None
+        best_score = 0
+
+        for skill in skills:
+            score = 0
+            skill_name_norm = skill.name.lower().replace("_", " ").replace("-", " ")
+            if skill_name_norm in combined:
+                score += 5
+            patterns = skill.trigger_patterns_json or []
+            if patterns:
+                score += _matches(combined, patterns)
+            desc = (skill.description or "").lower()
+            if desc and any(w in combined for w in desc.split() if len(w) > 4):
+                score += 1
+            if score > best_score:
+                best_score = score
+                best_skill = skill
+
+        if best_skill and best_score >= 3:
+            sid = best_skill.id
+            skill_corrections.setdefault(sid, []).append(corr)
+
+    # ── Only skills with 3+ corrections ──
+    eligible = {sid: cs for sid, cs in skill_corrections.items() if len(cs) >= 3}
+    if not eligible:
+        return []
+
+    # ── Build provider if needed ──
+    if provider is None:
+        async with get_session() as session:
+            owner = await get_or_create_user(session, telegram_id)
+            provider = await build_provider(
+                session, owner, purpose="background", task_type=TaskType.SKILLS
+            )
+    if provider is None:
+        return []
+
+    # ── LLM: propose edits (lightweight, ~300 tokens each) ──
+    proposals: list[dict] = []
+    for sid, corrs in list(eligible.items())[:3]:
+        skill = next((s for s in skills if s.id == sid), None)
+        if not skill:
+            continue
+
+        correction_lines = []
+        for i, c in enumerate(corrs[-5:], 1):
+            correction_lines.append(
+                f"{i}. Bot: {c.get('original', '')[:200]}\n"
+                f"   Corrected to: {c.get('corrected', '')[:200]}"
+            )
+
+        prompt = (
+            "User provided corrections that affect this skill. "
+            "Propose ONE minimal edit to align the skill with user preferences.\n\n"
+            f"SKILL: {skill.name}\n"
+            f"DESC:  {skill.description or 'N/A'}\n"
+            f"BODY:  {(skill.body or '')[:400]}\n\n"
+            "CORRECTIONS:\n" + "\n".join(correction_lines) + "\n\n"
+            "EDIT TYPES:\n"
+            "- append: add to end of body\n"
+            "- insert_after: insert after a line (provide target line text)\n"
+            "- replace: replace old text with new\n"
+            "- delete: remove text\n\n"
+            "Return ONLY JSON (no markdown):\n"
+            '{"op":"...", "target":"...", "content":"...", "reason":"..."}'
+        )
+
+        try:
+            response = await provider.chat(
+                [ChatMessage(role="user", content=prompt)], task_type=TaskType.SKILLS
+            )
+            json_str = _extract_json_from_response(response)
+            proposal = _json.loads(json_str)
+            proposal["skill_id"] = skill.id
+            proposal["skill_name"] = skill.name
+            proposals.append(proposal)
+            logger.info(
+                "propose_edits_from_corrections: proposed edit for %r (%d corrections)",
+                skill.name,
+                len(corrs),
+            )
+        except Exception:
+            logger.debug(
+                "propose_edits_from_corrections: LLM failed for %r",
+                skill.name,
+                exc_info=True,
+            )
+
+    return proposals
+
+
 async def skill_optimizer_loop(telegram_id: int) -> None:
-    _last_skill_creation_run: float = 0
+    """Фоновый цикл оптимизации навыков.
+
+    V3: Gatekeeper-controlled. Вместо time-based cooldown использует
+    message delta + trajectory count для принятия решения. Экономия: -93% токенов.
+    """
+    from src.core.intelligence.skill_gatekeeper import get_gatekeeper
+
+    _gatekeeper = get_gatekeeper()
 
     while True:
+        # Step 1: Trajectory-based suggestions (бесплатно, всегда)
         try:
             created = await suggest_skills_from_trajectories(telegram_id)
             if created:
@@ -340,12 +719,13 @@ async def skill_optimizer_loop(telegram_id: int) -> None:
         except Exception:
             logger.exception("skill_optimizer_loop trajectory analysis failed")
 
-        # Feature 1: Skill Creator agent — автономный, каждый час
+        # Step 2: LLM-based proposals — только если gatekeeper разрешает
         try:
-            now = asyncio.get_event_loop().time()
-            if now - _last_skill_creation_run >= 3600:
-                _last_skill_creation_run = now
-                proposed = await propose_skills_from_analysis(telegram_id)
+            should_run, gate_reason = await _gatekeeper.should_analyze(telegram_id)
+            if should_run:
+                proposed = await propose_skills_from_analysis(
+                    telegram_id, tier="auto", force=True
+                )
                 if proposed:
                     names = [s["name"] for s in proposed]
                     await notification_queue.enqueue(
@@ -358,8 +738,26 @@ async def skill_optimizer_loop(telegram_id: int) -> None:
                             f"Уже активны в /skills."
                         ),
                     )
+            else:
+                logger.debug("skill_optimizer_loop: gatekeeper skip — %s", gate_reason)
         except Exception:
             logger.exception("skill_optimizer_loop skill creator analysis failed")
+
+        # Step 3: Correction-based edits — analyse recent user corrections
+        try:
+            edits = await propose_edits_from_corrections(
+                telegram_id,
+                max_corrections=5,
+            )
+            if edits:
+                logger.info(
+                    "skill_optimizer_loop: proposed %d edits from corrections",
+                    len(edits),
+                )
+            else:
+                logger.debug("skill_optimizer_loop: no edits from corrections")
+        except Exception:
+            logger.exception("skill_optimizer_loop correction-based analysis failed")
 
         await asyncio.sleep(settings.skill_optimizer_interval_sec)
 
