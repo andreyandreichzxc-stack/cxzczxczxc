@@ -75,16 +75,29 @@ async def cmd_login(
         )
         return
 
-    # Предзаполняем дефолтные значения из конфига
-    await state.update_data(api_id=settings.api_id, api_hash=settings.api_hash)
+    # Предзаполняем дефолтные значения из конфига (если заданы)
+    defaults: dict = {}
+    if settings.api_id is not None:
+        defaults["api_id"] = settings.api_id
+    if settings.api_hash is not None:
+        defaults["api_hash"] = settings.api_hash
+    if defaults:
+        await state.update_data(**defaults)
+
+    has_defaults = settings.api_id is not None and settings.api_hash is not None
+    api_id_hint = (
+        f"(по умолчанию <code>{settings.api_id}</code>)"
+        if settings.api_id is not None
+        else "(обязательно)"
+    )
 
     await state.set_state(LoginStates.api_id)
     await message.answer(
         "🔐 <b>Подключение Telegram-аккаунта</b>\n\n"
         "Получи <code>api_id</code> и <code>api_hash</code> на https://my.telegram.org → API development tools.\n"
         "Никому их не отправляй, кроме этого бота. Я храню их в зашифрованном виде.\n\n"
-        f"Введи <b>api_id</b> (по умолчанию <code>{settings.api_id}</code>).\n"
-        f"Если подходит — просто отправь его или введи свой.\n"
+        f"Введи <b>api_id</b> {api_id_hint}.\n"
+        f"{'Если подходит — просто отправь его или введи свой.' if has_defaults else ''}\n"
         f"{CANCEL_HINT}"
     )
 
@@ -97,10 +110,18 @@ async def step_api_id(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(api_id=int(text))
     await state.set_state(LoginStates.api_hash)
+    api_hash_hint = (
+        f"(по умолчанию <code>{settings.api_hash[:4]}••••{settings.api_hash[-4:]}</code>)"
+        if settings.api_hash is not None
+        else "(обязательно, 32 hex-символа)"
+    )
     await message.answer(
-        "Отлично. Теперь введи <b>api_hash</b> "
-        f"(по умолчанию <code>{settings.api_hash[:4]}••••{settings.api_hash[-4:]}</code>).\n"
-        "Напиши <b>1</b> или <b>дефолт</b> — я возьму стандартный. Или введи свой."
+        f"Отлично. Теперь введи <b>api_hash</b> {api_hash_hint}.\n"
+        + (
+            "Напиши <b>1</b> или <b>дефолт</b> — я возьму стандартный. Или введи свой."
+            if settings.api_hash is not None
+            else ""
+        )
     )
 
 
@@ -119,6 +140,11 @@ async def step_api_hash(message: Message, state: FSMContext) -> None:
         "yes",
         "ok",
     ):
+        if settings.api_hash is None:
+            await message.answer(
+                "api_hash по умолчанию не задан в .env. Введи свой api_hash (32 hex-символа)."
+            )
+            return
         text = settings.api_hash
     if len(text) != 32 or not all(c in "0123456789abcdefABCDEF" for c in text):
         await message.answer(

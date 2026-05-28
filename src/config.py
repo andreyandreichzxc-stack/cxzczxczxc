@@ -248,10 +248,12 @@ class Settings(BaseSettings):
         description="Trigger persona rebuild every N new personal facts",
     )
 
-    # --- Telegram API credentials ---
-    api_id: int = Field(..., description="Telegram API ID from https://my.telegram.org")
-    api_hash: str = Field(
-        ...,
+    # --- Telegram API credentials (опционально — нужны только для userbot-режима) ---
+    api_id: int | None = Field(
+        default=None, description="Telegram API ID from https://my.telegram.org"
+    )
+    api_hash: str | None = Field(
+        default=None,
         description="Telegram API hash from https://my.telegram.org",
     )
 
