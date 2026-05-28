@@ -177,8 +177,7 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         f"📰 Новости: {_check(_news_enabled)} (окно {_news_window_hours}ч)\n"
         f"🛡 Игнорировать архив: {_check(_ignore_archived)}\n"
         f"📊 Smart дайджест: {_check(_smart_digest_enabled)} (каждые {_smart_digest_interval_min}м)\n"
-        f"🤖 LLM: <b>{_llm_provider}</b> · {'тяжёлая' if _use_heavy_model else 'лёгкая'}\n"
-        f"🎤 Транскрипция: <b>{_transcription_mode}</b> ({_transcription_api_provider})\n"
+        f"🧠 LLM: <b>{_llm_provider}</b> · {'тяжёлая' if _use_heavy_model else 'лёгкая'} · tr: {_transcription_mode}\n"
         f"🔑 Ключи: OpenAI {_check(bool(openai_key))} · Gemini {_check(bool(gemini_key))} · Mistral {_check(bool(mistral_key))} · DeepSeek {_check(bool(deepseek_key))} · Cloudflare {_check(bool(cloudflare_key))} · Grok {_check(bool(grok_key))} · MiMo {_check(bool(mimo_key))} · Groq {_check(bool(groq_key))}\n\n"
         "<i>Тапни раздел, чтобы открыть его настройки и описание.</i>"
     )
@@ -201,13 +200,9 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         InlineKeyboardButton(text="📰 Новости", callback_data="set:sec:news"),
     )
     kb.row(
-        InlineKeyboardButton(text="🤖 LLM", callback_data="set:sec:llm"),
-        InlineKeyboardButton(
-            text="🎤 Транскрипция", callback_data="set:sec:transcription"
-        ),
+        InlineKeyboardButton(text="🧠 LLM и модели", callback_data="set:sec:brain"),
     )
     kb.row(
-        InlineKeyboardButton(text="🧠 Модели", callback_data="set:sec:models"),
         InlineKeyboardButton(text="✍️ Черновики", callback_data="set:sec:drafts"),
         InlineKeyboardButton(text="🔒 Приватность", callback_data="set:sec:privacy"),
     )
@@ -751,7 +746,8 @@ async def _render_section(
             )
             kb.row(*_back_row())
 
-        elif section == "llm":
+        elif section == "brain":
+            # ── LLM provider ──
             active = (
                 "DeepSeek V4 Flash (бесплатно)"
                 if s.llm_provider == "openrouter"
@@ -771,14 +767,29 @@ async def _render_section(
                 if s.use_heavy_model
                 else LLMDefaults.CLOUDFLARE_CHAT_LIGHT
             )
+
+            # ── Transcription ──
+            api_provider = getattr(s, "transcription_api_provider", "openai")
+            tts_labels = {
+                "openai": "OpenAI Whisper",
+                "gemini": "Gemini (бесплатно)",
+                "mistral": "Mistral (бесплатно)",
+            }
+            api_label = tts_labels.get(api_provider, "OpenAI Whisper")
+
             text = (
-                "🤖 <b>LLM-провайдер</b>\n\n"
-                "Кто отвечает на запросы и пишет черновики/саммари. Лёгкая модель — для рутины, "
-                "тяжёлая — для длинных переписок и сложного анализа.\n\n"
+                "🧠 <b>LLM и модели</b>\n\n"
+                "━━━ 🤖 Провайдер ━━━\n"
                 f"Провайдер: <b>{s.llm_provider}</b>\n"
                 f"Режим: <b>{'тяжёлая' if s.use_heavy_model else 'лёгкая'}</b>\n"
-                f"Активная модель: <code>{active}</code>"
+                f"Модель: <code>{active}</code>\n\n"
+                "━━━ 🎤 Транскрипция ━━━\n"
+                f"Режим: <b>{s.transcription_mode}</b> · {api_label}\n\n"
+                "━━━ 🧠 Модели задач ━━━\n"
+                "<i>Настрой модель под каждую задачу</i>"
             )
+
+            # ── LLM provider buttons ──
             kb.row(
                 InlineKeyboardButton(
                     text=("• " if s.llm_provider == "openai" else "") + "OpenAI",
@@ -792,19 +803,19 @@ async def _render_section(
             kb.row(
                 InlineKeyboardButton(
                     text=("• " if s.llm_provider == "openrouter" else "")
-                    + "🔥 DeepSeek V4 (бесплатно)",
+                    + "🔥 DeepSeek (free)",
                     callback_data="set:choose:llm_provider:openrouter",
                 ),
                 InlineKeyboardButton(
                     text=("• " if s.llm_provider == "mistral" else "")
-                    + "Mistral (бесплатно)",
+                    + "Mistral (free)",
                     callback_data="set:choose:llm_provider:mistral",
                 ),
             )
             kb.row(
                 InlineKeyboardButton(
                     text=("• " if s.llm_provider == "cloudflare" else "")
-                    + "Cloudflare (Kimi/Qwen)",
+                    + "Cloudflare",
                     callback_data="set:choose:llm_provider:cloudflare",
                 ),
             )
@@ -814,9 +825,34 @@ async def _render_section(
                     callback_data="set:tog:use_heavy_model",
                 )
             )
+
+            # ── Transcription buttons ──
+            for mode in ("local", "api", "hybrid"):
+                kb.row(
+                    InlineKeyboardButton(
+                        text=("• " if s.transcription_mode == mode else "") + mode,
+                        callback_data=f"set:choose:transcription_mode:{mode}",
+                    )
+                )
+            for prov in ("openai", "gemini", "mistral"):
+                prov_label = tts_labels.get(prov, prov)
+                kb.row(
+                    InlineKeyboardButton(
+                        text=("• " if api_provider == prov else "") + prov_label,
+                        callback_data=f"set:choose:transcription_api_provider:{prov}",
+                    )
+                )
+
+            # ── Model overrides ──
+            kb.row(
+                InlineKeyboardButton(
+                    text="🧠 Настроить модели задач →",
+                    callback_data="set:sec:models_brain",
+                )
+            )
             kb.row(*_back_row())
 
-        elif section == "models":
+        elif section == "models_brain":
             try:
                 overrides = json.loads(s.model_overrides) if s.model_overrides else {}
             except (json.JSONDecodeError, TypeError):
@@ -836,7 +872,7 @@ async def _render_section(
                 "default": "Обычный чат",
             }
 
-            lines = ["🧠 <b>Настройки моделей</b>", ""]
+            lines = ["🧠 <b>Модели для задач</b>", ""]
             for task_type, label in task_labels.items():
                 override = overrides.get(task_type)
                 if override:
@@ -846,8 +882,8 @@ async def _render_section(
 
             lines.append("")
             lines.append(
-                "<i>Нажми на задачу, чтобы выбрать модель. "
-                "Переопределения имеют приоритет над настройками LLM-провайдера.</i>"
+                "<i>Нажми на задачу — выбери модель. "
+                "Имеет приоритет над провайдером.</i>"
             )
             text = "\n".join(lines)
 
@@ -935,41 +971,6 @@ async def _render_section(
                     InlineKeyboardButton(
                         text="🗑 Удалить переопределение",
                         callback_data=f"set:model:del:{task_type}",
-                    )
-                )
-            kb.row(
-                InlineKeyboardButton(text="🔙 Назад", callback_data="set:sec:models")
-            )
-
-        elif section == "transcription":
-            api_provider = getattr(s, "transcription_api_provider", "openai")
-            labels = {
-                "openai": "OpenAI Whisper",
-                "gemini": "Gemini (бесплатно)",
-                "mistral": "Mistral (бесплатно)",
-            }
-            api_label = labels.get(api_provider, "OpenAI Whisper")
-            text = (
-                "🎤 <b>Транскрипция голосовых и аудио</b>\n\n"
-                "<b>local</b> — faster-whisper на твоей машине (бесплатно, приватно, нужны ресурсы).\n"
-                "<b>api</b> — облачная транскрипция через выбранный сервис.\n"
-                "<b>hybrid</b> — local, fallback в API при ошибке.\n\n"
-                f"Режим: <b>{s.transcription_mode}</b>\n"
-                f"API-провайдер: <b>{api_label}</b>"
-            )
-            for mode in ("local", "api", "hybrid"):
-                kb.row(
-                    InlineKeyboardButton(
-                        text=("• " if s.transcription_mode == mode else "") + mode,
-                        callback_data=f"set:choose:transcription_mode:{mode}",
-                    )
-                )
-            for prov in ("openai", "gemini", "mistral"):
-                prov_label = labels.get(prov, prov)
-                kb.row(
-                    InlineKeyboardButton(
-                        text=("• " if api_provider == prov else "") + prov_label,
-                        callback_data=f"set:choose:transcription_api_provider:{prov}",
                     )
                 )
             kb.row(*_back_row())
