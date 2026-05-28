@@ -1431,9 +1431,8 @@ async def _render_section(
 async def cb_input_openai(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_openai_key)
     await callback.message.answer(
-        "Пришли OpenAI API key (начинается с <code>sk-</code>). Проверю и сохраню. /cancel — отмена.\n\n"
-        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
-        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
+        "Пришли OpenAI API-ключ. Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Можно несколько ключей через запятую."
     )
     await callback.answer()
 
@@ -1442,9 +1441,8 @@ async def cb_input_openai(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_input_gemini(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_gemini_key)
     await callback.message.answer(
-        "Пришли Gemini API key с <code>aistudio.google.com</code>. Проверю и сохраню. /cancel — отмена.\n\n"
-        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
-        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
+        "Пришли Gemini API-ключ. Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Можно несколько ключей через запятую."
     )
     await callback.answer()
 
@@ -1453,9 +1451,8 @@ async def cb_input_gemini(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_input_mistral(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_mistral_key)
     await callback.message.answer(
-        "Пришли Mistral API key с <code>console.mistral.ai</code>. Проверю и сохраню. /cancel — отмена.\n\n"
-        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
-        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
+        "Пришли Mistral API-ключ. Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Можно несколько ключей через запятую."
     )
     await callback.answer()
 
@@ -1464,12 +1461,8 @@ async def cb_input_mistral(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_input_cloudflare(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_cloudflare_key)
     await callback.message.answer(
-        "Пришли Cloudflare API Token из <code>dash.cloudflare.com</code> "
-        "(раздел API Tokens, права на Workers AI). "
-        "Проверю и сохраню. /cancel — отмена.\n\n"
-        "⚠️ Перед этим убедись, что <code>CLOUDFLARE_ACCOUNT_ID</code> указан в <code>.env</code>.\n\n"
-        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
-        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
+        "Пришли Cloudflare API-ключ. Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Можно несколько ключей через запятую."
     )
     await callback.answer()
 
@@ -1478,10 +1471,8 @@ async def cb_input_cloudflare(callback: CallbackQuery, state: FSMContext) -> Non
 async def cb_input_deepseek(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_deepseek_key)
     await callback.message.answer(
-        "Пришли DeepSeek API key с <code>platform.deepseek.com</code>. "
-        "Проверю и сохраню. /cancel — отмена.\n\n"
-        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
-        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
+        "Пришли DeepSeek API-ключ. Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Можно несколько ключей через запятую."
     )
     await callback.answer()
 
@@ -1490,9 +1481,8 @@ async def cb_input_deepseek(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_input_grok(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_grok_key)
     await callback.message.answer(
-        "Пришли Grok API key с <code>console.x.ai</code>. Проверю и сохраню. /cancel — отмена.\n\n"
-        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
-        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
+        "Пришли Grok API-ключ. Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Можно несколько ключей через запятую."
     )
     await callback.answer()
 
@@ -1501,9 +1491,8 @@ async def cb_input_grok(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_input_mimo(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_mimo_key)
     await callback.message.answer(
-        "Пришли MiMo API key. Проверю и сохраню. /cancel — отмена.\n\n"
-        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
-        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
+        "Пришли MiMo API-ключ. Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Можно несколько ключей через запятую."
     )
     await callback.answer()
 
@@ -1512,9 +1501,8 @@ async def cb_input_mimo(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_input_groq(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingsStates.waiting_groq_key)
     await callback.message.answer(
-        "Пришли Groq API key с <code>console.groq.com</code>. Проверю и сохраню. /cancel — отмена.\n\n"
-        "💡 Поддерживается несколько ключей через запятую: <code>key1, key2, key3</code>\n"
-        "При ошибке 429 (превышение лимита) бот автоматически переключится на следующий ключ."
+        "Пришли Groq API-ключ. Проверю и сохраню. /cancel — отмена.\n\n"
+        "💡 Можно несколько ключей через запятую."
     )
     await callback.answer()
 
@@ -1806,10 +1794,15 @@ async def step_openai_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "openai", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "openai")
-    await state.clear()
     count = len(parts)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Ещё ключ", callback_data="set:input:openai_key")
+    kb.button(text="✅ Назад", callback_data="set:done:key")
+    kb.adjust(2)
     await message.answer(
-        f"✅ Сохранено OpenAI ключей: {count}.\n🔑 В базе OpenAI ключей: {total}."
+        f"✅ Сохранено OpenAI ключей: {count}.\n🔑 В базе OpenAI ключей: {total}.\n\n"
+        "Добавить ещё?",
+        reply_markup=kb.as_markup(),
     )
 
 
@@ -1837,8 +1830,14 @@ async def step_gemini_key(message: Message, state: FSMContext) -> None:
         total = await _count_slots_for_provider(session, owner, "gemini")
     await state.clear()
     count = len(parts)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Ещё ключ", callback_data="set:input:gemini_key")
+    kb.button(text="✅ Назад", callback_data="set:done:key")
+    kb.adjust(2)
     await message.answer(
-        f"✅ Сохранено Gemini ключей: {count}.\n🔑 В базе Gemini ключей: {total}."
+        f"✅ Сохранено Gemini ключей: {count}.\n🔑 В базе Gemini ключей: {total}.\n\n"
+        "Добавить ещё?",
+        reply_markup=kb.as_markup(),
     )
 
 
@@ -1864,10 +1863,15 @@ async def step_mistral_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "mistral", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "mistral")
-    await state.clear()
     count = len(parts)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Ещё ключ", callback_data="set:input:mistral_key")
+    kb.button(text="✅ Назад", callback_data="set:done:key")
+    kb.adjust(2)
     await message.answer(
-        f"✅ Сохранено Mistral ключей: {count}.\n🔑 В базе Mistral ключей: {total}."
+        f"✅ Сохранено Mistral ключей: {count}.\n🔑 В базе Mistral ключей: {total}.\n\n"
+        "Добавить ещё?",
+        reply_markup=kb.as_markup(),
     )
 
 
@@ -1895,10 +1899,15 @@ async def step_cloudflare_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "cloudflare", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "cloudflare")
-    await state.clear()
     count = len(parts)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Ещё ключ", callback_data="set:input:cloudflare_key")
+    kb.button(text="✅ Назад", callback_data="set:done:key")
+    kb.adjust(2)
     await message.answer(
-        f"✅ Сохранено Cloudflare ключей: {count}.\n🔑 В базе Cloudflare ключей: {total}."
+        f"✅ Сохранено Cloudflare ключей: {count}.\n🔑 В базе Cloudflare ключей: {total}.\n\n"
+        "Добавить ещё?",
+        reply_markup=kb.as_markup(),
     )
 
 
@@ -1924,10 +1933,15 @@ async def step_deepseek_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "deepseek", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "deepseek")
-    await state.clear()
     count = len(parts)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Ещё ключ", callback_data="set:input:deepseek_key")
+    kb.button(text="✅ Назад", callback_data="set:done:key")
+    kb.adjust(2)
     await message.answer(
-        f"✅ Сохранено DeepSeek ключей: {count}.\n🔑 В базе DeepSeek ключей: {total}."
+        f"✅ Сохранено DeepSeek ключей: {count}.\n🔑 В базе DeepSeek ключей: {total}.\n\n"
+        "Добавить ещё?",
+        reply_markup=kb.as_markup(),
     )
 
 
@@ -1953,10 +1967,15 @@ async def step_grok_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "grok", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "grok")
-    await state.clear()
     count = len(parts)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Ещё ключ", callback_data="set:input:grok_key")
+    kb.button(text="✅ Назад", callback_data="set:done:key")
+    kb.adjust(2)
     await message.answer(
-        f"✅ Сохранено Grok ключей: {count}.\n🔑 В базе Grok ключей: {total}."
+        f"✅ Сохранено Grok ключей: {count}.\n🔑 В базе Grok ключей: {total}.\n\n"
+        "Добавить ещё?",
+        reply_markup=kb.as_markup(),
     )
 
 
@@ -1982,10 +2001,15 @@ async def step_mimo_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "mimo", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "mimo")
-    await state.clear()
     count = len(parts)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Ещё ключ", callback_data="set:input:mimo_key")
+    kb.button(text="✅ Назад", callback_data="set:done:key")
+    kb.adjust(2)
     await message.answer(
-        f"✅ Сохранено MiMo ключей: {count}.\n🔑 В базе MiMo ключей: {total}."
+        f"✅ Сохранено MiMo ключей: {count}.\n🔑 В базе MiMo ключей: {total}.\n\n"
+        "Добавить ещё?",
+        reply_markup=kb.as_markup(),
     )
 
 
@@ -2011,11 +2035,25 @@ async def step_groq_key(message: Message, state: FSMContext) -> None:
         owner = await get_or_create_user(session, message.from_user.id)
         await upsert_api_key(session, owner, "groq", ",".join(parts))
         total = await _count_slots_for_provider(session, owner, "groq")
-    await state.clear()
     count = len(parts)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Ещё ключ", callback_data="set:input:groq_key")
+    kb.button(text="✅ Назад", callback_data="set:done:key")
+    kb.adjust(2)
     await message.answer(
-        f"✅ Сохранено Groq ключей: {count}.\n🔑 В базе Groq ключей: {total}."
+        f"✅ Сохранено Groq ключей: {count}.\n🔑 В базе Groq ключей: {total}.\n\n"
+        "Добавить ещё?",
+        reply_markup=kb.as_markup(),
     )
+
+
+@router.callback_query(F.data == "set:done:key")
+async def cb_done_adding_key(callback: CallbackQuery, state: FSMContext) -> None:
+    """Закрывает ввод ключей, возвращается в настройки."""
+    await state.clear()
+    text, kb = await _render_section(callback.from_user.id, "keys")
+    await _safe_edit(callback.message, text, kb)
+    await callback.answer()
 
 
 @router.message(SettingsStates.waiting_digest_time)

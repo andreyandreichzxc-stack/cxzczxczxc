@@ -410,10 +410,9 @@ async def cb_onboarding_pick_provider(call: CallbackQuery, state: FSMContext) ->
     await state.update_data(onboarding_provider=provider)
     await state.set_state(OnboardingStates.waiting_llm_key)
 
-    hint = _key_hint_for_provider(provider)
     await call.message.answer(
         f"🔑 <b>{provider_display_name(provider)}</b>\n\n"
-        f"Пришли API-ключ.\n{hint}\n\n"
+        "Пришли API-ключ.\n\n"
         "/cancel — назад к выбору."
     )
 
@@ -448,11 +447,34 @@ async def step_onboarding_llm_key_v2(message: Message, state: FSMContext) -> Non
         owner = await get_or_create_user(session, tg_id)
         await upsert_api_key(session, owner, provider, raw)
 
-    await state.set_state(OnboardingStates.waiting_timezone)
+    await state.set_state(OnboardingStates.waiting_llm_key)  # остаёмся в этом стейте
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить ещё ключ", callback_data="onb:provider:goback")
+    kb.button(text="✅ Закончить", callback_data="onb:done:keys")
+    kb.adjust(2)
     await message.answer(
-        f"✅ Ключ <b>{provider_display_name(provider)}</b> сохранён и проверен!"
+        f"✅ Ключ <b>{provider_display_name(provider)}</b> сохранён и проверен!\n\n"
+        "Хочешь добавить ещё ключей или провайдеров?",
+        reply_markup=kb.as_markup(),
     )
-    await _send_timezone_step(message.chat.id, message.bot)
+
+
+@router.callback_query(F.data == "onb:provider:goback")
+async def cb_onboarding_more_keys(call: CallbackQuery, state: FSMContext) -> None:
+    """Пользователь хочет добавить ещё ключей — возвращаем к выбору провайдера."""
+    await call.answer()
+    await state.set_state(OnboardingStates.waiting_provider_choice)
+    await _send_llm_key_step(call.message.chat.id, call.bot)
+    await call.message.delete()
+
+
+@router.callback_query(F.data == "onb:done:keys")
+async def cb_onboarding_done_keys(call: CallbackQuery, state: FSMContext) -> None:
+    """Пользователь закончил с ключами — переход к timezone."""
+    await call.answer()
+    await state.set_state(OnboardingStates.waiting_timezone)
+    await call.message.delete()
+    await _send_timezone_step(call.message.chat.id, call.bot)
 
 
 # ─── Step 2b: TTS provider category ──────────────────────────────────
@@ -688,24 +710,6 @@ def provider_display_name(provider: str) -> str:
         "custom": "Свой провайдер",
     }
     return names.get(provider, provider)
-
-
-def _key_hint_for_provider(provider: str) -> str:
-    """Возвращает подсказку формата ключа для провайдера."""
-    hints = {
-        "openai": "Формат: <code>sk-...</code>",
-        "gemini": "Формат: <code>AIzaSy...</code>",
-        "mistral": "Формат: <code>Nb...</code>",
-        "anthropic": "Формат: <code>sk-ant-...</code>",
-        "deepseek": "Формат: <code>sk-...</code>",
-        "grok": "Формат: <code>xai-...</code>",
-        "groq": "Формат: <code>gsk_...</code>",
-        "mimo": "Любой формат",
-        "cloudflare": "Длинный токен (base64)",
-        "openrouter": "Формат: <code>sk-or-...</code>",
-        "custom": "Любой формат",
-    }
-    return hints.get(provider, "")
 
 
 async def _validate_key_v2(provider: str, key: str) -> tuple[bool, str | None]:
