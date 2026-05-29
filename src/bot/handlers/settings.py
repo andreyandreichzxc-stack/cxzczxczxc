@@ -288,9 +288,16 @@ async def cb_menu(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data == "settings:back")
+@router.callback_query(F.data.startswith("settings:back"))
 async def cb_settings_back(callback: CallbackQuery) -> None:
-    await _show_main_menu(callback)
+    parts = callback.data.split(":", 2)
+    parent = parts[2] if len(parts) > 2 else "menu"
+    if parent == "menu":
+        await _show_main_menu(callback)
+    else:
+        text, kb = await _render_section(callback.from_user.id, parent)
+        await _safe_edit(callback.message, text, kb)
+    await callback.answer()
 
 
 async def _show_main_menu(callback: CallbackQuery) -> None:
@@ -517,6 +524,7 @@ def _section_for_key(key: str) -> str:
         "adaptive_mode_enabled": "personality",
         "anti_ai_enabled": "personality",
         "anti_ai_mode": "personality",
+        "monitor_only_selected_folders": "folders",
     }.get(key, "menu")
 
 
@@ -539,8 +547,10 @@ async def cb_open_section(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-def _back_row():
-    return [InlineKeyboardButton(text="🔙 Назад", callback_data="settings:back")]
+def _back_row(parent: str = "menu"):
+    return [
+        InlineKeyboardButton(text="🔙 Назад", callback_data=f"settings:back:{parent}")
+    ]
 
 
 async def _render_section(
@@ -899,7 +909,7 @@ async def _render_section(
                     text="🗑 Сбросить все", callback_data="set:model:reset_all"
                 )
             )
-            kb.row(*_back_row())
+            kb.row(*_back_row("brain"))
 
         elif section.startswith("model_sel:"):
             # Подменю выбора модели для конкретного task_type
@@ -998,7 +1008,7 @@ async def _render_section(
                         callback_data=f"set:model:del:{task_type}",
                     )
                 )
-            kb.row(*_back_row())
+            kb.row(*_back_row("models_brain"))
 
         elif section == "tz":
             text = (
@@ -1741,21 +1751,30 @@ async def step_custom_model_name(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     task_type = data.get("custom_model_task_type", "default")
 
-    # Soft validation: catalog check (warn but still save)
+    # Soft validation: catalog check across ALL user's providers (warn but still save)
     catalog_warning = ""
     try:
-        from src.llm.provider_catalog import get_provider
+        from src.llm.provider_catalog import get_provider, LLM_PROVIDERS
 
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
+            slots = await list_key_slots(session, owner)
+            user_providers = {s.provider for s in slots if s.enabled}
+        # Ищем модель во всех каталогах, для которых есть ключи
+        found_in = None
+        for pi in LLM_PROVIDERS:
+            if pi.name in user_providers and pi.models and model_name in pi.models:
+                found_in = pi
+                break
+        if found_in is None:
             current_provider = owner.settings.llm_provider
-        provider_info = get_provider(current_provider)
-        if provider_info and provider_info.models:
-            if model_name not in provider_info.models:
+            provider_info = get_provider(current_provider)
+            if provider_info and provider_info.models:
                 catalog_warning = (
-                    f"\n\n⚠️ Модель <code>{model_name}</code> не найдена в каталоге "
-                    f"провайдера <b>{current_provider}</b>.\n"
-                    f"Доступные: {', '.join(f'<code>{m}</code>' for m in provider_info.models[:8])}\n"
+                    f"\n\n⚠️ Модель <code>{model_name}</code> не найдена в каталогах "
+                    f"твоих провайдеров.\n"
+                    f"Доступные у <b>{current_provider}</b>: "
+                    f"{', '.join(f'<code>{m}</code>' for m in provider_info.models[:8])}\n"
                     f"Сохраняю, но проверь имя на опечатки."
                 )
     except Exception:

@@ -632,12 +632,17 @@ async def step_custom_provider_model(message: Message, state: FSMContext) -> Non
                     category="llm",
                 )
 
-    await state.set_state(OnboardingStates.waiting_timezone)
+    await state.set_state(OnboardingStates.waiting_llm_key)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить ещё ключ", callback_data="onb:goback")
+    kb.button(text="✅ Закончить", callback_data="onb:done:keys")
+    kb.adjust(2)
     await message.answer(
         f"✅ Кастомный провайдер <b>{provider_name}</b> добавлен!\n"
-        f"Модели: {', '.join(v for v in models.values() if v)}"
+        f"Модели: {', '.join(v for v in models.values() if v)}\n\n"
+        "Добавить ещё ключ или перейти дальше?",
+        reply_markup=kb.as_markup(),
     )
-    await _send_timezone_step(message.chat.id, message.bot)
 
 
 def _detect_provider(key: str) -> str | None:
