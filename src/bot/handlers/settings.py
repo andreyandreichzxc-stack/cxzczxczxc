@@ -505,10 +505,10 @@ def _section_for_key(key: str) -> str:
         "reminder_overdue_enabled": "reminders",
         "news_enabled": "news",
         "news_window_hours": "news",
-        "llm_provider": "llm",
-        "use_heavy_model": "llm",
-        "transcription_mode": "transcription",
-        "transcription_api_provider": "transcription",
+        "llm_provider": "brain",
+        "use_heavy_model": "brain",
+        "transcription_mode": "brain",
+        "transcription_api_provider": "brain",
         "draft_suggestions_enabled": "drafts",
         "draft_only_important": "drafts",
         "draft_max_per_hour": "drafts",
@@ -525,6 +525,11 @@ def _section_for_key(key: str) -> str:
         "anti_ai_enabled": "personality",
         "anti_ai_mode": "personality",
         "monitor_only_selected_folders": "folders",
+        "auto_sync_enabled": "sync",
+        "auto_extract_memories": "sync",
+        "include_saved_messages": "sync",
+        "smart_digest_enabled": "smart_digest",
+        "urgent_notify_enabled": "smart_digest",
     }.get(key, "menu")
 
 
