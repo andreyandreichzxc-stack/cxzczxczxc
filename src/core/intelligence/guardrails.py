@@ -64,6 +64,7 @@ _INTENT_RISK_MAP: dict[str, ActionRisk] = {
     "list_keys": ActionRisk.LOW,
     "chat": ActionRisk.LOW,
     "clarify": ActionRisk.LOW,
+    "admit_ignorance": ActionRisk.LOW,
     "unknown": ActionRisk.LOW,
     "summarize_chat": ActionRisk.LOW,
     "catchup": ActionRisk.LOW,
@@ -488,7 +489,9 @@ def sanitize_action(intent: str, params: dict[str, Any]) -> dict[str, Any]:
     """
     spec = action_registry.get(intent)
     tool_allowed = _registered_tool_allowed_keys(intent) if spec is None else None
-    allowed: set[str] = spec.allowed if spec is not None else (tool_allowed or SAFE_KEYS)
+    allowed: set[str] = (
+        spec.allowed if spec is not None else (tool_allowed or SAFE_KEYS)
+    )
 
     cleaned: dict[str, Any] = {}
     for k, v in params.items():

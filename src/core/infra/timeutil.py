@@ -30,7 +30,8 @@ TZ_PRESETS: list[str] = [
 
 def get_user_tz(user) -> str:
     """Get user's timezone string with UTC fallback."""
-    return user.settings.timezone if user.settings else "UTC"
+    tz = user.settings.timezone if user.settings else None
+    return tz or "UTC"
 
 
 def parse_tz(name: str | None) -> ZoneInfo:

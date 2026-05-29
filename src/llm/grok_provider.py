@@ -12,13 +12,14 @@ import httpx
 from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
-from src.config import LLMDefaults
 from src.llm._openai_compat_mixin import OpenAICompatBaseMixin
 from src.llm._ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
 
 GROK_BASE_URL = "https://api.x.ai/v1"
+GROK_CHAT_LIGHT = "grok-4.3"
+GROK_CHAT_HEAVY = "grok-4.20-0309-reasoning"
 
 
 class GrokProvider(OpenAICompatBaseMixin):
@@ -39,9 +40,7 @@ class GrokProvider(OpenAICompatBaseMixin):
         self._model = model
 
     def _resolve_model(self, heavy: bool) -> str:
-        return self._model or (
-            LLMDefaults.GROK_CHAT_HEAVY if heavy else LLMDefaults.GROK_CHAT_LIGHT
-        )
+        return self._model or (GROK_CHAT_HEAVY if heavy else GROK_CHAT_LIGHT)
 
     async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
         model = self._resolve_model(heavy)

@@ -4,8 +4,10 @@ import httpx
 from google import genai
 from google.genai import errors as genai_errors
 
-from src.config import LLMDefaults
 from src.llm.base import ChatMessage
+
+GEMINI_CHAT_LIGHT = "gemini-3-flash"
+GEMINI_CHAT_HEAVY = "gemini-3.1-pro"
 
 
 def _to_gemini_contents(messages: list[ChatMessage]) -> tuple[str | None, list[dict]]:
@@ -55,9 +57,7 @@ class GeminiProvider:
         return await asyncio.to_thread(_check)
 
     def _resolve_model(self, heavy: bool) -> str:
-        return self._model or (
-            LLMDefaults.GEMINI_CHAT_HEAVY if heavy else LLMDefaults.GEMINI_CHAT_LIGHT
-        )
+        return self._model or (GEMINI_CHAT_HEAVY if heavy else GEMINI_CHAT_LIGHT)
 
     async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
         model = self._resolve_model(heavy)

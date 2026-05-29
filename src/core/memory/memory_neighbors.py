@@ -248,3 +248,153 @@ def format_cross_insights(insights: list[str]) -> str:
     for ins in insights:
         lines.append(f"  {ins}")
     return "\n".join(lines)
+
+
+async def get_contact_graph(user_id: int, limit: int = 20) -> dict:
+    """Строит граф связей между контактами на основе MemoryLink.
+
+    Анализирует все MemoryLink с непустым relation_type, находит
+    связи между разными контактами и возвращает nodes + edges.
+
+    Параметры:
+        user_id: Telegram ID владельца.
+        limit: Максимальное число рёбер (по умолчанию 20).
+
+    Возвращает:
+        {"nodes": ["Маша", "Петя", ...], "edges": [{"from": "...", "to": "...", "relation": "..."}, ...]}
+    """
+    from collections import defaultdict
+    from sqlalchemy import select
+
+    from src.db.models import MemoryLink
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, user_id)
+        if not owner:
+            return {"nodes": [], "edges": []}
+
+        try:
+            # Загружаем все связи с непустым relation_type
+            stmt = (
+                select(MemoryLink)
+                .where(
+                    MemoryLink.user_id == owner.id,
+                    MemoryLink.relation_type.isnot(None),
+                    MemoryLink.relation_type != "",
+                )
+                .order_by(MemoryLink.weight.desc())
+                .limit(limit * 3)  # больше для фильтрации
+            )
+            result = await session.execute(stmt)
+            links = result.scalars().all()
+
+            if not links:
+                return {"nodes": [], "edges": []}
+
+            # Собираем все memory_id для batch-загрузки
+            memory_ids: set[int] = set()
+            for link in links:
+                memory_ids.add(link.source_id)
+                memory_ids.add(link.target_id)
+
+            # Batch-загрузка Memory записей
+            mem_stmt = select(Memory).where(
+                Memory.id.in_(memory_ids),
+                Memory.user_id == owner.id,
+                Memory.is_active.is_(True),
+            )
+            mem_result = await session.execute(mem_stmt)
+            memories_by_id: dict[int, Memory] = {
+                m.id: m for m in mem_result.scalars().all()
+            }
+
+            # Собираем contact_id для batch-загрузки контактов
+            contact_ids: set[int] = set()
+            for mem in memories_by_id.values():
+                if mem.contact_id:
+                    contact_ids.add(mem.contact_id)
+
+            # Batch-загрузка контактов
+            contacts_by_id: dict[int, str] = {}
+            if contact_ids:
+                from sqlalchemy import select as sa_select
+                from src.db.models import Contact
+
+                contact_stmt = sa_select(Contact).where(
+                    Contact.id.in_(contact_ids),
+                    Contact.user_id == owner.id,
+                )
+                contact_result = await session.execute(contact_stmt)
+                for contact in contact_result.scalars().all():
+                    contacts_by_id[contact.id] = contact.display_name or str(contact.id)
+                # Заполняем оставшиеся fallback'ом
+                for cid in contact_ids:
+                    if cid not in contacts_by_id:
+                        contacts_by_id[cid] = str(cid)
+
+            # Строим граф: ищем связи между разными контактами
+            nodes: set[str] = set()
+            edges: list[dict] = []
+            seen_pairs: set[tuple[str, str]] = set()
+
+            for link in links:
+                src_mem = memories_by_id.get(link.source_id)
+                tgt_mem = memories_by_id.get(link.target_id)
+                if not src_mem or not tgt_mem:
+                    continue
+                if not src_mem.contact_id or not tgt_mem.contact_id:
+                    continue
+                if src_mem.contact_id == tgt_mem.contact_id:
+                    continue  # один и тот же контакт — пропускаем
+
+                src_name = contacts_by_id.get(
+                    src_mem.contact_id, str(src_mem.contact_id)
+                )
+                tgt_name = contacts_by_id.get(
+                    tgt_mem.contact_id, str(tgt_mem.contact_id)
+                )
+
+                # Нормализуем порядок для дедупликации
+                pair: tuple[str, str] = (
+                    (src_name, tgt_name)
+                    if src_name < tgt_name
+                    else (tgt_name, src_name)
+                )
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+
+                nodes.add(src_name)
+                nodes.add(tgt_name)
+
+                # Человекочитаемое название связи
+                relation_map = {
+                    "co_entity": "связаны",
+                    "co_temporal": "одновременно",
+                    "supports": "поддерживает",
+                    "contradicts": "противоречит",
+                    "cause": "причина",
+                    "effect": "следствие",
+                    "continues": "продолжает",
+                    "preceded": "предшествует",
+                }
+                relation_label = relation_map.get(
+                    (link.relation_type or "").lower(), link.relation_type or "связаны"
+                )
+
+                edges.append(
+                    {
+                        "from": src_name,
+                        "to": tgt_name,
+                        "relation": relation_label,
+                    }
+                )
+
+                if len(edges) >= limit:
+                    break
+
+            return {"nodes": sorted(nodes), "edges": edges}
+
+        except Exception:
+            logger.debug("get_contact_graph failed", exc_info=True)
+            return {"nodes": [], "edges": []}

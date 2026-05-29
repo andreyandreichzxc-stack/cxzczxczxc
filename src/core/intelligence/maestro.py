@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 from src.config import settings
+from src.core.infra.key_guard import safe_str
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.actions.vector_store import get_vector_store
 from src.core.intelligence.agent_orchestrator import (
@@ -26,6 +27,16 @@ from src.core.actions.tool_registry import tool_registry
 from src.core.intelligence.guardrails import evaluate as guardrail_evaluate
 
 logger = logging.getLogger(__name__)
+
+# ── Fallback chains для инструментов ──
+# При ошибке выполнения тула пробуем альтернативы по порядку.
+# admit_ignorance — всегда последний рубеж: признаём неспособность и предлагаем поиск.
+_TOOL_FALLBACKS = {
+    "web_search": ["mcp_web", "admit_ignorance"],
+    "analyze_image": ["admit_ignorance"],
+    "code_exec": ["admit_ignorance"],
+    "mcp_youtube": ["admit_ignorance"],
+}
 
 # ── Максимальное число итераций в tool‑loop ──
 MAX_TOOL_ITERATIONS = settings.max_tool_iterations
@@ -60,179 +71,7 @@ def _extract_json_object(raw: str) -> dict | None:
     return None
 
 
-MAESTRO_SYSTEM = """Ты — главный AI-ассистент владельца Telegram. Ты общаешься с ним как живой собеседник.
-
-Пользователь НЕ пишет тебе команды. Он говорит как с другом — естественно, свободно. Твоя задача: ПОНЯТЬ его, а не искать ключевые слова.
-
-## Как строить диалог
-1. **Пользователь болтает** — болтай в ответ. Будь живым, с юмором, эмпатией.
-2. **Пользователь рассказывает о себе** — запомни факты (через memory), прояви интерес.
-3. **Пользователю нужно действие** — пойми какое и подтяни нужных агентов.
-4. **Пользователь неконкретен** — переспроси. «Кому?», «О ком речь?», «В каком чате?».
-   НИКОГДА не додумывай. Лучше уточнить, чем ошибиться.
-5. **Используй эмодзи** — в каждом ответе 1-3 эмодзи в тему. 
-   Не перебарщивай (не больше 1 эмодзи на 2 предложения).
-   Эмодзи должны быть уместны: 🌊 про море, 💪 про спорт, 😄 про радость, ☕ про утро.
-    НЕ ставь эмодзи в каждой строке — только там где они добавляют эмоцию.
-6. **Используй память чтобы быть живым**:
-   - На «привет» / «здарова» / «как дела» — вспомни о чём говорили в последний раз.
-     «Привет! В прошлый раз обсуждали дедлайн с Артёмом. Как продвигается? 🚀»
-   - Если в `memory_context` есть свежие факты (последние 3 дня) — ОБЯЗАТЕЛЬНО упомяни их в ответе.
-   - Если знаешь активные задачи владельца — напомни о них естественно.
-   - НЕ будь навязчивым. Если человек просто поздоровался — одного контекстного намёка достаточно.
-7. **Напоминай о задачах когда уместно**:
-   - Когда пользователь спрашивает «что делать» / «какие планы» / «напомни» — покажи активные задачи из памяти.
-   - Когда пользователь говорит что занят / не знает с чего начать — предложи приоритеты.
-   - Формат: «У тебя 3 задачи горят: 🔥 дедлайн с Артёмом, 📋 отчёт, 📞 звонок маме. С какой начнём?»
-   - НЕ напоминай о задачах когда человек отдыхает / болтает о фильмах / жалуется на жизнь. Только когда реально уместно.
-8. **Замечай связи между контактами**:
-   - Если в `memory_context` видны общие темы у разных людей (оба упоминают «дедлайн», «проект», «болезнь») — спроси: «Это один проект или разные?»
-   - Если кто-то из контактов в негативном настроении несколько дней — предупреди владельца перед отправкой сообщения этому человеку.
-   - Не додумывай связи которых нет. Только если факты явно пересекаются.
-
-## Твои агенты (вызывай когда нужно)
-- **search** — найди контакт/чат/сообщение по имени или запросу
-- **memory** — вспомни/сохрани факты о человеке (предпочтения, прошлые темы)
-- **draft** — напиши черновик ответа
-- **summarizer** — сводка переписки, «где остановились»
-- **digest** — дайджест входящих
-- **commitment** — извлеки обещания, дедлайны
-- **urgency** — насколько срочное сообщение
-- **delegate** — создай динамического суб-агента для анализа подзадачи.
-  Параметры: `task` (что анализировать), `instructions` (как анализировать),
-  `context` (доп. данные), `contact` (привязать к чату).
-  Используй для декомпозиции: разбей сложный запрос на 2-3 подзадачи
-  и запусти каждую через отдельного `delegate`-агента параллельно.
-
-## Все доступные действия (intents) — полный каталог
-
-### 📝 Сообщения и переписка
-- **send_message** — отправить сообщение контакту
-- **draft_reply** — черновик ответа для контакта
-- **summarize_chat** — саммари переписки с контактом
-- **ask_chat** — проанализировать переписку, ответить на вопрос о ней, дать оценку/вывод
-- **catchup** — восстановить контекст переписки (где остановились)
-- **tasks_for_chat** — извлечь задачи/обещания из переписки
-- **add_reminders_from_chat** — извлечь напоминания из чата
-- **extract_memories_from_chat** — извлечь факты из переписки
-
-### 🧠 Память
-- **store_memory** — сохранить факт о владельце или контакте
-- **list_memories** — показать сохранённые факты
-- **check_memories** — проверить старые/негативные факты
-- **forget_memory** — удалить факты
-
-### 🔍 Поиск и информация
-- **search** — поиск по сообщениям
-- **find_in_chats** — найти чат по теме
-- **show_inbox** — показать входящие сообщения
-- **show_digest** — сводка непрочитанного / утренний дайджест
-- **show_today** — сводка событий за сегодня
-- **show_threads** — активные диалоги
-- **show_trajectory** — история действий пользователя
-- **show_skills** — список возможностей бота
-- **show_profile** — профиль пользователя
-- **show_self** — профиль владельца
-- **show_style** — стиль общения
-- **list_keys** — список API-ключей
-
-### ⏰ Напоминания
-- **add_reminder** — поставить напоминание
-- **remove_reminder** — снять напоминание
-- **list_todos** — открытые обещания/напоминания
-
-### 📰 Новости
-- **news_digest** — новостной дайджест по теме
-- **add_news_topic** — добавить тему новостей
-- **remove_news_topic** — удалить тему новостей
-
-### ⚙️ Настройки
-- **set_setting** — изменить любую настройку
-- **change_auto_mode** — режим авто-ответа
-- **set_quiet_hours** — тихие часы
-- **add_api_key** — добавить API-ключ
-- **remove_api_key** — удалить слот ключа
-- **toggle_api_key** — включить/выключить ключ
-
-### 📊 Аналитика
-- **full_analysis** — полный анализ переписок
-- **index_chats** — переиндексировать чаты
-
-### 💬 Базовые
-- **chat** — просто ответить (болтовня, совет, вопрос)
-- **clarify** — уточнить у пользователя
-- **multi** — выполнить несколько действий одновременно
-
-## Формат ответа (JSON)
-{
-  "understood": "что ты понял (1 фраза, для себя)",
-  "plan": ["шаг1", "шаг2"],
-  "agents_to_call": [
-    {"agent": "search", "query": "что искать", "cache": true}
-  ],
-  "final_response": "ТВОЙ ОТВЕТ пользователю (живой, на русском, лаконичный). Заполняй ВСЕГДА, даже если нужны агенты.",
-  "needs_clarification": "вопрос к пользователю если НЕПОНЯТНО (иначе null)"
-}
-
-## ПРАВИЛА
-- **ВСЕГДА заполняй final_response**, даже когда нужны агенты. Ответь что-то живое: «Сейчас гляну…», «Дай подумать…», «Одну секунду, проверю переписку…» — а агенты подтянут данные следом.
-- Простая болтовня («привет», «как дела?», «чё делаешь?») → ТОЛЬКО final_response, без агентов.
-- Рассказ о себе («я устал», «меня повысили», «расстался с девушкой») → final_response (живой ответ) + agents_to_call: ["memory"] для сохранения факта.
-- Нужен контакт → search.
-- Нужен контекст о человеке → memory.
-- Нужно написать сообщение → search + memory + draft.
-- Вопрос про переписку → summarizer.
-- **НЕ ПЕРЕСПРАШИВАЙ если и так понятно.** Но если неясно — ОБЯЗАТЕЛЬНО спроси (needs_clarification).
-- **НИКОГДА не переспрашивай уточнения, если информация уже есть в контексте диалога.**
-- **Если пользователь говорит «контакты», «мои контакты», «список контактов» — сразу показывай список, не спрашивая.**
-- **Действуй, а не спрашивай.** Только если ДЕЙСТВИТЕЛЬНО непонятно (2+ равновероятных варианта) — уточни ОДИН раз.
-- Не будь роботом. Будь собеседником.
-- Если в контексте памяти есть релевантный факт — ОБЯЗАТЕЛЬНО используй его в ответе.
-  Например: «Кстати, ты говорил что у тебя отпуск в июле! 🌴» или «Помню, ты упоминал про проект с Артёмом».
-  Не натягивай — только если факт реально связан с темой разговора.
-- Твой стиль общения может быть изменён владельцем через «ТВОЙ СТИЛЬ ОБЩЕНИЯ» в промпте. Следуй этим правилам.
-
-## Делегирование суб-агентам (декомпозиция задач)
-Когда пользователь даёт **сложный, многосоставной запрос** — разбей его на подзадачи
-и запусти суб-агентов. Есть два способа:
-
-### Способ 1: `delegate_task` инструмент (в tool-loop)
-Вызови инструмент `delegate_task` с параметрами:
-```json
-{"tool": "delegate_task", "params": {
-  "task": "что анализировать",
-  "instructions": "как анализировать (роль, угол, фокус)",
-  "context": "дополнительные данные для анализа",
-  "contact": "имя контакта (опционально)"
-}}
-```
-Каждый вызов `delegate_task` создаёт нового суб-агента с собственным LLM-контекстом.
-Используй для последовательного анализа: сначала один, потом другой на основе результата.
-
-### Способ 2: `delegate` агент (в agents_to_call, параллельно)
-Укажи в `agents_to_call` нескольких `delegate`-агентов с разными задачами:
-```json
-{
-  "plan": ["проанализировать тон", "оценить срочность", "извлечь задачи"],
-  "agents_to_call": [
-    {"agent": "delegate", "task": "Проанализируй тон и эмоции", "instructions": "Ты аналитик тона", "contact": "Иван"},
-    {"agent": "delegate", "task": "Оцени срочность сообщений", "instructions": "Ты оцениваешь приоритеты", "contact": "Иван"},
-    {"agent": "delegate", "task": "Извлеки задачи и дедлайны", "instructions": "Ты извлекаешь action items", "contact": "Иван"}
-  ],
-  "final_response": "Анализирую в трёх разрезах..."
-}
-```
-Все `delegate`-агенты запустятся **параллельно** — каждый со своим LLM-контекстом.
-Результаты соберутся и отдадутся тебе для синтеза финального ответа.
-
-### Когда использовать декомпозицию
-- **Сложный анализ**: «что думаешь об отношениях с коллегой?» → разбей на tone + sentiment + tasks
-- **Много вопросов в одном**: «кто, когда, почему?» → каждый вопрос отдельному агенту
-- **Разные углы**: формальный анализ + интуитивная оценка + факт-чекинг
-- **Сравнение**: «сравни переписки с Аней и с Петей» → два delegate параллельно, потом синтез
-- **Не используй** для простых запросов (погода, привет, одно действие) — оверхед не нужен
-- Твой стиль общения может быть изменён владельцем через «ТВОЙ СТИЛЬ ОБЩЕНИЯ» в промпте. Следуй этим правилам.
-"""
+from src.core.intelligence.soul_blocks import MAESTRO_SYSTEM_FULL as MAESTRO_SYSTEM
 
 MAESTRO_AFTER_AGENTS = """Ты — главный AI-ассистент. Ты запросил информацию у агентов. Результаты:
 
@@ -264,9 +103,10 @@ async def process(
     register_builtin_tools()
 
     # Override provider model if maestro_model is configured
-    if settings.maestro_model and not getattr(provider, "_model", None):
+    maestro_model = getattr(settings, "maestro_model", None)
+    if maestro_model and not getattr(provider, "_model", None):
         try:
-            provider._model = settings.maestro_model  # type: ignore[attr-defined]
+            provider._model = maestro_model  # type: ignore[attr-defined]
         except (AttributeError, TypeError):
             pass
 
@@ -310,6 +150,9 @@ async def process(
             logger.debug("RAG search non-critical fail", exc_info=True)
 
     # --- Modular prompt assembly (Block 4) ---
+    ctx = None
+    _used_skills_meta: list[dict] = []
+    frozen_snapshot_injected = False
     try:
         from src.core.intelligence.prompt_assembler import (
             AssemblyContext,
@@ -377,6 +220,18 @@ async def process(
             except Exception:
                 logger.debug("Failed to load correction context", exc_info=True)
 
+        # --- Voice transcription metadata ---
+        _transcription_meta = None
+        if owner_id is not None:
+            try:
+                from src.core.memory.conversation_context import (
+                    get_and_clear_transcription_meta,
+                )
+
+                _transcription_meta = await get_and_clear_transcription_meta(owner_id)
+            except Exception:
+                logger.debug("Failed to load transcription_meta", exc_info=True)
+
         ctx = AssemblyContext(
             target="maestro",
             user_id=owner_id or 0,
@@ -390,6 +245,7 @@ async def process(
             memory_context=memory_context or "",
             self_profile=self_profile or "",
             correction_context=correction_context,
+            transcription_meta=_transcription_meta,
         )
         _used_skills_meta: list[dict] = []
         if owner_id is not None:
@@ -435,7 +291,7 @@ async def process(
                             frozen_provider,
                         )
 
-                        frozen_provider.set_frozen(
+                        await frozen_provider.set_frozen(
                             owner_id,
                             [
                                 {"fact": f"[{_f.reason}] {_f.fact}"}
@@ -498,6 +354,22 @@ async def process(
                 )
         except Exception:
             logger.debug("Failed to load DSM context", exc_info=True)
+
+        # --- Contact graph: build cross-contact relationship graph ---
+        if owner_id is not None:
+            try:
+                from src.core.memory.memory_neighbors import get_contact_graph
+
+                graph = await get_contact_graph(owner_id, limit=20)
+                if graph.get("edges"):
+                    lines = []
+                    for edge in graph["edges"]:
+                        lines.append(
+                            f"{edge['from']} ↔ {edge['to']} ({edge['relation']})"
+                        )
+                    ctx.contact_graph = "\n".join(lines)
+            except Exception:
+                logger.debug("Failed to build contact graph", exc_info=True)
 
         system = prompt_assembler.assemble(ctx)
     except Exception:
@@ -590,7 +462,7 @@ async def process(
         "tools_blocked": [],
         "guardrail_decision": {},
     }
-    if ctx.memory_context:
+    if ctx is not None and ctx.memory_context:
         trace["memory_facts_count"] = sum(
             1
             for line in ctx.memory_context.splitlines()
@@ -623,7 +495,10 @@ async def process(
                 "final_response": "⏱️ Ответ занял слишком много времени. Попробуй короче.",
             }
         except Exception as e:
-            if "context_length" in str(e).lower() or "token" in str(e).lower():
+            if (
+                "context_length" in safe_str(e).lower()
+                or "token" in safe_str(e).lower()
+            ):
                 logger.warning("Maestro context overflow: %s", e)
                 return {
                     "understood": "контекст переполнен",
@@ -631,7 +506,7 @@ async def process(
                     "agents_to_call": [],
                     "final_response": "📏 Контекст переполнен. Упрости запрос или уменьши историю.",
                 }
-            if "rate" in str(e).lower():
+            if "rate" in safe_str(e).lower():
                 logger.warning("Maestro rate limit: %s", e)
                 return {
                     "understood": "лимит",
@@ -660,6 +535,19 @@ async def process(
                 "agents_to_call": [],
                 "final_response": raw,
             }
+
+        # ── Confidence & admit_ignorance check ──
+        try:
+            confidence = float(parsed.get("confidence", 0.8))
+        except (ValueError, TypeError):
+            confidence = 0.8
+        confidence = max(0.0, min(1.0, confidence))
+        intent = parsed.get("intent", "")
+
+        # Если низкий confidence — переспрашиваем или признаёмся
+        if confidence < 0.5 and intent != "clarify" and intent != "admit_ignorance":
+            intent = "admit_ignorance"
+            parsed["intent"] = intent
 
         # ── Tool call? ──
         if (
@@ -703,6 +591,8 @@ async def process(
             if userbot_manager is not None:
                 runtime_kwargs["userbot_manager"] = userbot_manager
 
+            tool_result = None
+
             if owner_id is not None:
                 async with get_session() as session:
                     owner = await get_or_create_user(session, owner_id)
@@ -712,38 +602,219 @@ async def process(
                         client = userbot_manager.get_client(owner_id)
                         if client is not None:
                             runtime_kwargs["client"] = client
-                    result = await tool_registry.execute(
+                    # ── Tool execution with fallback chains (Plan B) ──
+                    try:
+                        tool_result = await tool_registry.execute(
+                            tool_name,
+                            _confirmed=False,
+                            **gr.sanitized_params,
+                            **runtime_kwargs,
+                        )
+                    except Exception as e:
+                        tool_result = {"error": str(e)}
+            else:
+                # ── Tool execution with fallback chains (Plan B) ──
+                try:
+                    tool_result = await tool_registry.execute(
                         tool_name,
                         _confirmed=False,
                         **gr.sanitized_params,
                         **runtime_kwargs,
                     )
-            else:
-                result = await tool_registry.execute(
-                    tool_name, _confirmed=False, **gr.sanitized_params, **runtime_kwargs
-                )
+                except Exception as e:
+                    tool_result = {"error": str(e)}
 
-            # Feed result back to LLM
-            trace["tools_executed"].append(tool_name)
-            result_str = json.dumps(result, ensure_ascii=False, default=str)
-            if len(result_str) > 4000:
-                result_str = result_str[:4000] + "…"
-            messages.append(
-                ChatMessage(
-                    role="system",
-                    content=f"Tool result ({tool_name}): {result_str}",
+            # Fallback chains — если инструмент вернул ошибку, пробуем альтернативы
+            if tool_result and isinstance(tool_result, dict) and "error" in tool_result:
+                fallbacks = _TOOL_FALLBACKS.get(tool_name, ["admit_ignorance"])
+                logger.warning(
+                    "Tool '%s' failed: %s. Trying fallbacks: %s",
+                    tool_name,
+                    tool_result.get("error", "unknown"),
+                    fallbacks,
                 )
+                for fb in fallbacks:
+                    if fb == "admit_ignorance":
+                        intent = "admit_ignorance"
+                        parsed["intent"] = intent
+                        tool_result = None
+                        break
+                    # Пробуем альтернативный инструмент
+                    try:
+                        fb_result = await tool_registry.execute(
+                            fb,
+                            _confirmed=False,
+                            **gr.sanitized_params,
+                            **runtime_kwargs,
+                        )
+                        if isinstance(fb_result, dict) and "error" in fb_result:
+                            continue  # этот fallback тоже с ошибкой, пробуем следующий
+                        tool_result = fb_result
+                        tool_name = fb  # запомнили что сработал fallback
+                        logger.info(
+                            "Fallback '%s' succeeded for '%s'", fb, parsed["tool"]
+                        )
+                        break
+                    except Exception:
+                        continue
+                else:
+                    # Все fallback'и исчерпаны — последний рубеж: admit_ignorance
+                    intent = "admit_ignorance"
+                    parsed["intent"] = intent
+                    tool_result = None
+                    logger.warning(
+                        "All fallbacks exhausted for '%s', falling back to admit_ignorance",
+                        parsed["tool"],
+                    )
+
+            # Если fallback привёл к admit_ignorance — обработаем ниже
+            if intent == "admit_ignorance":
+                pass  # fall through к admit_ignorance handler
+            elif tool_result is not None:
+                # Feed result back to LLM
+                trace["tools_executed"].append(tool_name)
+                result_str = json.dumps(tool_result, ensure_ascii=False, default=str)
+                if len(result_str) > 4000:
+                    result_str = result_str[:4000] + "…"
+                messages.append(
+                    ChatMessage(
+                        role="system",
+                        content=f"Tool result ({tool_name}): {result_str}",
+                    )
+                )
+                # Continue loop for next LLM response
+                continue
+            else:
+                # No result and not admit_ignorance — skip, continue loop
+                continue
+
+        # ── admit_ignorance handler ──
+        if intent == "admit_ignorance":
+            # Сначала пробуем веб-поиск — может, ответ уже есть в интернете
+            try:
+                from src.core.actions.mcp_web_search import web_search
+
+                search_result = await web_search(query=user_text[:300], limit=3)
+                if search_result.get("ok") and search_result.get("results"):
+                    # Нашли результаты — просим модель ответить на основе поиска
+                    snippets = "\n".join(
+                        f"- {r['title']}: {r['snippet']}"
+                        for r in search_result["results"]
+                    )
+                    search_prompt = (
+                        f"Пользователь спросил: {user_text[:500]}\n\n"
+                        f"Я нашёл в интернете:\n{snippets}\n\n"
+                        f"Дай краткий ответ на основе этих данных. Если данные неполные — так и скажи."
+                    )
+                    resp = await provider.chat(
+                        [ChatMessage(role="user", content=search_prompt)],
+                        task_type=TaskType.DEFAULT,
+                    )
+                    return {
+                        "understood": "ответ через веб-поиск",
+                        "plan": [],
+                        "agents_to_call": [],
+                        "final_response": resp,
+                        "needs_clarification": None,
+                        "used_skills": _used_skills_meta,
+                        "trace": trace,
+                    }
+            except Exception:
+                pass  # fall through к обычному admit_ignorance
+
+            reply = parsed.get(
+                "reply",
+                parsed.get(
+                    "final_response", "Хм, я не знаю точного ответа. Может, поискать?"
+                ),
             )
-            # Continue loop for next LLM response
-            continue
+            # Сохраняем вопрос как pending для будущего поиска
+            if owner_id is not None:
+                try:
+                    from src.core.memory.pending_questions import save_pending
+
+                    await save_pending(owner_id, user_text[:500], "")
+                except Exception:
+                    pass
+            return {
+                "understood": "признаю незнание",
+                "plan": [],
+                "agents_to_call": [],
+                "final_response": reply,
+                "needs_clarification": None,
+                "used_skills": _used_skills_meta,
+                "trace": trace,
+            }
+
+        # ── plan_day handler ──
+        if intent == "plan_day":
+            # Автономный план дня: собираем всё и отдаём одним сообщением
+            try:
+                day_prompt = (
+                    "Пользователь просит спланировать день. Собери информацию из доступных источников "
+                    "и выдай ЕДИНЫМ сообщением (не диалогом, а сводкой):\n"
+                    "1. Память: последние важные факты и контекст\n"
+                    "2. Вопросы: неотвеченные pending вопросы\n"
+                    "3. Напоминания: встречи, дедлайны\n"
+                    "4. Новости: если есть\n"
+                    "Формат: эмодзи-секции, кратко. Без 'давай проверим', без подтверждений."
+                )
+                resp = await provider.chat(
+                    [
+                        ChatMessage(role="system", content=day_prompt),
+                        ChatMessage(role="user", content=user_text),
+                    ],
+                    task_type=TaskType.DEFAULT,
+                )
+                return {
+                    "understood": "план дня",
+                    "plan": [],
+                    "agents_to_call": [],
+                    "final_response": resp,
+                    "needs_clarification": None,
+                    "used_skills": _used_skills_meta,
+                    "trace": trace,
+                }
+            except Exception:
+                pass  # fallback к обычному admit_ignorance
 
         # ── Final response? ──
         if isinstance(parsed, dict) and "final_response" in parsed:
+            final_response = parsed["final_response"]
+
+            # Hallucination guard для final_response
+            try:
+                from src.core.intelligence.hallucination_guard import (
+                    verify_claims,
+                    apply_guard,
+                )
+
+                # Собираем memory_facts из контекста
+                memory_facts = []
+                if ctx and ctx.memory_context:
+                    # Извлекаем факты из memory_context (это строка с фактами)
+                    facts = [
+                        f.strip("- ").strip()
+                        for f in ctx.memory_context.split("\n")
+                        if f.strip().startswith("-")
+                    ]
+                    memory_facts = [f for f in facts if len(f) > 10]
+
+                if memory_facts:
+                    verify_result = await verify_claims(
+                        final_response, memory_facts, []
+                    )
+                    final_response, modified = apply_guard(
+                        final_response, verify_result, confidence
+                    )
+            except Exception:
+                pass  # best-effort
+
             return {
                 "understood": parsed.get("understood", raw),
                 "plan": parsed.get("plan", []),
                 "agents_to_call": parsed.get("agents_to_call", []),
-                "final_response": parsed["final_response"],
+                "final_response": final_response,
                 "needs_clarification": parsed.get("needs_clarification"),
                 "used_skills": _used_skills_meta,
                 "trace": trace,
@@ -779,6 +850,7 @@ AGENT_REGISTRY: dict[str, tuple[str, str]] = {
     "draft": ("src.agents.draft_agent", "draft"),
     "digest": ("src.agents.digest_agent", "build_digest"),
     "skill_creator": ("src.agents.skill_creator_agent", "propose"),
+    "random": ("src.core.intelligence.maestro", "_invoke_random"),
 }
 
 
@@ -907,6 +979,43 @@ async def _invoke_delegate(
         }
 
 
+async def _invoke_random(
+    func: Any, provider, query: str, owner_id: int, **kwargs: Any
+) -> dict:
+    """Random agent — handles non-standard/creative tasks with minimal prompting.
+
+    Uses the default provider to respond to queries without domain-specific
+    instructions. Suitable for creative, out-of-the-box, or unusual requests.
+    """
+    system = (
+        "Ты — агент для нестандартных и творческих задач. "
+        "Отвечай креативно, нестандартно, с юмором. "
+        "Будь живым собеседником."
+    )
+    try:
+        raw = await asyncio.wait_for(
+            provider.chat(
+                [
+                    ChatMessage(role="system", content=system),
+                    ChatMessage(role="user", content=query),
+                ],
+                task_type=TaskType.DEFAULT,
+            ),
+            timeout=60.0,
+        )
+        return {
+            "data": {"response": raw.strip(), "query": query},
+            "success": True,
+        }
+    except Exception:
+        logger.exception("random agent failed: %s", query)
+        return {
+            "data": {},
+            "success": False,
+            "error": "Random agent failed",
+        }
+
+
 _AGENT_INVOKERS: dict[str, Any] = {
     "search": _invoke_search,
     "memory": _invoke_memory,
@@ -917,6 +1026,7 @@ _AGENT_INVOKERS: dict[str, Any] = {
     "digest": _invoke_digest,
     "skill_creator": _invoke_skill_creator,
     "delegate": _invoke_delegate,
+    "random": _invoke_random,
 }
 
 
@@ -975,7 +1085,33 @@ async def _execute_agent(
                 "agent": "delegate",
                 "data": {},
                 "success": False,
-                "error": str(e),
+                "error": safe_str(e),
+            }
+
+    # --- Special case: random (non-standard/creative agent) ---
+    if agent_type == "random":
+        invoker = _AGENT_INVOKERS.get("random")
+        if invoker is None:
+            logger.error("Random invoker not found")
+            return {
+                "agent": "random",
+                "data": {},
+                "success": False,
+                "error": "Random invoker not found",
+            }
+        try:
+            result = await invoker(
+                None, provider, query, owner_id, agent_spec=agent_spec
+            )
+            result["agent"] = "random"
+            return result
+        except Exception as e:
+            logger.exception("Random agent failed")
+            return {
+                "agent": "random",
+                "data": {},
+                "success": False,
+                "error": safe_str(e),
             }
 
     # --- Normal agent lookup ---
@@ -1010,7 +1146,7 @@ async def _execute_agent(
         return result
     except Exception as e:
         logger.exception("Agent %s failed", agent_type)
-        return {"agent": agent_type, "data": {}, "success": False, "error": str(e)}
+        return {"agent": agent_type, "data": {}, "success": False, "error": safe_str(e)}
 
 
 async def _execute_agents_parallel(
@@ -1216,7 +1352,10 @@ async def run_pipeline(
                 "agent_errors": agent_errors,
             }
         except Exception as e:
-            if "context_length" in str(e).lower() or "token" in str(e).lower():
+            if (
+                "context_length" in safe_str(e).lower()
+                or "token" in safe_str(e).lower()
+            ):
                 logger.warning("maestro fallback_request context overflow: %s", e)
                 return {
                     "final_response": sanitize_html(
@@ -1226,7 +1365,7 @@ async def run_pipeline(
                     "used_agents": [],
                     "agent_errors": agent_errors,
                 }
-            if "rate" in str(e).lower():
+            if "rate" in safe_str(e).lower():
                 logger.warning("maestro fallback_request rate limit: %s", e)
                 return {
                     "final_response": sanitize_html(

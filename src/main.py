@@ -44,6 +44,7 @@ def _register_background_tasks() -> None:
     import src.core.scheduling.dream_cycle  # noqa: F401
     import src.core.scheduling.proactive_nudge  # noqa: F401
     import src.core.scheduling.avito  # noqa: F401
+    import src.core.scheduling.message_scheduler  # noqa: F401
 
 
 async def main() -> None:

@@ -162,6 +162,10 @@ class NotificationQueue:
         """Форматирует сгруппированные уведомления в одно сообщение."""
         count = len(notifications)
 
+        # Одно уведомление — упрощённый формат: без заголовка, без сводки
+        if count == 1:
+            return notifications[0].text
+
         # Группируем по приоритету внутри batch
         by_priority: dict[int, list[Notification]] = defaultdict(list)
         for n in notifications:
@@ -181,7 +185,7 @@ class NotificationQueue:
         }
 
         _topic_ru: dict[str, str] = {
-            "system": "система",
+            "system": "Техническое",
             "digest": "дайджест",
             "news": "новости",
             "reminder": "напоминания",
@@ -189,6 +193,17 @@ class NotificationQueue:
             "skills": "навыки",
             "memory": "память",
             "contacts": "контакты",
+            "general": "Общее",
+        }
+
+        # Эмодзи-иконки для русских названий тем
+        _topic_display: dict[str, str] = {
+            "Техническое": "⚙️ Техническое",
+            "память": "🧠 Память",
+            "диск": "💾 Диск",
+            "ошибка": "❌ Ошибка",
+            "обновление": "🔄 Обновление",
+            "дайджест": "📰 Дайджест",
         }
 
         # Определяем доминирующий приоритет для заголовка
@@ -197,9 +212,15 @@ class NotificationQueue:
         # Собираем разные темы внутри группы
         topic_set: set[str] = {n.category or n.topic for n in notifications}
 
+        # Заголовок: показывать "(N тем, M уведомлений)" только если тем > 1
+        if len(topic_set) > 1:
+            header = f"📬 <b>Сводка</b> ({len(topic_set)} тем, {count} уведомлений)"
+        else:
+            header = f"📬 <b>Сводка</b>"
+
         lines = [
-            f"📬 <b>Сводка</b> ({len(topic_set)} тем, {count} уведомлений)",
-            "━" * 28,
+            header,
+            "─" * 28,
         ]
 
         for prio in sorted(by_priority.keys()):
@@ -208,6 +229,8 @@ class NotificationQueue:
             sub_topic = _topic_ru.get(
                 items[0].category or items[0].topic, items[0].category or items[0].topic
             )
+            # Применяем эмодзи-оформление к русскому названию темы
+            sub_topic = _topic_display.get(sub_topic, sub_topic)
             lines.append(f"{emoji} <b>{sub_topic}</b> ({len(items)})")
             for item in items:
                 # Обрезаем длинный текст

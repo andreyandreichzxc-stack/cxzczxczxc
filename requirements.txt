@@ -40,6 +40,7 @@ PyYAML==6.0.2
 # MCP tools
 requests==2.32.5
 beautifulsoup4==4.13.5
+yt-dlp>=2024.0.0
 
 # System monitoring & browser stealth
 psutil==7.2.2

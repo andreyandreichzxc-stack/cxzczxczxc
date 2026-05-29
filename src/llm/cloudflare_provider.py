@@ -1,10 +1,13 @@
 import httpx
 from openai import AsyncOpenAI
 
-from src.config import LLMDefaults, settings
+from src.config import settings
 from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin
 from src.llm._ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
+
+CLOUDFLARE_CHAT_LIGHT = "@cf/qwen/qwen3-30b-a3b-fp8"
+CLOUDFLARE_CHAT_HEAVY = "@cf/moonshotai/kimi-k2.6"
 
 
 class CloudflareProvider(OpenAICompatEmbedMixin):
@@ -46,9 +49,7 @@ class CloudflareProvider(OpenAICompatEmbedMixin):
 
     def _resolve_model(self, heavy: bool) -> str:
         return self._model or (
-            LLMDefaults.CLOUDFLARE_CHAT_HEAVY
-            if heavy
-            else LLMDefaults.CLOUDFLARE_CHAT_LIGHT
+            CLOUDFLARE_CHAT_HEAVY if heavy else CLOUDFLARE_CHAT_LIGHT
         )
 
     async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:

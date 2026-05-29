@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import time
@@ -20,6 +21,7 @@ from src.bot.filters import OwnerOnly
 from src.bot.handlers.smart_keyboard import smart_post_action_keyboard
 from src.bot.states import DraftStates
 from src.core.contacts.send_guard import store_undo
+from src.core.infra.key_guard import safe_str
 from src.core.infra.text_sanitizer import sanitize_html
 from src.db.repo import get_or_create_user as _get_or_create_user
 from src.db.session import get_session
@@ -55,9 +57,17 @@ def _draft_cleanup() -> None:
         del _variant_groups[k]
 
 
-def store_draft(draft_text: str) -> str:
+async def store_draft(draft_text: str) -> str:
     """Сохраняет черновик и возвращает hash-ключ для callback'ов."""
-    draft_hash = hashlib.sha256(draft_text.encode()).hexdigest()[:8]
+    loop = asyncio.get_running_loop()
+    draft_hash = (
+        await loop.run_in_executor(
+            None,
+            lambda: hashlib.sha256(
+                draft_text.encode(), usedforsecurity=False
+            ).hexdigest(),
+        )
+    )[:8]
     _draft_texts[draft_hash] = (time.time(), draft_text)
     _draft_cleanup()
     return draft_hash
@@ -217,19 +227,25 @@ async def step_draft_edit(message: Message, state: FSMContext) -> None:
         await message.answer("✅ Отправлено! 🚀", reply_markup=after_kb)
     except Exception as e:
         await state.clear()
-        await message.answer(f"❌ Ошибка отправки 😞: {sanitize_html(str(e))}")
+        await message.answer(f"❌ Ошибка отправки 😞: {sanitize_html(safe_str(e))}")
     await state.clear()
 
 
 # ── Variant group storage ────────────────────────────────────────────────
 
 
-def store_variant_group(
+async def store_variant_group(
     peer_id: int, contact_name: str, incoming_text: str, variants: list[dict]
 ) -> str:
     """Сохраняет группу вариантов и возвращает hash для callback'ов."""
     raw = f"{peer_id}:{contact_name}:{incoming_text}:{str(variants)}"
-    group_hash = hashlib.sha256(raw.encode()).hexdigest()[:8]
+    loop = asyncio.get_running_loop()
+    group_hash = (
+        await loop.run_in_executor(
+            None,
+            lambda: hashlib.sha256(raw.encode(), usedforsecurity=False).hexdigest(),
+        )
+    )[:8]
     _variant_groups[group_hash] = (
         time.time(),
         peer_id,
@@ -286,7 +302,9 @@ async def show_draft_variants(
         single = await draft(provider, contact_name, incoming_text)
         variants = [{"tone": "черновик", "text": single["draft"]}]
 
-    group_hash = store_variant_group(peer_id, contact_name, incoming_text, variants)
+    group_hash = await store_variant_group(
+        peer_id, contact_name, incoming_text, variants
+    )
 
     lines = [f"🤖 <b>Черновики для {contact_name}:</b>\n"]
     for i, v in enumerate(variants, 1):
@@ -343,9 +361,11 @@ async def cb_draft_choose(callback: CallbackQuery) -> None:
             await callback.message.edit_text("✅ Отправлено! 🚀", reply_markup=after_kb)
     except ValueError as e:
         if callback.message:
-            await callback.message.edit_text(f"❌ Ошибка 😞: {e}")
+            await callback.message.edit_text(
+                f"❌ Ошибка 😞: {sanitize_html(safe_str(e))}"
+            )
         else:
-            await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+            await callback.answer(f"❌ Ошибка: {safe_str(e)}", show_alert=True)
     except Exception as e:
         from telethon.errors import FloodWaitError
 
@@ -355,7 +375,7 @@ async def cb_draft_choose(callback: CallbackQuery) -> None:
             else:
                 await callback.answer(f"❌ Flood wait: {e.seconds}с", show_alert=True)
         else:
-            await callback.answer(f"❌ Ошибка отправки: {e}", show_alert=True)
+            await callback.answer(f"❌ Ошибка отправки: {safe_str(e)}", show_alert=True)
     await callback.answer()
 
 
@@ -398,7 +418,7 @@ async def cb_draft_improve(callback: CallbackQuery) -> None:
         variants = [{"tone": "черновик", "text": single["draft"]}]
 
     _variant_groups.pop(group_hash, None)
-    new_hash = store_variant_group(peer_id, contact_name, incoming_text, variants)
+    new_hash = await store_variant_group(peer_id, contact_name, incoming_text, variants)
 
     lines = [f"🤖 <b>Улучшенные черновики для {contact_name}:</b>\n"]
     for i, v in enumerate(variants, 1):

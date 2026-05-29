@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import OrderedDict
 from hashlib import sha256
 import time
@@ -15,8 +16,13 @@ class ReplyDedup:
         self._max_size = max_size
         self._ttl = ttl_seconds
 
-    def is_duplicate(self, chat_id: int, text: str) -> bool:
-        key = f"{chat_id}:{sha256(text.encode()).hexdigest()[:16]}"
+    async def is_duplicate(self, chat_id: int, text: str) -> bool:
+        loop = asyncio.get_running_loop()
+        digest = await loop.run_in_executor(
+            None,
+            lambda: sha256(text.encode(), usedforsecurity=False).hexdigest()[:16],
+        )
+        key = f"{chat_id}:{digest}"
         now = time.monotonic()
         # Evict stale entries
         while self._cache and next(iter(self._cache.values())) < now - self._ttl:

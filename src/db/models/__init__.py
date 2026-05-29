@@ -25,6 +25,7 @@ from src.db.models._messaging import (
     IndexJob,
     Folder,
     ConversationSummary,
+    ScheduledMessage,
 )
 from src.db.models._memory import (
     Memory,
@@ -75,6 +76,7 @@ __all__ = [
     "IndexJob",
     "Folder",
     "ConversationSummary",
+    "ScheduledMessage",
     "Memory",
     "MemoryLink",
     "MemoryCluster",

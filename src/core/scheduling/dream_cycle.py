@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from datetime import datetime, timedelta, timezone
 
 from src.config import settings
@@ -44,41 +45,46 @@ async def dream_cycle(owner_telegram_id: int) -> None:
         "stale_closed": 0,
     }
 
-    # ── Phase 1: Decay + tier promotion/demotion ──────────────────
-    try:
-        from src.core.memory.memory_checker import _run_decay_and_validation
+    from src.db.repo import get_or_create_user
 
-        decayed, closed = await _run_decay_and_validation(owner_telegram_id)
-        summary["decayed"] = decayed
-        summary["closed"] = closed
-        logger.info(
-            "Dream cycle: phase 1 (decay) — %d decayed, %d closed",
-            decayed,
-            closed,
-        )
-    except Exception:
-        logger.exception("Dream cycle: phase 1 (decay) failed")
+    async with get_session() as session:
+        owner = await get_or_create_user(session, owner_telegram_id)
 
-    # ── Phase 2: Duplicate consolidation ──────────────────────────
-    try:
-        from src.core.memory.memory_consolidator import consolidate_memories
+        # ── Phase 1: Decay + tier promotion/demotion ──────────────────
+        try:
+            from src.core.memory.memory_checker import _run_decay_and_validation
 
-        merged = await consolidate_memories(owner_telegram_id)
-        summary["consolidated"] = merged
-        logger.info(
-            "Dream cycle: phase 2 (consolidation) — %d merged",
-            merged,
-        )
-    except Exception:
-        logger.exception("Dream cycle: phase 2 (consolidation) failed")
+            decayed, closed = await _run_decay_and_validation(owner_telegram_id)
+            summary["decayed"] = decayed
+            summary["closed"] = closed
+            logger.info(
+                "Dream cycle: phase 1 (decay) — %d decayed, %d closed",
+                decayed,
+                closed,
+            )
+        except Exception:
+            logger.exception("Dream cycle: phase 1 (decay) failed")
 
-    # ── Phase 3: Contradiction batch scan ──────────────────────────
-    try:
-        from src.core.memory.contradiction_detector import _scan_contradictions_batch
-        from src.db.repo import list_memories, get_or_create_user
+        # ── Phase 2: Duplicate consolidation ──────────────────────────
+        try:
+            from src.core.memory.memory_consolidator import consolidate_memories
 
-        async with get_session() as session:
-            owner = await get_or_create_user(session, owner_telegram_id)
+            merged = await consolidate_memories(owner_telegram_id)
+            summary["consolidated"] = merged
+            logger.info(
+                "Dream cycle: phase 2 (consolidation) — %d merged",
+                merged,
+            )
+        except Exception:
+            logger.exception("Dream cycle: phase 2 (consolidation) failed")
+
+        # ── Phase 3: Contradiction batch scan ──────────────────────────
+        try:
+            from src.core.memory.contradiction_detector import (
+                _scan_contradictions_batch,
+            )
+            from src.db.repo import list_memories
+
             memories = await list_memories(session, owner, limit=200)
             contradictions = await _scan_contradictions_batch(
                 memories,
@@ -86,17 +92,16 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                 session=session,
                 owner=owner,
             )
-        summary["contradictions"] = contradictions
-        logger.info("Dream cycle: phase 3 (contradictions) — %d found", contradictions)
-    except Exception:
-        logger.exception("Dream cycle: phase 3 (contradictions) failed")
-        summary["contradictions"] = 0
+            summary["contradictions"] = contradictions
+            logger.info(
+                "Dream cycle: phase 3 (contradictions) — %d found", contradictions
+            )
+        except Exception:
+            logger.exception("Dream cycle: phase 3 (contradictions) failed")
+            summary["contradictions"] = 0
 
-    # ── Phase 4: Digest rebuild for top 20 active contacts ────────
-    try:
-        async with get_session() as session:
-            owner = await get_or_create_user(session, owner_telegram_id)
-
+        # ── Phase 4: Digest rebuild for top 20 active contacts ────────
+        try:
             from src.db.repo import list_contacts
 
             contacts = await list_contacts(session, owner, include_bots=False)
@@ -112,104 +117,96 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                 except Exception:
                     pass
 
-        logger.info(
-            "Dream cycle: phase 4 (digests) — %d rebuilt",
-            summary["digests"],
-        )
-
-        # Also cleanup old conversation summaries (>7 days)
-        try:
-            from src.core.memory.conversation_context import cleanup_old_summaries
-
-            await cleanup_old_summaries()
-            logger.info("Dream cycle: cleaned up old conversation summaries")
-        except Exception:
-            pass
-    except Exception:
-        logger.exception("Dream cycle: phase 4 (digests) failed")
-
-    # ── Phase 5: Memory Wiki ───────────────────────────────────────
-    try:
-        from src.core.memory.memory_wiki import generate_memory_wiki
-
-        wiki_stats = await generate_memory_wiki(owner_telegram_id)
-        total_facts = sum(wiki_stats.values())
-        logger.info(
-            "Dream cycle: wiki generated (%d categories, %d facts)",
-            len(wiki_stats),
-            total_facts,
-        )
-    except Exception:
-        logger.warning("Dream cycle: wiki generation failed", exc_info=True)
-
-    # ── Phase 6: DSM cleanup ───────────────────────────────────────
-    try:
-        from src.core.intelligence.dsm import dsm_cleanup
-
-        removed = await dsm_cleanup(days=30)
-        summary["dsm"] = removed
-        if removed:
             logger.info(
-                "Dream cycle: phase 6 (DSM cleanup) — removed %d old entries", removed
+                "Dream cycle: phase 4 (digests) — %d rebuilt",
+                summary["digests"],
             )
-    except Exception:
-        logger.exception("Dream cycle: phase 6 (DSM cleanup) failed")
 
-    # ── Phase 7: Auto-forget sweep ─────────────────────────────────────
-    try:
-        from src.core.memory.auto_forget import auto_forget_sweep
-        from src.db.repo import get_or_create_user
+            # Also cleanup old conversation summaries (>7 days)
+            try:
+                from src.core.memory.conversation_context import cleanup_old_summaries
 
-        async with get_session() as session:
-            owner = await get_or_create_user(session, owner_telegram_id)
+                await cleanup_old_summaries()
+                logger.info("Dream cycle: cleaned up old conversation summaries")
+            except Exception:
+                pass
+        except Exception:
+            logger.exception("Dream cycle: phase 4 (digests) failed")
+
+        # ── Phase 5: Memory Wiki ───────────────────────────────────────
+        try:
+            from src.core.memory.memory_wiki import generate_memory_wiki
+
+            wiki_stats = await generate_memory_wiki(owner_telegram_id)
+            total_facts = sum(wiki_stats.values())
+            logger.info(
+                "Dream cycle: wiki generated (%d categories, %d facts)",
+                len(wiki_stats),
+                total_facts,
+            )
+        except Exception:
+            logger.warning("Dream cycle: wiki generation failed", exc_info=True)
+
+        # ── Phase 6: DSM cleanup ───────────────────────────────────────
+        try:
+            from src.core.intelligence.dsm import dsm_cleanup
+
+            removed = await dsm_cleanup(days=30)
+            summary["dsm"] = removed
+            if removed:
+                logger.info(
+                    "Dream cycle: phase 6 (DSM cleanup) — removed %d old entries",
+                    removed,
+                )
+        except Exception:
+            logger.exception("Dream cycle: phase 6 (DSM cleanup) failed")
+
+        # ── Phase 7: Auto-forget sweep ─────────────────────────────────────
+        try:
+            from src.core.memory.auto_forget import auto_forget_sweep
+
             forgotten = await auto_forget_sweep(session, owner.id)
             if forgotten:
                 await session.commit()
-        summary["auto_forgotten"] = forgotten
-        if forgotten:
-            logger.info(
-                "Dream cycle: phase 7 (auto-forget) — %d facts deactivated",
-                forgotten,
-            )
-    except Exception:
-        logger.exception("Dream cycle: phase 7 (auto-forget) failed")
-        summary["auto_forgotten"] = 0
+            summary["auto_forgotten"] = forgotten
+            if forgotten:
+                logger.info(
+                    "Dream cycle: phase 7 (auto-forget) — %d facts deactivated",
+                    forgotten,
+                )
+        except Exception:
+            logger.exception("Dream cycle: phase 7 (auto-forget) failed")
+            summary["auto_forgotten"] = 0
 
-    # ── Phase 8: Close stale sessions ──────────────────────────────────
-    try:
-        from src.core.memory.session_recorder import close_stale_sessions
+        # ── Phase 8: Close stale sessions ──────────────────────────────────
+        try:
+            from src.core.memory.session_recorder import close_stale_sessions
 
-        async with get_session() as session:
             stale_closed = await close_stale_sessions(session, max_age_hours=24)
-        summary["stale_closed"] = stale_closed
-        if stale_closed:
-            logger.info(
-                "Dream cycle: phase 8 (stale sessions) — %d closed",
-                stale_closed,
-            )
-    except Exception:
-        logger.exception("Dream cycle: phase 8 (stale sessions) failed")
-        summary["stale_closed"] = 0
+            summary["stale_closed"] = stale_closed
+            if stale_closed:
+                logger.info(
+                    "Dream cycle: phase 8 (stale sessions) — %d closed",
+                    stale_closed,
+                )
+        except Exception:
+            logger.exception("Dream cycle: phase 8 (stale sessions) failed")
+            summary["stale_closed"] = 0
 
-    # ── Graph statistics ──────────────────────────────────────────────
-    try:
-        from src.db.repos.memory_repo import get_graph_stats
-        from src.db.repo import get_or_create_user
+        # ── Graph statistics ──────────────────────────────────────────────
+        try:
+            from src.db.repos.memory_repo import get_graph_stats
 
-        async with get_session() as session:
-            owner = await get_or_create_user(session, owner_telegram_id)
             graph_stats = await get_graph_stats(session, owner.id)
-    except Exception:
-        logger.exception("Dream cycle: graph stats failed")
-        graph_stats = None
+        except Exception:
+            logger.exception("Dream cycle: graph stats failed")
+            graph_stats = None
 
-    # ── Retention statistics ──────────────────────────────────────────
-    try:
-        from src.core.memory.temporal_layers import compute_retention, utcnow_naive
-        from src.db.repo import get_or_create_user, list_memories
+        # ── Retention statistics ──────────────────────────────────────────
+        try:
+            from src.core.memory.temporal_layers import compute_retention, utcnow_naive
+            from src.db.repo import list_memories
 
-        async with get_session() as session:
-            owner = await get_or_create_user(session, owner_telegram_id)
             memories = await list_memories(session, owner, is_active=True)
             now = utcnow_naive()
             retention_buckets = {"strong": 0, "fading": 0, "weak": 0}
@@ -221,70 +218,120 @@ async def dream_cycle(owner_telegram_id: int) -> None:
                     retention_buckets["fading"] += 1
                 else:
                     retention_buckets["weak"] += 1
-    except Exception:
-        logger.exception("Dream cycle: retention stats failed")
-        retention_buckets = None
+        except Exception:
+            logger.exception("Dream cycle: retention stats failed")
+            retention_buckets = None
 
-    # ── Summary notification ──────────────────────────────────────
-    try:
-        from src.core.scheduling.notification_queue import notification_queue
+        # ── Summary notification ──────────────────────────────────────
+        try:
+            from src.core.scheduling.notification_queue import notification_queue
 
-        # — Build graph stats line —
-        if graph_stats:
-            gs = graph_stats
-            ebt = gs.get("edges_by_type", {})
-            supports = ebt.get("supports", 0)
-            contradicts = ebt.get("contradicts", 0)
-            related = ebt.get("related", 0)
-            graph_line = (
-                f"📊 Граф: {gs['node_count']} узлов, "
-                f"{gs['total_edges']} рёбер "
-                f"(supports: {supports}, contradicts: {contradicts}, "
-                f"related: {related})\n"
+            # — Build summary lines (skip zero-value items) —
+            summary_lines: list[str] = []
+
+            # Decay + tier changes
+            decayed = summary.get("decayed", 0)
+            closed = summary.get("closed", 0)
+            if decayed > 0 or closed > 0:
+                parts = []
+                if decayed > 0:
+                    parts.append(f"📉 Обновлено {decayed} фактов (decay)")
+                if closed > 0:
+                    parts.append(f"закрыто {closed}")
+                summary_lines.append("• " + ", ".join(parts))
+
+            # Consolidation
+            consolidated = summary.get("consolidated", 0)
+            if consolidated > 0:
+                summary_lines.append(f"• 🔗 Смержено {consolidated} дубликатов")
+
+            # Digest rebuild
+            digests = summary.get("digests", 0)
+            if digests > 0:
+                summary_lines.append(f"• 📰 Обновлены профили {digests} контактов")
+
+            # Stale sessions
+            stale_closed = summary.get("stale_closed", 0)
+            if stale_closed > 0:
+                summary_lines.append(f"• закрыто сессий: {stale_closed}")
+
+            # Auto-forget
+            auto_forgotten = summary.get("auto_forgotten", 0)
+            if auto_forgotten > 0:
+                summary_lines.append(
+                    f"• авто-забывание: {auto_forgotten} фактов деактивировано"
+                )
+
+            # Retention stats
+            if retention_buckets:
+                rb = retention_buckets
+                summary_lines.append(
+                    f"• удержание: 🔒 strong {rb['strong']}, "
+                    f"⏳ fading {rb['fading']}, "
+                    f"📦 weak {rb['weak']}"
+                )
+
+            # Graph stats
+            if graph_stats:
+                gs = graph_stats
+                ebt = gs.get("edges_by_type", {})
+                supports = ebt.get("supports", 0)
+                contradicts = ebt.get("contradicts", 0)
+                related = ebt.get("related", 0)
+                summary_lines.append(
+                    f"📊 Граф: {gs['node_count']} узлов, "
+                    f"{gs['total_edges']} рёбер "
+                    f"(supports: {supports}, contradicts: {contradicts}, "
+                    f"related: {related})"
+                )
+
+            # — Build final message —
+            if not summary_lines:
+                # Всё по нулям — короткое сообщение
+                null_messages = [
+                    "🌙 Ночь прошла спокойно, всё в порядке",
+                    "✨ Всё чисто, ничего не требовалось",
+                    "🌅 Тихая ночь, система в норме",
+                ]
+                text = random.choice(null_messages)
+            else:
+                titles = [
+                    "🌙 Ночной цикл завершён",
+                    "✨ Утренняя рутина выполнена",
+                    "🌅 Процедуры на сегодня завершены",
+                    "🔧 Фоновая обработка закончена",
+                ]
+                title = random.choice(titles)
+                text = f"<b>{title}</b>\n" + "\n".join(summary_lines)
+
+            await notification_queue.enqueue(
+                topic="system",
+                text=text,
+                priority=3,  # PRIORITY_LOW — информационное
             )
-        else:
-            graph_line = ""
+        except Exception:
+            pass
 
-        # — Build retention stats line —
-        if retention_buckets:
-            rb = retention_buckets
-            retention_line = (
-                f"• удержание: 🔒 strong {rb['strong']}, "
-                f"⏳ fading {rb['fading']}, "
-                f"📦 weak {rb['weak']}\n"
+        # ── Proactive pings ────────────────────────────────────────────
+        try:
+            from src.core.scheduling.proactive_pings import generate_pings
+            from src.llm.router import build_provider
+            from src.llm.base import TaskType
+
+            provider = await build_provider(
+                session, owner, task_type=TaskType.BACKGROUND
             )
-        else:
-            retention_line = ""
-
-        # — Build optional lines (only shown when > 0) —
-        stale_line = (
-            f"• закрыто сессий: {summary['stale_closed']}\n"
-            if summary.get("stale_closed")
-            else ""
-        )
-        forgotten_line = (
-            f"• авто-забывание: {summary['auto_forgotten']} фактов деактивировано\n"
-            if summary.get("auto_forgotten")
-            else ""
-        )
-
-        await notification_queue.enqueue(
-            topic="system",
-            text=(
-                "🌙 <b>Ночной цикл завершён</b>\n"
-                f"• decay: {summary['decayed']} фактов обновлено, "
-                f"{summary['closed']} закрыто\n"
-                f"• консолидация: {summary['consolidated']} дубликатов смержено\n"
-                f"• дайджесты: {summary['digests']} контактов перестроено\n"
-                f"{stale_line}"
-                f"{forgotten_line}"
-                f"{retention_line}"
-                f"{graph_line}"
-            ),
-            priority=3,  # PRIORITY_LOW — информационное
-        )
-    except Exception:
-        pass
+            if provider:
+                pings = await generate_pings(owner, provider, session)
+                for ping in pings:
+                    await notification_queue.enqueue(
+                        topic="proactive-ping",
+                        text=f"💡 {ping}",
+                        priority=5,  # PRIORITY_NORMAL
+                    )
+                    await asyncio.sleep(1)
+        except Exception:
+            logger.debug("Proactive pings skipped", exc_info=True)
 
 
 async def dream_loop(owner_telegram_id: int) -> None:

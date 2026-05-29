@@ -4,45 +4,232 @@ from __future__ import annotations
 
 import random
 import re
+import unicodedata
 from typing import Any
 
-SIMPLE_REPLIES: dict[str, list[str]] = {
-    "ok": ["👍", "👌"],
-    "ладно": ["👍", "👌", "ок"],
-    "спасибо": ["❤️", "🙏", "😊"],
-    "благодарю": ["🙏", "❤️"],
-    "привет": ["👋", "✌️"],
-    "здарова": ["✌️", "👋"],
+_LAST_REPLIES: list[str] = []
+
+# ── Слой A: точные совпадения (однословные) ──
+_EXACT_MATCHES: dict[str, list[str]] = {
+    "спасибо": ["🙏", "😊", "❤️"],
+    "благодарю": ["🙏", "😊"],
+    "спс": ["🙏", "👍"],
+    "сяб": ["🙏"],
     "пока": ["👋", "😘"],
-    "давай": ["👋", "🤝"],
+    "покедова": ["👋"],
+    "досвидос": ["👋"],
+    "привет": ["👋", "🤗", "✌️"],
+    "здарова": ["👋", "🤗"],
+    "хай": ["👋", "🤗"],
+    "ку": ["👋"],
+    "прив": ["👋"],
     "ага": ["👍"],
-    "ясно": ["👌", "понял 🤝"],
+    "угу": ["👍"],
+    "добро": ["👍"],
+    "ясно": ["👌"],
     "понял": ["👌"],
-    "хорошо": ["👍", "🙂"],
-    "отлично": ["🔥", "💯"],
-    "супер": ["🔥", "🎉"],
+    "пон": ["👌"],
+    "ок": ["👍", "🙂", "😊"],
+    "окей": ["👍", "🙂"],
+    "окс": ["👍"],
+    "ладно": ["👍", "🙂"],
+    "ладн": ["👍"],
+    "отлично": ["🔥", "🤩", "💯"],
+    "супер": ["🔥", "🤩"],
+    "класс": ["🔥", "🤩"],
+    "круто": ["🔥", "🤩"],
+    "огонь": ["🔥", "💯"],
     "нет": ["👎", "🙅"],
-    "да": ["✅"],
-    "конечно": ["✅", "👍"],
+    "неа": ["👎"],
+    "неет": ["👎"],
+    "да": ["✅", "👍"],
+    "даа": ["✅"],
+    "жаль": ["😢", "😕"],
+    "грустно": ["😢"],
+    "печаль": ["😢"],
+    "бесит": ["😡"],
+    "злюсь": ["😡"],
+    "ура": ["🎉", "🥳"],
+    "йоу": ["🎉"],
+    "странно": ["🤨"],
+    "хм": ["🤨"],
+    "занят": ["👌", "😐"],
+    "потом": ["👌"],
+    "смешно": ["😂", "🤣"],
+    "ржу": ["😂"],
+    "хаха": ["😂"],
+    "лол": ["😂", "🤣"],
+    "люблю": ["❤️", "😍", "🥰"],
+    "обожаю": ["❤️", "😍"],
+    "согласен": ["🤝", "✅"],
+    "верно": ["✅"],
+    "извини": ["😇", "😔"],
+    "сорри": ["😇"],
+    "прости": ["😔"],
+    "молодец": ["👏", "🤩"],
+    "красава": ["👏"],
+    "устал": ["😩", "😪"],
+    "вымотан": ["😩"],
+    "страшно": ["😨", "😱"],
+    "боюсь": ["😨"],
+}
+
+# ── Слой B: контекстные фразы (2-3 слова) ──
+_CONTEXT_MATCHES: dict[str, list[str]] = {
+    "спасибо большое": ["🙏❤️", "🙏😊"],
+    "спасибо огромное": ["🙏❤️"],
+    "ну пока": ["👋🤝", "👋"],
+    "давай пока": ["👋"],
+    "до встречи": ["👋🤝"],
+    "ну привет": ["👋🤗"],
+    "привет всем": ["👋🤗"],
+    "ага понял": ["👌👍"],
+    "ясно понятно": ["👌👍"],
+    "ну ок": ["🙂👍"],
+    "ладно ок": ["🙂👍"],
+    "да ладно": ["🤨😏"],
+    "да ну": ["🤨"],
+    "всё норм": ["👍🙂"],
+    "всё ок": ["👍🙂"],
+    "не знаю": ["🤷"],
+    "хз что": ["🤷"],
+    "потом расскажу": ["👌"],
+    "сейчас занят": ["👌😐"],
+    "иди сюда": ["👋"],
+    "подойди": ["👋"],
+    "я тут": ["👋"],
+    "доброе утро": ["🌅👋", "☀️👋"],
+    "доброй ночи": ["🌙😴"],
+    "спокойной ночи": ["🌙😴"],
+}
+
+# ── Слой C: сочетанные ответы ──
+_COMBO_MATCHES: dict[str, list[str]] = {
+    "как дела": ["👍 всё норм, сам как?", "😊 нормально, ты как?"],
+    "как ты": ["👍 норм, ты как?", "😊 всё ок, как сам?"],
+    "чё как": ["👍 норм, сам как?"],
+    "что делаешь": ["💻 работаю, а ты?", "😄 сижу тут, а ты?"],
+    "чем занят": ["💻 работаю, а ты?"],
+    "расскажи что-нибудь": ["😄 а что хочешь услышать?"],
+}
+
+# ── Слой D: Telegram-реакции (emoji reaction вместо текста) ──
+_REACTION_MAP: dict[str, list[str]] = {
+    "👍": ["ок", "ладно", "хорошо", "принято", "да", "ага", "угу"],
+    "👎": ["нет", "не", "не надо", "отмена", "не так"],
+    "❤️": ["спасибо", "благодарю", "отлично", "супер", "круто"],
+    "😢": ["жаль", "грустно", "печаль", "сочувствую"],
+    "😡": ["бесит", "злюсь", "раздражён"],
+    "🎉": ["ура", "поздравляю", "йоу"],
+    "👋": ["привет", "здарова", "хай", "ку", "прив", "пока"],
+    "🤗": ["обнимаю"],
+    "😂": ["смешно", "ржу", "хаха", "лол"],
+    "😴": ["спокойной ночи", "доброй ночи"],
+    "🤨": ["странно", "хм", "да ладно"],
 }
 
 
-def get_simple_reply(text: str) -> str | None:
-    """Return a random emoji reply if *text* is a single word matching a known pattern.
-
-    Only single-word messages (after stripping whitespace) are considered.
-    Common trailing punctuation (``.,!?;:``) is ignored during matching.
-
-    Returns ``None`` when no pattern matches.
-    """
-    stripped = text.strip().lower()
-    # Only match single-word messages
-    if " " in stripped:
+def get_reaction(text: str) -> str | None:
+    """Для safe_answer: возвращает emoji для реакции или None."""
+    if not text or len(text) > 50 or "```" in text:
         return None
-    # Strip common trailing punctuation for matching
-    cleaned = stripped.strip(".,!?;:")
-    if cleaned in SIMPLE_REPLIES:
-        return random.choice(SIMPLE_REPLIES[cleaned])
+    t = text.lower().rstrip(".!,?;: \n")
+    for emoji, triggers in _REACTION_MAP.items():
+        if t in triggers:
+            return emoji
+    return None
+
+
+def get_simple_reply(text: str) -> str | None:
+    """Трёхслойная система эмодзи-ответов. Экономит токены, минуя LLM."""
+    if not text or len(text) > 50:
+        return None
+
+    stripped = text.strip()
+    t = stripped.lower().rstrip(".!,?;: \n")
+
+    # Emoji echo: single emoji → reply with same or semantic pair
+    if len(t) <= 2 and any(unicodedata.category(c) == "So" for c in t):
+        # Mirror or use semantic pair
+        echo_pairs = {
+            "❤️": "❤️",
+            "😂": "😂",
+            "🔥": "🔥",
+            "👍": "👍",
+            "😢": "💪",
+            "😡": "😌",
+            "🎉": "🎉",
+            "👋": "👋",
+        }
+        return echo_pairs.get(t, t)
+
+    # Caps detection: mirror intensity
+    is_caps = stripped.isupper() and len(stripped) > 3
+
+    # Time-of-day variant for "привет"
+    if t == "привет":
+        import datetime
+
+        hour = datetime.datetime.now(datetime.timezone.utc).hour
+        result: str
+        if 5 <= hour < 12:
+            result = random.choice(["☀️👋", "🌅👋"])
+        elif 12 <= hour < 18:
+            result = random.choice(["👋", "🤗", "✌️"])
+        else:
+            result = random.choice(["🌙👋", "👋"])
+        if is_caps:
+            result = result.upper() if result.isascii() else result + "‼️"
+        _LAST_REPLIES.append(result)
+        if len(_LAST_REPLIES) > 10:
+            _LAST_REPLIES.pop(0)
+        return result
+
+    for word, emojis in _EXACT_MATCHES.items():
+        if t == word:
+            result = random.choice(emojis)
+            recent = _LAST_REPLIES[-3:]
+            if result in recent and recent.count(result) >= 2:
+                others = [e for e in emojis if e not in recent]
+                if others:
+                    result = random.choice(others)
+            if is_caps:
+                result = result.upper() if result.isascii() else result + "‼️"
+            _LAST_REPLIES.append(result)
+            if len(_LAST_REPLIES) > 10:
+                _LAST_REPLIES.pop(0)
+            return result
+
+    for phrase, emojis in _CONTEXT_MATCHES.items():
+        if re.search(rf"\b{re.escape(phrase)}\b", t):
+            result = random.choice(emojis)
+            recent = _LAST_REPLIES[-3:]
+            if result in recent and recent.count(result) >= 2:
+                others = [e for e in emojis if e not in recent]
+                if others:
+                    result = random.choice(others)
+            if is_caps:
+                result = result.upper() if result.isascii() else result + "‼️"
+            _LAST_REPLIES.append(result)
+            if len(_LAST_REPLIES) > 10:
+                _LAST_REPLIES.pop(0)
+            return result
+
+    for phrase, replies in _COMBO_MATCHES.items():
+        if phrase in t:
+            result = random.choice(replies)
+            recent = _LAST_REPLIES[-3:]
+            if result in recent and recent.count(result) >= 2:
+                others = [e for e in replies if e not in recent]
+                if others:
+                    result = random.choice(others)
+            if is_caps:
+                result = result.upper() if result.isascii() else result + "‼️"
+            _LAST_REPLIES.append(result)
+            if len(_LAST_REPLIES) > 10:
+                _LAST_REPLIES.pop(0)
+            return result
+
     return None
 
 
@@ -93,8 +280,7 @@ def detect_memory_correction(text: str) -> dict[str, Any] | None:
     # Try to extract what's being corrected
     # Strategy: find the core statement by removing negation words
     cleaned_for_extraction = re.sub(
-        r"(?i)(?:^|[,;]?\s*)(?:нет|не|неправда|ошибся|ошиблась|неверно|это\s+не\s+так|неправильно"
-        r"|я\s+больше\s+не|я\s+уже\s+не|уже\s+не|перестал[а]?)[,;]?\s*",
+        r"(?i)(?:^|[,;]?\s*)(?:неверно|неправильно|неправда|не\s+так|ошибся|ошиблась|нет\b|не\b|перестал[а]?|я\s+больше\s+не|я\s+уже\s+не|уже\s+не)[,;]?\s*",
         "",
         text_clean,
     ).strip()
@@ -206,11 +392,11 @@ async def handle_memory_correction(
             await add_memory(
                 session, owner, fact=new_fact, source="user", confidence=0.9
             )
-        return (
-            f"🧠 Понял! Забыл про «{deleted_facts[0]}…» и запомнил: «{new_fact[:80]}»."
-        )
+        if deleted_facts:
+            return f"🧠 Понял! Забыл про «{deleted_facts[0]}…» и запомнил: «{new_fact[:80]}»."
+        return f"🧠 Запомнил: «{new_fact[:80]}»."
 
-    if deleted_count > 0:
+    if deleted_facts:
         return f"🗑 Удалил из памяти: «{deleted_facts[0]}…»."
 
     return "🤔 Не нашёл что именно удалить. Уточни?"

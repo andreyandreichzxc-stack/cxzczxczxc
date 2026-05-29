@@ -15,6 +15,7 @@ Usage:
 """
 
 import logging
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update as sa_update
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 # In-memory cache of active sessions: {telegram_id: (session_id, started_at)}
 _active_sessions: dict[int, tuple[int, datetime]] = {}
+_active_sessions_lock: asyncio.Lock = asyncio.Lock()
 
 SESSION_INACTIVITY_TIMEOUT = timedelta(minutes=30)
 
@@ -57,38 +59,39 @@ async def record_turn(
         content: Message text (truncated to 4000 chars).
         session_type: Session type label (default "chat").
     """
-    cached = _active_sessions.get(telegram_id)
-    session_id = cached[0] if cached else None
+    async with _active_sessions_lock:
+        cached = _active_sessions.get(telegram_id)
+        session_id = cached[0] if cached else None
 
-    if session_id is not None:
-        # Check inactivity from cached timestamp (no DB query needed)
-        cached_started = cached[1] if cached else None
-        if cached_started:
-            elapsed = datetime.now(timezone.utc) - cached_started
-            if elapsed > SESSION_INACTIVITY_TIMEOUT:
-                # Auto-close stale session via DB
-                result = await db_session.execute(
-                    select(AgentSession).where(AgentSession.id == session_id)
-                )
-                agent_session = result.scalar_one_or_none()
-                if agent_session is not None:
-                    agent_session.ended_at = datetime.now(timezone.utc)
-                _active_sessions.pop(telegram_id, None)
-                session_id = None
+        if session_id is not None:
+            # Check inactivity from cached timestamp (no DB query needed)
+            cached_started = cached[1] if cached else None
+            if cached_started:
+                elapsed = datetime.now(timezone.utc) - cached_started
+                if elapsed > SESSION_INACTIVITY_TIMEOUT:
+                    # Auto-close stale session via DB
+                    result = await db_session.execute(
+                        select(AgentSession).where(AgentSession.id == session_id)
+                    )
+                    agent_session = result.scalar_one_or_none()
+                    if agent_session is not None:
+                        agent_session.ended_at = datetime.now(timezone.utc)
+                    _active_sessions.pop(telegram_id, None)
+                    session_id = None
 
-    if session_id is None:
-        # Create a new session
-        user_id = await _resolve_user_id(db_session, telegram_id)
-        agent_session = AgentSession(
-            user_id=user_id,
-            session_type=session_type,
-            started_at=datetime.now(timezone.utc),
-            turn_count=0,
-        )
-        db_session.add(agent_session)
-        await db_session.flush()
-        session_id = agent_session.id
-        _active_sessions[telegram_id] = (session_id, agent_session.started_at)
+        if session_id is None:
+            # Create a new session (still under lock to avoid race)
+            user_id = await _resolve_user_id(db_session, telegram_id)
+            agent_session = AgentSession(
+                user_id=user_id,
+                session_type=session_type,
+                started_at=datetime.now(timezone.utc),
+                turn_count=0,
+            )
+            db_session.add(agent_session)
+            await db_session.flush()
+            session_id = agent_session.id
+            _active_sessions[telegram_id] = (session_id, agent_session.started_at)
 
     # Record the message
     msg = AgentSessionMessage(
@@ -109,7 +112,8 @@ async def record_turn(
 
 async def close_session(telegram_id: int, db_session: AsyncSession) -> None:
     """Close the active session for a user (set ended_at)."""
-    cached = _active_sessions.pop(telegram_id, None)
+    async with _active_sessions_lock:
+        cached = _active_sessions.pop(telegram_id, None)
     session_id = cached[0] if cached else None
     if session_id is not None:
         await db_session.execute(
@@ -176,21 +180,33 @@ async def get_session_history(
     )
     sessions = result.scalars().all()
 
-    # Fetch messages per session (separate query, no ORM relationship needed)
-    formatted: list[dict] = []
-    for s in sessions:
-        msgs_result = await db_session.execute(
+    # Fetch messages per session (single batch query, not N+1)
+    session_ids = [s.id for s in sessions]
+    if session_ids:
+        result = await db_session.execute(
             select(AgentSessionMessage)
-            .where(AgentSessionMessage.session_id == s.id)
+            .where(AgentSessionMessage.session_id.in_(session_ids))
             .order_by(AgentSessionMessage.created_at)
         )
+        all_messages = result.scalars().all()
+    else:
+        all_messages = []
+
+    # Group by session_id
+    messages_by_session: dict[int, list] = {}
+    for msg in all_messages:
+        messages_by_session.setdefault(msg.session_id, []).append(msg)
+
+    formatted: list[dict] = []
+    for s in sessions:
+        msgs = messages_by_session.get(s.id, [])
         messages = [
             {
                 "role": m.role,
                 "content": m.content,
                 "time": m.created_at.isoformat(),
             }
-            for m in msgs_result.scalars().all()
+            for m in msgs
         ]
         formatted.append(
             {

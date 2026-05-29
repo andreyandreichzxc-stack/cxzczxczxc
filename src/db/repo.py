@@ -124,6 +124,14 @@ from src.db.repos.news_repo import (
     toggle_news_topic,
 )
 
+from src.db.repos.scheduled_repo import (
+    create_scheduled,
+    get_pending,
+    get_user_pending,
+    mark_failed,
+    mark_sent,
+)
+
 __all__ = [
     # session
     "count_new_personal_facts_since",
@@ -228,4 +236,10 @@ __all__ = [
     "delete_news_topic",
     "list_news_topics",
     "toggle_news_topic",
+    # scheduled
+    "create_scheduled",
+    "get_pending",
+    "get_user_pending",
+    "mark_failed",
+    "mark_sent",
 ]

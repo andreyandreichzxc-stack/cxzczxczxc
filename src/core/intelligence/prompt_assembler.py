@@ -122,6 +122,10 @@ class AssemblyContext:
     dsm_context: str = ""
     # Session replay summary (from session_recorder.py)
     session_summary: str = ""
+    # Voice transcription metadata (set by voice handler)
+    transcription_meta: dict | None = None
+    # Contact graph — pre-built cross-contact relationship graph (set by maestro)
+    contact_graph: str = ""
 
 
 class PromptAssembler:
@@ -258,6 +262,29 @@ class PromptAssembler:
     def _tier3_volatile(self, ctx: AssemblyContext) -> str:
         """Tier 3 — динамический контекст."""
         parts = []
+
+        # Transcription meta
+        if ctx.transcription_meta:
+            tm = ctx.transcription_meta
+            parts.append(
+                f"[Это голосовое сообщение. Расшифровано через {tm.get('provider', 'STT')}, "
+                f"язык: {tm.get('language', 'ru')}]"
+            )
+
+        # Contact graph (pre-built in maestro, injected as volatile context)
+        if ctx.contact_graph:
+            try:
+                from src.core.intelligence.soul_blocks import CONTACT_GRAPH_BLOCK
+
+                parts.append(
+                    CONTACT_GRAPH_BLOCK.format(contact_graph=ctx.contact_graph)
+                )
+            except Exception:
+                parts.append(
+                    "ГРАФ КОНТАКТОВ (связи между людьми):\n"
+                    + ctx.contact_graph
+                    + "\n- Используй эти связи для персонализации ответов"
+                )
 
         # Temporal context для agent
         if ctx.target == "agent" and ctx.now_local and ctx.tz_name:

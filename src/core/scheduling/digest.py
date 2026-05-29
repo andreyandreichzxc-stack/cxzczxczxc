@@ -29,7 +29,20 @@ DIGEST_SYSTEM = (
     "🔥 <b>Мои горящие обещания</b>: те, что просрочены или ближайшие 24ч.\n"
     "💼 <b>Обещания мне</b>: что просрочено или скоро.\n"
     "🤖 <b>Авто-ответы</b>: сколько и кому, без подробностей.\n"
-    "Если в каком-то блоке пусто — пропускай блок целиком."
+    "Если в каком-то блоке пусто — пропускай блок целиком.\n"
+    "\n"
+    "СТИЛЬ: Варьируй стиль каждый день. Не используй один и тот же шаблон.\n"
+    "Примеры разных начал:\n"
+    '- "Слушай, что сегодня..."\n'
+    '- "Так, давай по порядку..."\n'
+    '- "Короче, вот что у нас..."\n'
+    '- "Смотри, сегодня такая картина..."\n'
+    '- "Значит так, раскладываю..."\n'
+    "\n"
+    "Если какой-то блок пустой (нет данных) — просто пропусти его, "
+    "не пиши «ничего нет».\n"
+    "Не используй «Во-первых», «Во-вторых», "
+    "«Таким образом», «В заключение»."
 )
 
 
@@ -196,6 +209,12 @@ async def digest_scheduler_loop() -> None:
                 tz_name = owner.settings.timezone
                 enabled = owner.settings.digest_enabled
                 target_hm = owner.settings.digest_time
+            if not target_hm:
+                logger.warning(
+                    "digest_time is not set for owner %d, skipping tick", owner_id
+                )
+                await asyncio.sleep(settings.digest_check_sec)
+                continue
             local_now = now_in_tz(tz_name)
             current_hm = local_now.strftime("%H:%M")
             current_day = local_now.strftime("%Y-%m-%d")

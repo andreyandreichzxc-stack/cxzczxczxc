@@ -78,7 +78,6 @@ class TranscriptionService:
         self, path: Path, gemini_key: str, language: str | None
     ) -> str:
         from google import genai
-        from src.config import LLMDefaults
 
         client = genai.Client(api_key=gemini_key)
 
@@ -88,7 +87,7 @@ class TranscriptionService:
             if language:
                 prompt += f" The audio language is {language}."
             resp = client.models.generate_content(
-                model=LLMDefaults.GEMINI_STT,
+                model="gemini-3.1-flash-lite",
                 contents=[prompt, audio_file],
             )
             return resp.text or ""
@@ -98,14 +97,13 @@ class TranscriptionService:
     async def _transcribe_mistral(
         self, path: Path, mistral_key: str, language: str | None
     ) -> str:
-        from src.config import LLMDefaults
         import httpx
 
         suffix = path.suffix.lstrip(".") or "ogg"
         mime = f"audio/{suffix}" if suffix != "oga" else "audio/ogg"
 
         data = {
-            "model": LLMDefaults.MISTRAL_STT,
+            "model": "voxtral-mini-transcribe-latest",
             "language": language or "ru",
             "diarize": "false",
             "temperature": "0",
@@ -270,3 +268,16 @@ class TranscriptionService:
 
 
 transcription_service = TranscriptionService()
+
+
+def get_transcription_meta(
+    text: str, provider: str = "unknown", confidence: float = 0.0, language: str = "ru"
+) -> dict:
+    """Метаданные транскрипции для контекста модели."""
+    return {
+        "is_transcription": True,
+        "provider": provider,
+        "confidence": round(confidence, 2),
+        "language": language,
+        "length": len(text) if text else 0,
+    }

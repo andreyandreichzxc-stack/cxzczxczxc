@@ -20,54 +20,6 @@ def parse_telethon_proxy(proxy_url: str) -> tuple | None:
     return (scheme, host, port)
 
 
-class _LazyModel:
-    """Descriptor — лениво читает имя модели из settings при обращении.
-
-    Позволяет LLMDefaults.OPENAI_CHAT_LIGHT работать как строка,
-    но фактически брать значение из Settings (которое может быть
-    переопределено через переменные окружения).
-    """
-
-    def __init__(self, attr_name: str) -> None:
-        self.attr_name = attr_name
-
-    def __get__(self, obj: object, objtype: type) -> str:
-        return getattr(settings, self.attr_name)
-
-
-class LLMDefaults:
-    # Имена моделей на май 2026 — менять при выходе новых.
-    # Значения по-умолчанию хранятся в Settings, можно переопределить
-    # через переменные окружения (см. .env или export).
-    OPENAI_CHAT_LIGHT = _LazyModel("openai_chat_light_model")
-    OPENAI_CHAT_HEAVY = _LazyModel("openai_chat_heavy_model")
-
-    GEMINI_CHAT_LIGHT = _LazyModel("gemini_chat_light_model")
-    GEMINI_CHAT_HEAVY = _LazyModel("gemini_chat_heavy_model")
-    GEMINI_STT = _LazyModel("gemini_stt_model")
-
-    MISTRAL_CHAT_LIGHT = _LazyModel("mistral_chat_light_model")
-    MISTRAL_CHAT_HEAVY = _LazyModel("mistral_chat_heavy_model")
-    MISTRAL_STT = _LazyModel("mistral_stt_model")
-
-    CLOUDFLARE_CHAT_LIGHT = _LazyModel("cloudflare_chat_light_model")
-    CLOUDFLARE_CHAT_HEAVY = _LazyModel("cloudflare_chat_heavy_model")
-
-    DEEPSEEK_CHAT_LIGHT = _LazyModel("deepseek_chat_light_model")
-    DEEPSEEK_CHAT_HEAVY = _LazyModel("deepseek_chat_heavy_model")
-
-    GROK_CHAT_LIGHT = _LazyModel("grok_chat_light_model")
-    GROK_CHAT_HEAVY = _LazyModel("grok_chat_heavy_model")
-
-    MIMO_CHAT_LIGHT = _LazyModel("mimo_chat_light_model")
-    MIMO_CHAT_HEAVY = _LazyModel("mimo_chat_heavy_model")
-
-    GROQ_CHAT_LIGHT = _LazyModel("groq_chat_light_model")
-    GROQ_CHAT_HEAVY = _LazyModel("groq_chat_heavy_model")
-
-    OPENAI_BASE_URL = _LazyModel("openai_base_url")
-
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(PROJECT_ROOT / ".env"),
@@ -148,47 +100,6 @@ class Settings(BaseSettings):
         600, description="Интервал дистилляции знаний"
     )
 
-    # --- Имена моделей (переопределяются через .env) ---
-    openai_chat_light_model: str = Field(
-        "gpt-5-mini", description="OpenAI лёгкая чат-модель"
-    )
-    openai_chat_heavy_model: str = Field(
-        "gpt-5.5", description="OpenAI тяжёлая чат-модель"
-    )
-
-    # --- Agent-specific model overrides (empty = use defaults) ---
-    maestro_model: str = Field("", description="Model for maestro (empty = auto)")
-    draft_model: str = Field("", description="Model for draft replies")
-    memory_model: str = Field("", description="Model for memory operations")
-    search_model: str = Field("", description="Model for search/analysis")
-    stt_model: str = Field("", description="Model for voice transcription")
-    humanize_model: str = Field("", description="Model for text humanization")
-    classify_model: str = Field("", description="Model for intent classification")
-    summarize_model: str = Field("", description="Model for summarization/digest")
-    skills_model: str = Field("", description="Model for skills and tools")
-    background_model: str = Field("", description="Model for background tasks")
-    vision_model: str = Field("", description="Model for multimodal image analysis")
-
-    gemini_chat_light_model: str = Field(
-        "gemini-3-flash", description="Gemini лёгкая чат-модель"
-    )
-    gemini_chat_heavy_model: str = Field(
-        "gemini-3.1-pro", description="Gemini тяжёлая чат-модель"
-    )
-    gemini_stt_model: str = Field(
-        "gemini-3.1-flash-lite", description="Gemini модель для транскрипции голосовых"
-    )
-
-    mistral_chat_light_model: str = Field(
-        "mistral-small-latest", description="Mistral лёгкая чат-модель"
-    )
-    mistral_chat_heavy_model: str = Field(
-        "mistral-medium-latest", description="Mistral тяжёлая чат-модель"
-    )
-    mistral_stt_model: str = Field(
-        "voxtral-mini-transcribe-latest", description="Mistral STT модель"
-    )
-
     # --- Cloudflare Workers AI ---
     openai_base_url: str = Field(
         "",
@@ -204,46 +115,29 @@ class Settings(BaseSettings):
         description="Context7 API key for documentation search (https://context7.com)",
     )
 
-    cloudflare_chat_light_model: str = Field(
-        "@cf/qwen/qwen3-30b-a3b-fp8",
-        description="Cloudflare лёгкая чат-модель (Qwen3 30B — $0.05/$0.34 per M)",
-    )
-    cloudflare_chat_heavy_model: str = Field(
-        "@cf/moonshotai/kimi-k2.6", description="Cloudflare тяжёлая чат-модель"
-    )
-    deepseek_chat_light_model: str = Field(
-        "deepseek-chat", description="DeepSeek лёгкая чат-модель"
-    )
-    deepseek_chat_heavy_model: str = Field(
-        "deepseek-reasoner", description="DeepSeek тяжёлая чат-модель"
-    )
-
-    # --- Grok (xAI) ---
-    grok_chat_light_model: str = Field("grok-4.3", description="Grok лёгкая чат-модель")
-    grok_chat_heavy_model: str = Field(
-        "grok-4.20-0309-reasoning", description="Grok тяжёлая чат-модель"
-    )
-
-    # --- MiMo (Xiaomi) ---
-    mimo_chat_light_model: str = Field(
-        "mimo-v2-flash", description="MiMo лёгкая чат-модель"
-    )
-    mimo_chat_heavy_model: str = Field(
-        "mimo-v2.5-pro", description="MiMo тяжёлая чат-модель"
-    )
-
-    # --- Groq ---
-    groq_chat_light_model: str = Field(
-        "llama-3.3-70b-versatile", description="Groq лёгкая чат-модель"
-    )
-    groq_chat_heavy_model: str = Field(
-        "mixtral-8x7b-32768", description="Groq тяжёлая чат-модель"
-    )
-
     embedding_dim: int = Field(
         1536,
         description="Размерность эмбеддингов (OpenAI text-embedding-3-small: 1536, BGE-M3: 1024, Gemini text-embedding-004: 768)",
     )
+
+    # Capability toggles
+    embedding_enabled: bool = Field(True, description="Enable embedding models")
+    vision_enabled: bool = Field(False, description="Enable vision/image analysis")
+    audio_enabled: bool = Field(True, description="Enable STT/speech-to-text")
+    tts_enabled: bool = Field(False, description="Enable TTS/text-to-speech")
+    auto_select_model: bool = Field(
+        False, description="Auto-select best model per task"
+    )
+
+    # ── Фото-кэш ──
+    photo_cache_ttl_sec: int = Field(300, description="TTL кэша фотографий (секунды)")
+
+    # ── Streaming ──
+    streaming_enabled: bool = Field(True, description="Включить streaming-ответы")
+    streaming_edit_interval: float = Field(
+        0.3, description="Интервал обновления streaming (сек)"
+    )
+    streaming_cursor: str = Field(" 🦊", description="Курсор при streaming")
 
     memory_warmup_idle_timeout_sec: int = Field(
         86400, description="Таймаут простоя для сброса warmup-счётчика (24 часа)"
@@ -397,6 +291,18 @@ class Settings(BaseSettings):
     skill_seed_on_startup: bool = Field(
         True, description="Auto-seed skills from skills/*/SKILL.md on startup"
     )
+
+    # Agent/task-specific model overrides (из .env)
+    maestro_model: str = Field("", description="Model override for maestro agent")
+    draft_model: str = Field("", description="Model override for draft agent")
+    memory_model: str = Field("", description="Model override for memory agent")
+    search_model: str = Field("", description="Model override for search agent")
+    humanize_model: str = Field("", description="Model override for humanize agent")
+    classify_model: str = Field("", description="Model override for classify agent")
+    summarize_model: str = Field("", description="Model override for summarize agent")
+    skills_model: str = Field("", description="Model override for skills agent")
+    background_model: str = Field("", description="Model override for background tasks")
+    vision_model: str = Field("", description="Model override for vision tasks")
 
     @property
     def data_dir(self) -> Path:

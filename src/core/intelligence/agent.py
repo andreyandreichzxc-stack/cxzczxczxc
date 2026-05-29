@@ -197,15 +197,18 @@ AGENT_SYSTEM = """\
   reply: str (HTML-разметка: <b>, <i>, <code>)
 
 "clarify"          — СПРОСИТЬ пользователя, если непонятно.
-  question: str    — конкретный уточняющий вопрос
-  ⚠️ ИСПОЛЬЗУЙ ВСЕГДА, когда:
-  - получатель неясен («ей», «ему», «этому»)
-  - тема поиска размыта («найди то самое»)
-  - нужен выбор из вариантов («которая Настя?»)
-  НЕ ИСПОЛЬЗУЙ "unknown" — только "clarify"!
+   question: str    — конкретный уточняющий вопрос
+   ⚠️ ИСПОЛЬЗУЙ ВСЕГДА, когда:
+   - получатель неясен («ей», «ему», «этому»)
+   - тема поиска размыта («найди то самое»)
+   - нужен выбор из вариантов («которая Настя?»)
+   НЕ ИСПОЛЬЗУЙ "unknown" — только "clarify"!
+
+"admit_ignorance"  — ты не знаешь ответа. Признайся, что не знаешь, и предложи найти информацию. Не выдумывай.
+   reply: str       — честный ответ с предложением поиска
 
 "unknown"          — совсем ничего не понял. Без параметров.
-  Только как fallback, когда даже вопрос сформулировать не можешь.
+   Только как fallback, когда даже вопрос сформулировать не можешь.
 
 "change_auto_mode" — режим авто-ответа.
   mode: "offline_only"|"always"|"smart"
@@ -358,6 +361,22 @@ def _safe_parse(raw: str) -> dict[str, Any]:
             isinstance(parsed.get("intent"), str)
             or isinstance(parsed.get("intents"), list)
         ):
+            # ── Confidence check ──
+            confidence = float(parsed.get("confidence", 0.8))
+            intent = parsed.get("intent", "")
+
+            # Если низкий confidence — переспрашиваем или признаёмся
+            if confidence < 0.5 and intent != "clarify":
+                # Переопределяем intent на admit_ignorance
+                parsed["intent"] = "admit_ignorance"
+                parsed["reply"] = parsed.get(
+                    "reply",
+                    parsed.get(
+                        "question", "Хм, я не знаю точного ответа. Может, поискать?"
+                    ),
+                )
+                parsed["confidence"] = confidence
+
             return parsed
     except Exception:
         logger.warning("agent: bad JSON: %r", raw[:200])
@@ -422,6 +441,18 @@ async def route_intent(
             except Exception:
                 logger.debug("RAG search non-critical fail", exc_info=True)
 
+        # --- Voice transcription metadata ---
+        _transcription_meta = None
+        if user_id is not None:
+            try:
+                from src.core.memory.conversation_context import (
+                    get_and_clear_transcription_meta,
+                )
+
+                _transcription_meta = await get_and_clear_transcription_meta(user_id)
+            except Exception:
+                logger.debug("Failed to load transcription_meta", exc_info=True)
+
         ctx = AssemblyContext(
             target="agent",
             user_id=user_id or 0,
@@ -431,6 +462,7 @@ async def route_intent(
             rag_context=rag_context,
             now_local=now_local or "",
             tz_name=tz_name or "",
+            transcription_meta=_transcription_meta,
         )
         _used_skills_meta: list[dict] = []
         if user_id is not None:

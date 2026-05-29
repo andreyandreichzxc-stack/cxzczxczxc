@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -12,6 +12,7 @@ from src.core.infra.timeutil import ensure_utc as _ensure_utc
 
 
 from src.crypto import decrypt
+from src.core.infra.key_guard import safe_str
 from src.db.models import User
 from src.db.repo import get_active_keys, get_api_keys, mark_key_failure, mark_key_used
 from src.db.session import get_session
@@ -554,7 +555,7 @@ class MultiKeyProvider:
                                 retry + 1,
                                 MAX_RETRIES_PER_KEY,
                                 delay,
-                                str(exc)[:200],
+                                safe_str(exc)[:200],
                             )
                             await asyncio.sleep(delay)
                         else:
@@ -600,14 +601,14 @@ class MultiKeyProvider:
                         "LLM %s key %s temporarily failed, rotating: %s",
                         self.provider_name,
                         _mask_key(key),
-                        str(exc)[:200],
+                        safe_str(exc)[:200],
                     )
                     # DB: отметить падение слота (fresh session)
                     if self._slot_ids:
                         try:
                             async with get_session() as fresh_s:
                                 error_msg = (
-                                    f"{type(exc).__name__}: {str(exc).split(chr(10))[0]}"
+                                    f"{type(exc).__name__}: {safe_str(exc).split(chr(10))[0]}"
                                 )[:256]
                                 await mark_key_failure(
                                     fresh_s, self._slot_ids[idx], error_msg
@@ -742,6 +743,8 @@ class MultiKeyProvider:
                         provider_kwargs["model"] = self._model
                     elif self._models and idx < len(self._models):
                         provider_kwargs["model"] = self._models[idx]
+                    if self._embed_model:
+                        provider_kwargs["embed_model"] = self._embed_model
                     provider = self._provider_class(key, **provider_kwargs)
                     try:
                         total_text = ""
@@ -796,14 +799,14 @@ class MultiKeyProvider:
                             logger.warning(
                                 "Stream key %s failed: %s",
                                 _mask_key(key),
-                                str(e)[:200],
+                                safe_str(e)[:200],
                             )
                             # DB: mark key slot as failed
                             if self._slot_ids:
                                 try:
                                     async with get_session() as fresh_s:
                                         error_msg = (
-                                            f"{type(e).__name__}: {str(e).split(chr(10))[0]}"
+                                            f"{type(e).__name__}: {safe_str(e).split(chr(10))[0]}"
                                         )[:256]
                                         await mark_key_failure(
                                             fresh_s, self._slot_ids[idx], error_msg
@@ -952,7 +955,7 @@ class ProviderFallback:
                 logger.warning(
                     "LLM provider %s failed, trying next: %s",
                     provider.name,
-                    str(exc)[:200],
+                    safe_str(exc)[:200],
                 )
         raise last_error or RuntimeError("All LLM providers failed")
 
@@ -987,7 +990,7 @@ class ProviderFallback:
                 logger.warning(
                     "LLM provider %s streaming failed, trying next: %s",
                     provider.name,
-                    str(exc)[:200],
+                    safe_str(exc)[:200],
                 )
         # All streaming failed — fallback to regular chat
         yield await self.chat(messages, heavy=heavy, task_type=task_type)
@@ -1024,7 +1027,7 @@ class ProviderFallback:
                 logger.warning(
                     "Embed provider %s failed, trying fallback: %s",
                     provider.name,
-                    str(exc)[:200],
+                    safe_str(exc)[:200],
                 )
         raise last_error or RuntimeError("All embed providers failed")
 
@@ -1060,7 +1063,7 @@ class ProviderFallback:
                 logger.warning(
                     "Embed_batch provider %s failed, trying fallback: %s",
                     provider.name,
-                    str(exc)[:200],
+                    safe_str(exc)[:200],
                 )
         raise last_error or RuntimeError("All embed_batch providers failed")
 
@@ -1140,14 +1143,147 @@ def _parse_user_model_overrides(user: User) -> dict[str, str] | None:
         return None
 
 
+def auto_select_model(
+    task_type: str,
+    available_slots: list,
+    provider_catalog: list,
+) -> str | None:
+    """Smart auto-routing: pick best provider+model for task type.
+
+    Returns "provider_name/model_name" or None if no suitable slot found.
+    """
+    if not available_slots:
+        return None
+
+    catalog: dict[str, object] = {p.name: p for p in provider_catalog}
+
+    # Task profiles: требования к модели для каждого типа задачи
+    _TASK_PROFILES: dict[str, dict[str, object]] = {
+        "maestro": {
+            "prefer_tier": "paid",
+            "needs_vision": False,
+            "label": "reasoning+big ctx",
+        },
+        "draft": {"prefer_tier": "free", "needs_vision": False, "label": "speed"},
+        "vision": {"prefer_tier": None, "needs_vision": True, "label": "vision"},
+        "memory": {
+            "prefer_tier": None,
+            "needs_vision": False,
+            "label": "universal-light",
+        },
+        "classify": {
+            "prefer_tier": None,
+            "needs_vision": False,
+            "label": "universal-light",
+        },
+        "summarize": {
+            "prefer_tier": None,
+            "needs_vision": False,
+            "label": "universal-light",
+        },
+        "background": {
+            "prefer_tier": "free",
+            "needs_vision": False,
+            "label": "cheapest",
+        },
+        "search": {
+            "prefer_tier": None,
+            "needs_vision": False,
+            "label": "universal-light",
+        },
+        "stt": {"prefer_tier": None, "needs_vision": False, "label": "universal-light"},
+        "humanize": {
+            "prefer_tier": None,
+            "needs_vision": False,
+            "label": "universal-light",
+        },
+        "skills": {
+            "prefer_tier": None,
+            "needs_vision": False,
+            "label": "universal-light",
+        },
+        "default": {"prefer_tier": None, "needs_vision": False, "label": "universal"},
+    }
+
+    profile = _TASK_PROFILES.get(task_type, _TASK_PROFILES["default"])
+
+    def _slot_success_rate(slot) -> float:
+        total = (getattr(slot, "usage_count", None) or 0) + (
+            getattr(slot, "failure_count", None) or 0
+        )
+        if total == 0:
+            return 0.5
+        return (getattr(slot, "usage_count", None) or 0) / total
+
+    scored: list[tuple[float, str]] = []
+    for slot in available_slots:
+        if not getattr(slot, "enabled", True):
+            continue
+        provider_name = getattr(slot, "provider", "")
+        info = catalog.get(provider_name)
+        if info is None:
+            continue
+        if getattr(info, "category", "") != "llm":
+            continue
+
+        # Hard capability gate — vision tasks need vision support
+        if profile["needs_vision"] and not getattr(info, "supports_vision", False):
+            continue
+
+        score: float = 0.0
+
+        # Tier preference (±30 for matching preferred tier)
+        pref_tier: str | None = profile.get("prefer_tier")
+        info_tier: str = getattr(info, "tier", "")
+        if pref_tier == "paid" and info_tier == "paid":
+            score += 30.0
+        elif pref_tier == "free" and info_tier == "free":
+            score += 30.0
+        elif pref_tier is not None and info_tier != pref_tier:
+            score -= 10.0  # slight penalty for wrong tier
+
+        # Priority: normalize to 0-10 range (assume max realistic priority ~50)
+        slot_priority: int = getattr(slot, "priority", 0) or 0
+        score += min(float(slot_priority), 50.0) * 0.2
+
+        # Success rate: 0-15 range
+        score += _slot_success_rate(slot) * 15.0
+
+        # Explicit model on slot → bonus (user explicitly chose this model)
+        slot_model: str | None = getattr(slot, "model", None)
+        if slot_model:
+            score += 10.0
+
+        model_name: str = slot_model or "default"
+        scored.append((score, f"{provider_name}/{model_name}"))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best = scored[0][1]
+    logger.debug(
+        "auto_select_model: task=%s → %s (score=%.1f, candidates=%d)",
+        task_type,
+        best,
+        scored[0][0],
+        len(scored),
+    )
+    return best
+
+
 def _resolve_model_for_task(
     task_type: str,
     user_overrides: dict[str, str] | None,
+    available_slots: list | None = None,
 ) -> str | None:
     """Resolve model name for a given task type.
 
-    Priority: user.model_overrides[task_type] > Settings agent override > None
-    (use provider default).
+    Priority:
+      1. user.model_overrides[task_type]
+      2. Settings agent override (maestro_model, draft_model, …)
+      3. auto_select_model() — if settings.auto_select_model == True
+      4. None (use provider default)
     """
     from src.config import settings
 
@@ -1155,6 +1291,14 @@ def _resolve_model_for_task(
     if user_overrides:
         model = user_overrides.get(task_type, "")
         if model:
+            # Strip provider prefix if present ("provider/model" -> "model")
+            # Only strip if prefix is a known provider name
+            if "/" in model:
+                from src.llm.provider_catalog import get_provider as _gp
+
+                maybe_provider = model.split("/", 1)[0]
+                if _gp(maybe_provider):
+                    model = model.split("/", 1)[1]
             return model
 
     # 2. Settings agent overrides
@@ -1164,7 +1308,23 @@ def _resolve_model_for_task(
         if model:
             return model
 
-    # 3. None = use provider default
+    # 3. Auto-select if enabled and no explicit override
+    if settings.auto_select_model and available_slots:
+        from src.llm.provider_catalog import LLM_PROVIDERS as _LLM_PROVIDERS
+
+        selected = auto_select_model(task_type, available_slots, _LLM_PROVIDERS)
+        if selected:
+            # Strip provider prefix: "provider/model" -> "model"
+            if "/" in selected:
+                selected = selected.split("/", 1)[1]
+            logger.info(
+                "auto_select_model: task=%s → model=%s",
+                task_type,
+                selected,
+            )
+            return selected
+
+    # 4. None = use provider default
     return None
 
 

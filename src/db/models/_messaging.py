@@ -241,3 +241,36 @@ class ConversationSummary(Base):
 
     # Relationship to User
     user: Mapped["User"] = relationship("User", back_populates="conversation_summaries")
+
+
+class ScheduledMessage(Base):
+    """Отложенное сообщение — будет отправлено в указанное время."""
+
+    __tablename__ = "scheduled_messages"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    contact_name: Mapped[str] = mapped_column(
+        String(255), nullable=False, comment="Имя контакта/чата кому отправить"
+    )
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    send_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, comment="UTC когда отправить"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", comment="pending | sent | failed | cancelled"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    via_userbot: Mapped[bool] = mapped_column(
+        Boolean, default=True, comment="Отправить через userbot"
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="scheduled_messages")

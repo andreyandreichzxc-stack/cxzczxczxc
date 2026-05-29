@@ -32,7 +32,8 @@ _BUILTIN_MODULES = (
     "src.core.actions.mcp_json",
     "src.core.actions.mcp_avito",
     "src.core.actions.mcp_avito_watch",
-    "src.core.actions.mcp_calc",
+    "src.core.actions.mcp_calculator",
+    "src.core.actions.mcp_code_exec",
     "src.core.actions.mcp_codegraph",
     "src.core.actions.mcp_translate",
     "src.core.actions.mcp_timer",
@@ -40,6 +41,7 @@ _BUILTIN_MODULES = (
     "src.core.actions.mcp_gmail",
     "src.core.actions.mcp_file_analyzer",
     "src.core.actions.mcp_youtube",
+    "src.core.actions.mcp_file_send",
     "src.core.actions.mcp_todoist",
     "src.core.actions.mcp_pdf",
     "src.core.actions.mcp_monitor",
@@ -58,6 +60,10 @@ _BUILTIN_MODULES = (
     "src.core.actions.mcp_spellcheck",
     "src.core.actions.mcp_context7",
     "src.core.actions.dsm_memory_tool",
+    "src.core.actions.mcp_vision",
+    "src.core.actions.mcp_skill",
+    "src.core.actions.mcp_web_search",
+    "src.core.actions.mcp_self_audit",
 )
 
 _BUILTINS_REGISTERED = False
@@ -79,6 +85,6 @@ def register_builtin_tools() -> None:
             importlib.import_module(module_name)
         except Exception:
             logger.exception("Failed to import built-in tool module %s", module_name)
-            raise
+            # continue — не блокировать остальные инструменты из-за одного сбойного
     _BUILTINS_REGISTERED = True
     return None

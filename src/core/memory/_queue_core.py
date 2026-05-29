@@ -22,6 +22,7 @@ class MemoryJob:
     facts — список словарей с фактами для сохранения.
     messages_text — текст переписки для извлечения фактов.
     job_type — тип задачи: save | extract | tag.
+    source — источник данных ("chat", "dream", "import", "manual").
     """
 
     telegram_id: int
@@ -29,6 +30,7 @@ class MemoryJob:
     facts: list[dict] | None = None
     messages_text: str = ""
     job_type: str = "save"
+    source: str = "chat"
 
 
 # Очередь заданий (maxsize=100 — защита от переполнения памяти)

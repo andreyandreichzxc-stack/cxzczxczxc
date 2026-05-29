@@ -12,13 +12,14 @@ import httpx
 from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
-from src.config import LLMDefaults
 from src.llm._openai_compat_mixin import OpenAICompatBaseMixin
 from src.llm._ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_CHAT_LIGHT = "llama-3.3-70b-versatile"
+GROQ_CHAT_HEAVY = "mixtral-8x7b-32768"
 
 
 class GroqProvider(OpenAICompatBaseMixin):
@@ -39,9 +40,7 @@ class GroqProvider(OpenAICompatBaseMixin):
         self._model = model
 
     def _resolve_model(self, heavy: bool) -> str:
-        return self._model or (
-            LLMDefaults.GROQ_CHAT_HEAVY if heavy else LLMDefaults.GROQ_CHAT_LIGHT
-        )
+        return self._model or (GROQ_CHAT_HEAVY if heavy else GROQ_CHAT_LIGHT)
 
     async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
         model = self._resolve_model(heavy)

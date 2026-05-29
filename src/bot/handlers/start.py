@@ -22,6 +22,7 @@ from src.db.models._learning import AdaptivePersona
 from src.db.models._memory import Memory
 from src.db.repo import add_key_slot, get_or_create_user, upsert_api_key
 from src.db.session import get_session
+from src.core.infra.key_guard import safe_str
 from src.core.infra.timeutil import TZ_PRESETS, is_valid_tz, tz_short
 from src.llm.anthropic_provider import AnthropicProvider
 from src.llm.cloudflare_provider import CloudflareProvider
@@ -29,7 +30,7 @@ from src.llm.deepseek_provider import DeepSeekProvider
 from src.llm.gemini_provider import GeminiProvider
 from src.llm.grok_provider import GrokProvider
 from src.llm.groq_provider import GroqProvider
-from src.llm.mimo_provider import MiMoProvider
+from src.llm.mimo_provider import MIMO_REGIONS, MiMoProvider
 from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
 from src.llm.openrouter_provider import OpenRouterProvider
@@ -417,6 +418,86 @@ async def cb_onboarding_pick_provider(call: CallbackQuery, state: FSMContext) ->
     )
 
 
+# ─── MiMo region step (onboarding) ──────────────────────────────────
+
+
+async def _send_mimo_region_step(chat_id: int, bot) -> None:
+    """Отправляет сообщение выбора региона MiMo."""
+    kb = InlineKeyboardBuilder()
+    for region_key, _region_url in MIMO_REGIONS.items():
+        label = {"eu": "🇪🇺 EU", "us": "🇺🇸 US", "asia": "🌏 Asia"}.get(
+            region_key, region_key.upper()
+        )
+        kb.button(text=label, callback_data=f"onb:mimo_region:{region_key}")
+    kb.button(text="⏭ Пропустить (Asia)", callback_data="onb:mimo_region:skip")
+    kb.adjust(2)
+    await bot.send_message(
+        chat_id,
+        "🌍 <b>Выбери регион MiMo API:</b>\n\n"
+        "MiMo имеет региональные endpoint'ы. Выбери ближайший к тебе регион "
+        "для минимальной задержки.\n\n"
+        "• 🇪🇺 EU — Европа\n"
+        "• 🇺🇸 US — США\n"
+        "• 🌏 Asia — Азия (по умолчанию)\n\n"
+        "/cancel — отмена.",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("onb:mimo_region:"))
+async def cb_onboarding_mimo_region(call: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает выбор региона MiMo в онбординге."""
+    region_raw = call.data.split(":", 2)[2]
+    await call.answer()
+
+    if region_raw == "skip":
+        endpoint = MIMO_REGIONS["asia"]
+        region_label = "Asia (по умолчанию)"
+    else:
+        endpoint = MIMO_REGIONS.get(region_raw, MIMO_REGIONS["asia"])
+        region_label = {"eu": "EU", "us": "US", "asia": "Asia"}.get(
+            region_raw, region_raw
+        )
+
+    data = await state.get_data()
+    mimo_key = data.get("onboarding_mimo_key", "")
+    tg_id = call.from_user.id
+
+    if mimo_key:
+        parts = [k.strip() for k in mimo_key.split(",") if k.strip()]
+        async with get_session() as session:
+            owner = await get_or_create_user(session, tg_id)
+            # Сохраняем в ApiKey (старое хранилище)
+            await upsert_api_key(session, owner, "mimo", mimo_key)
+            # Сохраняем в LlmKeySlot с endpoint (новое хранилище)
+            for i, single_key in enumerate(parts):
+                slot, _is_new = await add_key_slot(
+                    session,
+                    owner,
+                    "mimo",
+                    single_key,
+                    purpose="main",
+                    priority=i,
+                    endpoint=endpoint,
+                )
+                # upsert_api_key мог создать слот без endpoint — обновляем
+                if not slot.endpoint:
+                    slot.endpoint = endpoint
+            await session.flush()
+
+    await state.set_state(OnboardingStates.waiting_llm_key)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить ещё ключ", callback_data="onb:goback")
+    kb.button(text="✅ Закончить", callback_data="onb:done:keys")
+    kb.adjust(2)
+    if call.message:
+        await call.message.edit_text(
+            f"✅ Ключ <b>MiMo (Xiaomi)</b> сохранён! Регион: {region_label}.\n\n"
+            "Хочешь добавить ещё ключей или провайдеров?",
+            reply_markup=kb.as_markup(),
+        )
+
+
 @router.message(OnboardingStates.waiting_llm_key)
 async def step_onboarding_llm_key_v2(message: Message, state: FSMContext) -> None:
     """Обрабатывает введённый API-ключ."""
@@ -442,6 +523,12 @@ async def step_onboarding_llm_key_v2(message: Message, state: FSMContext) -> Non
         await message.delete()
     except Exception:
         pass
+
+    # MiMo: спросить регион перед сохранением в БД
+    if provider == "mimo":
+        await state.update_data(onboarding_mimo_key=raw)
+        await _send_mimo_region_step(message.chat.id, message.bot)
+        return
 
     async with get_session() as session:
         owner = await get_or_create_user(session, tg_id)
@@ -491,20 +578,22 @@ async def cb_onboarding_tts_category(call: CallbackQuery) -> None:
     )
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(
-            text="🎵 OpenAI TTS", callback_data="onb:provider:openai-tts"
-        ),
-        InlineKeyboardButton(text="📱 MiMo TTS", callback_data="onb:provider:mimo-tts"),
+        InlineKeyboardButton(text="🎵 OpenAI TTS", callback_data="onb:tts:openai-tts"),
+        InlineKeyboardButton(text="📱 MiMo TTS", callback_data="onb:tts:mimo-tts"),
     )
     kb.row(
-        InlineKeyboardButton(
-            text="🌪️ Mistral TTS", callback_data="onb:provider:mistral-tts"
-        ),
+        InlineKeyboardButton(text="🌪️ Mistral TTS", callback_data="onb:tts:mistral-tts"),
     )
     kb.row(
         InlineKeyboardButton(text="⬅️ Назад", callback_data="onb:back:provider_select"),
     )
     await call.message.edit_text(text, reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("onb:tts:"))
+async def cb_onboarding_tts_pick(call: CallbackQuery) -> None:
+    """TTS провайдеры — заглушка, будут доступны позже."""
+    await call.answer("🔊 TTS будет доступен в следующем обновлении", show_alert=True)
 
 
 @router.callback_query(F.data == "onb:back:provider_select")
@@ -688,7 +777,7 @@ async def _validate_key(provider: str, key: str) -> tuple[bool, str | None]:
 
             return (await AnthropicProvider(key).validate_key(), None)
     except Exception as e:
-        err_str = str(e).lower()
+        err_str = safe_str(e).lower()
         if any(
             w in err_str
             for w in ("timeout", "connect", "resolve", "network", "refused", "reset")
@@ -738,7 +827,7 @@ async def _validate_key_v2(provider: str, key: str) -> tuple[bool, str | None]:
 
         return (await _provider_cls(key).validate_key(), None)
     except Exception as e:
-        err_str = str(e).lower()
+        err_str = safe_str(e).lower()
         if any(
             w in err_str
             for w in ("timeout", "connect", "resolve", "network", "refused", "reset")
@@ -876,11 +965,19 @@ async def cb_onboarding_sync_all(callback: CallbackQuery, state: FSMContext) -> 
 
     await callback.answer("📱 Начинаю синхронизацию...")
 
-    # Запускаем синхронизацию в фоне
+    # Запускаем синхронизацию
+    from src.userbot import get_active_telethon_client
     from src.userbot.dialogs import sync_dialogs
 
+    client = get_active_telethon_client(callback.from_user.id)
+    if client is None:
+        await callback.answer(
+            "❌ Telegram-сессия не активна. Сначала /login.", show_alert=True
+        )
+        return
+
     try:
-        await sync_dialogs(callback.from_user.id)
+        await sync_dialogs(client, owner)
         status = "✅ Список чатов обновлён!"
     except Exception as exc:
         logger.exception("sync_dialogs during onboarding failed")
@@ -944,14 +1041,19 @@ async def step_onboarding_sync_folders_text(
         owner.settings.monitor_only_selected_folders = True
 
     # Запускаем синхронизацию
+    from src.userbot import get_active_telethon_client
     from src.userbot.dialogs import sync_dialogs
 
-    try:
-        await sync_dialogs(message.from_user.id)
-        status = "✅ Чаты из выбранных папок синхронизированы!"
-    except Exception as exc:
-        logger.exception("sync_dialogs during onboarding (folders) failed")
-        status = f"⚠️ Синхронизация не удалась: {exc}"
+    client = get_active_telethon_client(message.from_user.id)
+    if client is None:
+        status = "❌ Telegram-сессия не активна. Сначала /login."
+    else:
+        try:
+            await sync_dialogs(client, owner)
+            status = "✅ Чаты из выбранных папок синхронизированы!"
+        except Exception as exc:
+            logger.exception("sync_dialogs during onboarding (folders) failed")
+            status = f"⚠️ Синхронизация не удалась: {exc}"
 
     await state.clear()
     await _finish_onboarding(

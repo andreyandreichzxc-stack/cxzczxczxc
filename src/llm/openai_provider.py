@@ -2,10 +2,12 @@ import httpx
 from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
-from src.config import LLMDefaults
 from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin
 from src.llm._ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
+
+OPENAI_CHAT_LIGHT = "gpt-5-mini"
+OPENAI_CHAT_HEAVY = "gpt-5.5"
 
 
 class OpenAIProvider(OpenAICompatEmbedMixin):
@@ -28,9 +30,7 @@ class OpenAIProvider(OpenAICompatEmbedMixin):
         self._embed_model = embed_model
 
     def _resolve_model(self, heavy: bool) -> str:
-        return self._model or (
-            LLMDefaults.OPENAI_CHAT_HEAVY if heavy else LLMDefaults.OPENAI_CHAT_LIGHT
-        )
+        return self._model or (OPENAI_CHAT_HEAVY if heavy else OPENAI_CHAT_LIGHT)
 
     async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
         model = self._resolve_model(heavy)

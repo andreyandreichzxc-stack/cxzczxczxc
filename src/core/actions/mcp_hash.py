@@ -12,6 +12,7 @@ Supported algorithms: md5, sha1, sha256, sha512.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from pathlib import Path
@@ -94,7 +95,7 @@ async def mcp_hash(
         if action == "file":
             return await _hash_file(path, algorithm)
         elif action == "string":
-            return _hash_string(text, algorithm)
+            return await _hash_string(text, algorithm)
         elif action == "verify":
             return await _verify_file(path, expected, algorithm)
         else:
@@ -129,11 +130,12 @@ async def _hash_file(path: str, algorithm: str) -> dict[str, Any]:
     if not file_path.is_file():
         return {"error": f"Not a file: {path}"}
 
-    hasher = _new_hasher(algorithm)
+    loop = asyncio.get_running_loop()
     # Read in chunks for memory efficiency
     data = file_path.read_bytes()
+    hasher = _new_hasher(algorithm)
     hasher.update(data)
-    digest = hasher.hexdigest()
+    digest = await loop.run_in_executor(None, hasher.hexdigest)
 
     return {
         "ok": True,
@@ -144,13 +146,14 @@ async def _hash_file(path: str, algorithm: str) -> dict[str, Any]:
     }
 
 
-def _hash_string(text: str, algorithm: str) -> dict[str, Any]:
+async def _hash_string(text: str, algorithm: str) -> dict[str, Any]:
     if not text:
         return {"error": "text parameter is required for action='string'"}
 
+    loop = asyncio.get_running_loop()
     hasher = _new_hasher(algorithm)
     hasher.update(text.encode("utf-8"))
-    digest = hasher.hexdigest()
+    digest = await loop.run_in_executor(None, hasher.hexdigest)
 
     return {
         "ok": True,
@@ -174,10 +177,11 @@ async def _verify_file(path: str, expected: str, algorithm: str) -> dict[str, An
     if not file_path.is_file():
         return {"error": f"Not a file: {path}"}
 
+    loop = asyncio.get_running_loop()
     hasher = _new_hasher(algorithm)
     data = file_path.read_bytes()
     hasher.update(data)
-    actual = hasher.hexdigest()
+    actual = await loop.run_in_executor(None, hasher.hexdigest)
     match = actual == expected.strip().lower()
 
     return {

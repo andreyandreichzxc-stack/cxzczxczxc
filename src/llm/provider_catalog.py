@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -13,8 +13,13 @@ class ProviderInfo:
     tier: str  # "free" | "paid" | "custom" | "local"
     key_prefix: str  # "sk-" | "sk-ant-" | "gsk_" | ""
     default_endpoint: str | None  # None = use SDK default
-    models: list[str]  # ["gpt-4o", "gpt-4o-mini"]
-    description: str  # one-liner
+    description: str  # one-liner (required, no default)
+    models: list[str] = field(default_factory=list)  # removed hardcoded models
+    supports_vision: bool = False  # supports image/vision
+    supports_embeddings: bool = False  # supports embeddings
+    ai_markers: tuple[
+        str, ...
+    ] = ()  # русскоязычные маркеры-фразы, характерные для провайдера
 
 
 # ── Free LLM ──────────────────────────────────────────────────────────
@@ -26,8 +31,8 @@ GROQ = ProviderInfo(
     tier="free",
     key_prefix="gsk_",
     default_endpoint=None,
-    models=["llama-3.3-70b-versatile", "mixtral-8x7b-32768", "gemma2-9b-it"],
     description="Бесплатные токены, быстрый вывод, OpenAI-совместимый API",
+    ai_markers=("в конечном счёте", "я бы предложил"),
 )
 
 GEMINI = ProviderInfo(
@@ -37,14 +42,15 @@ GEMINI = ProviderInfo(
     tier="free",
     key_prefix="AIza",
     default_endpoint=None,
-    models=[
-        "gemini-3-flash",
-        "gemini-3.1-pro",
-        "gemini-2.0-flash",
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-    ],
     description="Бесплатный тир, мультимодальный, Google SDK",
+    supports_vision=True,
+    supports_embeddings=True,
+    ai_markers=(
+        "вот что я нашел",
+        "давайте разберем",
+        "вот основные моменты",
+        "рад был помочь",
+    ),
 )
 
 CLOUDFLARE = ProviderInfo(
@@ -54,13 +60,9 @@ CLOUDFLARE = ProviderInfo(
     tier="free",
     key_prefix="",
     default_endpoint=None,
-    models=[
-        "@cf/qwen/qwen3-30b-a3b-fp8",
-        "@cf/moonshotai/kimi-k2.6",
-        "@cf/meta/llama-3.1-8b-instruct",
-        "@cf/mistral/mistral-7b-instruct",
-    ],
     description="Бесплатные Workers AI, Cloudflare-специфичный API",
+    supports_vision=True,
+    supports_embeddings=True,
 )
 
 # ── Paid LLM ──────────────────────────────────────────────────────────
@@ -72,16 +74,17 @@ OPENAI = ProviderInfo(
     tier="paid",
     key_prefix="sk-",
     default_endpoint=None,
-    models=[
-        "gpt-5-mini",
-        "gpt-5.5",
-        "gpt-4o",
-        "gpt-4o-mini",
-        "gpt-4.1",
-        "o3-mini",
-        "o4-mini",
-    ],
     description="Лучшее качество, дорогой, стандартный API",
+    supports_vision=True,
+    ai_markers=(
+        "я бы посоветовал",
+        "я бы рекомендовал",
+        "важно подчеркнуть",
+        "хочу обратить внимание",
+        "позвольте заметить",
+        "не могу не отметить",
+        "следует упомянуть",
+    ),
 )
 
 ANTHROPIC = ProviderInfo(
@@ -91,12 +94,16 @@ ANTHROPIC = ProviderInfo(
     tier="paid",
     key_prefix="sk-ant-",
     default_endpoint=None,
-    models=[
-        "claude-3-5-sonnet-20241022",
-        "claude-3-5-haiku-20241022",
-        "claude-3-opus-20240229",
-    ],
     description="Claude, Messages API, лучший для длинных текстов",
+    supports_vision=True,
+    ai_markers=(
+        "я стремлюсь",
+        "я стараюсь",
+        "позвольте уточнить",
+        "я бы с радостью",
+        "не стесняйтесь обращаться",
+        "чем могу быть полезен",
+    ),
 )
 
 DEEPSEEK = ProviderInfo(
@@ -106,8 +113,9 @@ DEEPSEEK = ProviderInfo(
     tier="paid",
     key_prefix="sk-",
     default_endpoint="https://api.deepseek.com/v1",
-    models=["deepseek-chat", "deepseek-reasoner", "deepseek-embedding"],
     description="Дешёвый, качественный, OpenAI-совместимый",
+    supports_embeddings=True,
+    ai_markers=("наконец", "в конечном счете", "резюмируя", "в итоге"),
 )
 
 MISTRAL = ProviderInfo(
@@ -117,13 +125,9 @@ MISTRAL = ProviderInfo(
     tier="paid",
     key_prefix="",
     default_endpoint=None,
-    models=[
-        "mistral-small-latest",
-        "mistral-medium-latest",
-        "mistral-large-latest",
-        "codestral-latest",
-    ],
     description="Французский LLM, хорошее соотношение цена/качество",
+    supports_embeddings=True,
+    ai_markers=("я полагаю", "по всей видимости", "в сущности"),
 )
 
 GROK = ProviderInfo(
@@ -133,8 +137,9 @@ GROK = ProviderInfo(
     tier="paid",
     key_prefix="xai-",
     default_endpoint="https://api.x.ai/v1",
-    models=["grok-4.3", "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning"],
     description="xAI Grok, OpenAI-совместимый API",
+    supports_vision=True,
+    ai_markers=("по-моему", "как по мне", "на мой взгляд", "жду твоего мнения"),
 )
 
 MIMO = ProviderInfo(
@@ -144,8 +149,10 @@ MIMO = ProviderInfo(
     tier="paid",
     key_prefix="",
     default_endpoint="https://api.xiaomimimo.com/v1",
-    models=["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-flash", "mimo-v2-omni"],
-    description="Xiaomi MiMo, OpenAI-совместимый, мультимодальный",
+    description="Xiaomi MiMo, OpenAI-совместимый, мультимодальный. Региональные endpoint'ы: EU, US, Asia.",
+    supports_vision=True,
+    supports_embeddings=True,
+    ai_markers=("позвольте заметить", "стоит отметить", "обратите внимание"),
 )
 
 # ── Custom / Local ────────────────────────────────────────────────────
@@ -157,8 +164,9 @@ CUSTOM_OPENAI = ProviderInfo(
     tier="custom",
     key_prefix="",
     default_endpoint=None,  # user provides
-    models=[],  # user types model name
     description="Любой OpenAI-совместимый endpoint. Нужен URL + модель.",
+    supports_vision=True,  # может поддерживать vision если endpoint позволяет
+    ai_markers=(),  # пользователь сам добавит
 )
 
 LOCAL = ProviderInfo(
@@ -168,7 +176,6 @@ LOCAL = ProviderInfo(
     tier="local",
     key_prefix="not-needed",
     default_endpoint=None,
-    models=[],  # user types
     description="Локальный сервер. Ключ не нужен. Нужен URL + модель.",
 )
 
@@ -181,7 +188,6 @@ WHISPER_LOCAL = ProviderInfo(
     tier="local",
     key_prefix="not-needed",
     default_endpoint=None,
-    models=["tiny", "small", "medium", "large-v3"],
     description="Локальная транскрипция. Не нужен ключ. Модель small/medium/large.",
 )
 
@@ -192,7 +198,6 @@ WHISPER_OPENAI = ProviderInfo(
     tier="paid",
     key_prefix="sk-",
     default_endpoint=None,
-    models=["whisper-1"],
     description="OpenAI Whisper API. Платно за минуту.",
 )
 
@@ -203,7 +208,6 @@ DEEPGRAM = ProviderInfo(
     tier="paid",
     key_prefix="",
     default_endpoint=None,
-    models=["nova-2", "nova-3", "whisper"],
     description="Лучшее качество STT. Платно за минуту.",
 )
 
@@ -214,7 +218,6 @@ ASSEMBLYAI = ProviderInfo(
     tier="paid",
     key_prefix="",
     default_endpoint=None,
-    models=["best", "nano"],
     description="Качественная транскрипция. Платно.",
 )
 
@@ -227,7 +230,6 @@ OPENAI_TTS = ProviderInfo(
     tier="paid",
     key_prefix="sk-",
     default_endpoint="https://api.openai.com/v1",
-    models=["tts-1", "tts-1-hd"],
     description="OpenAI синтез речи. 6 голосов.",
 )
 
@@ -238,7 +240,6 @@ MIMO_TTS = ProviderInfo(
     tier="paid",
     key_prefix="",
     default_endpoint="https://api.xiaomimimo.com/v1",
-    models=["mimo-v2.5-tts", "mimo-v2.5-tts-voiceclone", "mimo-v2.5-tts-voicedesign"],
     description="Xiaomi MiMo синтез речи с клонированием голоса.",
 )
 
@@ -249,7 +250,6 @@ MISTRAL_TTS = ProviderInfo(
     tier="paid",
     key_prefix="",
     default_endpoint="https://api.mistral.ai/v1",
-    models=["mistral-tts", "mistral-small-tts"],
     description="Mistral синтез речи.",
 )
 
@@ -277,18 +277,19 @@ TTS_PROVIDERS = [
 ]
 
 
+_ALL_PROVIDERS: list[ProviderInfo] = LLM_PROVIDERS + STT_PROVIDERS + TTS_PROVIDERS
+
+
 def get_provider(name: str) -> ProviderInfo | None:
-    for p in LLM_PROVIDERS + STT_PROVIDERS + TTS_PROVIDERS:
+    for p in _ALL_PROVIDERS:
         if p.name == name:
             return p
     return None
 
 
 def get_providers_by_category(category: str) -> list[ProviderInfo]:
-    all_providers = LLM_PROVIDERS + STT_PROVIDERS + TTS_PROVIDERS
-    return [p for p in all_providers if p.category == category]
+    return [p for p in _ALL_PROVIDERS if p.category == category]
 
 
 def get_providers_by_tier(tier: str) -> list[ProviderInfo]:
-    all_providers = LLM_PROVIDERS + STT_PROVIDERS + TTS_PROVIDERS
-    return [p for p in all_providers if p.tier == tier]
+    return [p for p in _ALL_PROVIDERS if p.tier == tier]

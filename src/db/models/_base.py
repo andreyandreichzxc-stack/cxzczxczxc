@@ -10,7 +10,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 if TYPE_CHECKING:
     from src.db.models._auth import ApiKey, LlmKeySlot, TelegramSession, UserSettings
-    from src.db.models._messaging import ConversationSummary
+    from src.db.models._messaging import ConversationSummary, ScheduledMessage
 
 
 class Base(DeclarativeBase):
@@ -59,6 +59,11 @@ class User(Base):
         lazy="select",
     )
     conversation_summaries: Mapped[list["ConversationSummary"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    scheduled_messages: Mapped[list["ScheduledMessage"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         lazy="selectin",

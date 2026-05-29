@@ -1,7 +1,9 @@
-"""/settings — главное меню и разделы. callback_data: set:sec / set:tog / set:choose / set:input."""
+﻿"""/settings — главное меню и разделы. callback_data: set:sec / set:tog / set:choose / set:input."""
 
+import io
 import json
 import logging
+from datetime import datetime, timezone
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -9,6 +11,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -17,7 +20,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.filters import OwnerOnly
 from src.bot.states import SettingsStates
-from src.config import LLMDefaults
+from src.config import settings
+
+from src.core.infra.key_guard import safe_str
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.timeutil import HM_RE, TZ_PRESETS, is_valid_tz, tz_short
 from src.core.intelligence.adaptive_persona import (
@@ -40,7 +45,7 @@ from src.llm.deepseek_provider import DeepSeekProvider
 from src.llm.gemini_provider import GeminiProvider
 from src.llm.grok_provider import GrokProvider
 from src.llm.groq_provider import GroqProvider
-from src.llm.mimo_provider import MiMoProvider
+from src.llm.mimo_provider import MIMO_REGIONS, MiMoProvider
 from src.llm.mistral_provider import MistralProvider
 from src.llm.openai_provider import OpenAIProvider
 from src.llm.custom_provider import CustomProvider
@@ -211,11 +216,18 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         InlineKeyboardButton(text="🔄 Синхронизация", callback_data="set:sec:sync"),
         InlineKeyboardButton(text="🔑 API-ключи", callback_data="set:sec:keys"),
     )
-    kb.row(InlineKeyboardButton(text="📁 Папки", callback_data="set:sec:folders"))
     kb.row(InlineKeyboardButton(text="📬 Треды", callback_data="thread:refresh"))
     kb.row(InlineKeyboardButton(text="🧠 Полный анализ", callback_data="set:analyze"))
     kb.row(
         InlineKeyboardButton(text="🎭 Личность", callback_data="set:sec:personality")
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="📤 Экспорт конфига", callback_data="set:export_config"
+        ),
+        InlineKeyboardButton(
+            text="📥 Импорт конфига", callback_data="set:import_config"
+        ),
     )
     kb.row(InlineKeyboardButton(text="❌ Закрыть", callback_data="set:close"))
     # Быстрые тогглы (авто-память, избранное, дайджест, авто-ответ)
@@ -277,7 +289,7 @@ async def _safe_edit(message, text: str, kb) -> None:
     try:
         await message.edit_text(text, reply_markup=kb)
     except TelegramBadRequest as e:
-        if "not modified" not in str(e).lower():
+        if "not modified" not in safe_str(e).lower():
             raise
 
 
@@ -303,7 +315,6 @@ async def cb_settings_back(callback: CallbackQuery) -> None:
 async def _show_main_menu(callback: CallbackQuery) -> None:
     text, kb = await _render_menu(callback.from_user.id)
     await _safe_edit(callback.message, text, kb)
-    await callback.answer()
 
 
 @router.callback_query(F.data == "set:close")
@@ -311,6 +322,188 @@ async def cb_close(callback: CallbackQuery) -> None:
     if callback.message:
         await callback.message.delete()
     await callback.answer()
+
+
+# ---------- Экспорт / Импорт конфига ----------
+
+
+@router.callback_query(F.data == "set:export_config")
+async def cb_export_config(callback: CallbackQuery) -> None:
+    """Экспорт всех настроек бота в JSON-файл."""
+    await callback.answer("📤 Готовлю экспорт...")
+
+    async with get_session() as session:
+        owner = await get_or_create_user(session, callback.from_user.id)
+        s = owner.settings
+
+        # model_overrides в БД — JSON-строка, парсим для экспорта
+        try:
+            overrides = json.loads(s.model_overrides) if s.model_overrides else {}
+        except (json.JSONDecodeError, TypeError):
+            overrides = {}
+
+        # Собираем настройки
+        config = {
+            "version": 1,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "settings": {
+                "llm_provider": s.llm_provider,
+                "use_heavy_model": s.use_heavy_model,
+                "transcription_mode": s.transcription_mode,
+                "transcription_api_provider": getattr(
+                    s, "transcription_api_provider", "openai"
+                ),
+                "anti_ai_enabled": getattr(s, "anti_ai_enabled", False),
+                "anti_ai_mode": getattr(s, "anti_ai_mode", "off"),
+                "adaptive_mode_enabled": getattr(s, "adaptive_mode_enabled", False),
+                "auto_sync_enabled": getattr(s, "auto_sync_enabled", True),
+                "auto_extract_memories": getattr(s, "auto_extract_memories", False),
+                "include_saved_messages": getattr(s, "include_saved_messages", False),
+                "monitor_only_selected_folders": getattr(
+                    s, "monitor_only_selected_folders", False
+                ),
+                "monitored_folders": s.monitored_folders,
+                "timezone": s.timezone,
+                "auto_reply_close_contacts": getattr(
+                    s, "auto_reply_close_contacts", False
+                ),
+                "smart_digest_enabled": getattr(s, "smart_digest_enabled", False),
+                "urgent_notify_enabled": getattr(s, "urgent_notify_enabled", False),
+                "digest_time": s.digest_time,
+                "auto_sync_interval_sec": getattr(s, "auto_sync_interval_sec", 7200),
+            },
+            "model_overrides": overrides,
+            "keys": [],
+        }
+
+        # Собираем ключи
+        slots = await list_key_slots(session, owner)
+        for slot in slots:
+            if slot.enabled:
+                config["keys"].append(
+                    {
+                        "provider": slot.provider,
+                        "purpose": slot.purpose,
+                        "model": slot.model,
+                        "endpoint": slot.endpoint,
+                        "category": slot.category,
+                        "label": slot.label,
+                        "priority": slot.priority,
+                        "key_enc": slot.key_enc,  # ключ уже зашифрован — экспортируем как есть
+                    }
+                )
+
+        json_str = json.dumps(config, ensure_ascii=False, indent=2)
+        bio = io.BytesIO(json_str.encode("utf-8"))
+        bio.seek(0)
+
+        await callback.message.answer_document(
+            FSInputFile(bio, "telegram_helper_config.json"),
+            caption="📤 Твой конфиг бота. Сохрани этот файл.\n\n"
+            "Для восстановления используй 📥 Импорт конфига в настройках.",
+        )
+
+
+@router.callback_query(F.data == "set:import_config")
+async def cb_import_config(callback: CallbackQuery, state: FSMContext) -> None:
+    """Запуск импорта — просим прислать файл."""
+    await state.set_state(SettingsStates.waiting_config_import)
+    await callback.message.answer(
+        "📥 Пришли JSON-файл конфига (telegram_helper_config.json).\n/cancel — отмена."
+    )
+    await callback.answer()
+
+
+@router.message(SettingsStates.waiting_config_import, F.document)
+async def step_import_config(message: Message, state: FSMContext) -> None:
+    """Обрабатываем загруженный конфиг-файл."""
+    if (
+        not message.document
+        or not message.document.file_name
+        or not message.document.file_name.endswith(".json")
+    ):
+        await message.answer("❌ Нужен .json файл. Попробуй ещё раз или /cancel.")
+        return
+
+    await message.answer("📥 Импортирую конфиг...")
+
+    try:
+        # Скачиваем файл
+        file = await message.bot.get_file(message.document.file_id)
+        bio = io.BytesIO()
+        await message.bot.download_file(file.file_path, bio)
+        config = json.loads(bio.getvalue().decode("utf-8"))
+
+        if "version" not in config:
+            await message.answer("❌ Невалидный файл конфига (нет version).")
+            await state.clear()
+            return
+
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            s = owner.settings
+
+            # Восстанавливаем настройки
+            settings_data = config.get("settings", {})
+            for key, value in settings_data.items():
+                if hasattr(s, key) and value is not None:
+                    setattr(s, key, value)
+
+            # Восстанавливаем model_overrides (сериализуем в JSON-строку)
+            overrides = config.get("model_overrides", {})
+            if overrides:
+                s.model_overrides = json.dumps(overrides, ensure_ascii=False)
+
+            # Восстанавливаем ключи
+            from src.db.models._auth import LlmKeySlot
+
+            imported_keys = config.get("keys", [])
+            existing = await list_key_slots(session, owner)
+
+            for key_data in imported_keys:
+                # Проверяем — нет ли уже такого ключа
+                duplicate = False
+                for existing_slot in existing:
+                    if existing_slot.provider == key_data[
+                        "provider"
+                    ] and existing_slot.purpose == key_data.get("purpose", "main"):
+                        duplicate = True
+                        break
+
+                if duplicate:
+                    continue  # пропускаем дубликаты
+
+                # Создаём слот напрямую — key_enc уже зашифрован, не пропускаем через encrypt()
+                slot = LlmKeySlot(
+                    user_id=owner.id,
+                    provider=key_data["provider"],
+                    purpose=key_data.get("purpose", "main"),
+                    model=key_data.get("model"),
+                    endpoint=key_data.get("endpoint"),
+                    category=key_data.get("category", "llm"),
+                    label=key_data.get("label"),
+                    priority=key_data.get("priority", 0),
+                    key_enc=key_data["key_enc"],  # уже зашифрован тем же encryption_key
+                )
+                session.add(slot)
+
+            await session.commit()
+
+        count = len(imported_keys)
+        await message.answer(
+            f"✅ Конфиг импортирован!\n"
+            f"⚙️ Настроек: {len(settings_data)}\n"
+            f"🔑 Ключей: {count}\n"
+            f"📋 Переопределений моделей: {len(overrides)}\n\n"
+            f"Проверь настройки в /settings.",
+        )
+
+    except json.JSONDecodeError:
+        await message.answer("❌ Файл повреждён — невалидный JSON.")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка импорта: {e}")
+    finally:
+        await state.clear()
 
 
 @router.callback_query(F.data == "set:analyze")
@@ -524,12 +717,13 @@ def _section_for_key(key: str) -> str:
         "adaptive_mode_enabled": "personality",
         "anti_ai_enabled": "personality",
         "anti_ai_mode": "personality",
-        "monitor_only_selected_folders": "folders",
+        "monitor_only_selected_folders": "privacy",
         "auto_sync_enabled": "sync",
         "auto_extract_memories": "sync",
         "include_saved_messages": "sync",
         "smart_digest_enabled": "smart_digest",
         "urgent_notify_enabled": "smart_digest",
+        "auto_sync_interval_sec": "sync",
     }.get(key, "menu")
 
 
@@ -765,24 +959,27 @@ async def _render_section(
 
         elif section == "brain":
             # ── LLM provider ──
+            # Display-friendly model names per provider
+            _provider_model_names = {
+                "openai": ("gpt-5-mini", "gpt-5.5"),
+                "gemini": ("gemini-3-flash", "gemini-3.1-pro"),
+                "mistral": ("mistral-small-latest", "mistral-medium-latest"),
+                "cloudflare": (
+                    "@cf/qwen/qwen3-30b-a3b-fp8",
+                    "@cf/moonshotai/kimi-k2.6",
+                ),
+                "deepseek": ("deepseek-chat", "deepseek-reasoner"),
+                "grok": ("grok-4.3", "grok-4.20-0309-reasoning"),
+                "mimo": ("mimo-v2-flash", "mimo-v2.5-pro"),
+                "groq": ("llama-3.3-70b-versatile", "mixtral-8x7b-32768"),
+            }
+            _names = _provider_model_names.get(s.llm_provider, ("?", "?"))
             active = (
                 "DeepSeek V4 Flash (бесплатно)"
                 if s.llm_provider == "openrouter"
-                else LLMDefaults.OPENAI_CHAT_HEAVY
-                if s.use_heavy_model and s.llm_provider == "openai"
-                else LLMDefaults.OPENAI_CHAT_LIGHT
-                if s.llm_provider == "openai"
-                else LLMDefaults.GEMINI_CHAT_HEAVY
-                if s.use_heavy_model and s.llm_provider == "gemini"
-                else LLMDefaults.GEMINI_CHAT_LIGHT
-                if s.llm_provider == "gemini"
-                else LLMDefaults.MISTRAL_CHAT_HEAVY
-                if s.use_heavy_model and s.llm_provider == "mistral"
-                else LLMDefaults.MISTRAL_CHAT_LIGHT
-                if s.llm_provider == "mistral"
-                else LLMDefaults.CLOUDFLARE_CHAT_HEAVY
+                else _names[1]
                 if s.use_heavy_model
-                else LLMDefaults.CLOUDFLARE_CHAT_LIGHT
+                else _names[0]
             )
 
             # ── Transcription ──
@@ -859,6 +1056,42 @@ async def _render_section(
                         callback_data=f"set:choose:transcription_api_provider:{prov}",
                     )
                 )
+
+            # ── Возможности AI (глобальные, из .env) ──
+            emb_on = settings.embedding_enabled
+            vis_on = settings.vision_enabled
+            aud_on = settings.audio_enabled
+            tts_on = settings.tts_enabled
+            auto_on = settings.auto_select_model
+
+            text += (
+                "\n\n⚙️ <b>Возможности AI (глобальные):</b>\n"
+                f"🔤 Embedding: {'✅' if emb_on else '❌'}  👁️ Vision: {'✅' if vis_on else '❌'}\n"
+                f"🎤 STT/Audio: {'✅' if aud_on else '❌'}  🔊 TTS: {'✅' if tts_on else '❌'}\n"
+                f"🤖 Авто-выбор: {'✅' if auto_on else '❌'}\n"
+                f"<i>Настрой через .env / переменные окружения</i>"
+            )
+
+            # ── Контекст Maestro ──
+            try:
+                from src.core.context.engine import ContextEngine
+
+                stats = (
+                    ContextEngine.get_load_stats()
+                    if hasattr(ContextEngine, "get_load_stats")
+                    else None
+                )
+            except Exception:
+                stats = None
+            if stats:
+                pct = min(100, int(stats.get("used_pct", 0)))
+                bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+                text += (
+                    f"\n\n📊 <b>Контекст Maestro:</b> [{bar}] {pct}%\n"
+                    f"   Память: {stats.get('memory_tokens', 0)} · Вектор: {stats.get('vector_tokens', 0)} · Wiki: {stats.get('wiki_tokens', 0)}"
+                )
+            else:
+                text += "\n\n📊 <b>Контекст Maestro:</b> будет доступен после запуска"
 
             # ── Model overrides ──
             kb.row(
@@ -956,21 +1189,30 @@ async def _render_section(
             from src.llm.provider_catalog import get_provider
 
             available_models: list[str] = []
+            seen: set[str] = set()
             for provider, models in provider_models.items():
                 if models:
-                    available_models.extend(sorted(models))
+                    for model in sorted(models):
+                        key = f"{provider}/{model}"
+                        if key not in seen:
+                            seen.add(key)
+                            available_models.append(key)
                 else:
                     pi = get_provider(provider)
                     if pi:
-                        available_models.extend(pi.models)
+                        for model in pi.models:
+                            key = f"{provider}/{model}"
+                            if key not in seen:
+                                seen.add(key)
+                                available_models.append(key)
 
-            # Убираем дубли и сортируем
-            available_models = sorted(set(available_models))
+            available_models.sort()
 
             # Если ничего нет — показываем каталог основного провайдера
             if not available_models:
                 pi = get_provider(s.llm_provider)
-                available_models = pi.models if pi else []
+                if pi and pi.models:
+                    available_models = [f"{s.llm_provider}/{m}" for m in pi.models]
 
             lines = [
                 f"🧠 <b>Модель для: {task_label}</b>",
@@ -991,7 +1233,11 @@ async def _render_section(
             )
             # Кнопки моделей из каталога
             for model in available_models:
-                mark = "• " if current == model else ""
+                # current may be old (bare model) or new (provider/model) format
+                is_selected = current and (
+                    current == model or model.endswith(f"/{current}")
+                )
+                mark = "• " if is_selected else ""
                 kb.row(
                     InlineKeyboardButton(
                         text=f"{mark}{model}",
@@ -1044,6 +1290,15 @@ async def _render_section(
             kb.row(*_back_row())
 
         elif section == "privacy":
+            folders_data = await list_folders(session, owner)
+
+            try:
+                monitored = (
+                    json.loads(s.monitored_folders) if s.monitored_folders else []
+                )
+            except json.JSONDecodeError:
+                monitored = []
+
             text = (
                 "🛡 <b>Приватность и видимость</b>\n\n"
                 "Что бот <b>смотрит и обрабатывает</b> по умолчанию.\n\n"
@@ -1051,12 +1306,39 @@ async def _render_section(
                 "ни в /search, ни в /news, ни в авто-ответ. Включено по умолчанию.\n\n"
                 f"Игнорировать архив: <b>{'ВКЛ' if s.ignore_archived else 'ВЫКЛ'}</b>\n\n"
                 "<i>Изменения вступают в силу для следующих запросов. Архивный статус подтягивается "
-                "при /sync.</i>"
+                "при /sync.</i>\n\n"
+                "━━━ 📁 <b>Мониторинг папок</b> ━━━"
             )
             kb.row(
                 InlineKeyboardButton(
                     text=f"{_check(s.ignore_archived)} Игнорировать архив",
                     callback_data="set:tog:ignore_archived",
+                )
+            )
+
+            if not folders_data:
+                text += "\n\n⚠️ Папки не найдены. Сделай /sync."
+            else:
+                for f in folders_data:
+                    icon = "✅" if f.title in monitored else "⬜"
+                    kb.button(
+                        text=f"{icon} {f.emoji or '📂'} {f.title}",
+                        callback_data=f"set:folder:tog:{f.title}",
+                    )
+                text += (
+                    "\n\n<i>Нажимай на папку чтобы включить/выключить мониторинг.</i>"
+                )
+
+            monitor_only = "✅" if s.monitor_only_selected_folders else "⬜"
+            kb.row(
+                InlineKeyboardButton(
+                    text=f"{monitor_only} Только выбранные",
+                    callback_data="set:tog:monitor_only_selected_folders",
+                )
+            )
+            kb.row(
+                InlineKeyboardButton(
+                    text="🔄 Обновить папки", callback_data="set:folder:refresh"
                 )
             )
             kb.row(*_back_row())
@@ -1260,52 +1542,6 @@ async def _render_section(
             )
             kb.row(*_back_row())
 
-        elif section == "folders":
-            folders_data = await list_folders(session, owner)
-
-            try:
-                monitored = (
-                    json.loads(s.monitored_folders) if s.monitored_folders else []
-                )
-            except json.JSONDecodeError:
-                monitored = []
-
-            lines = ["📁 <b>Мониторинг папок</b>", ""]
-
-            if not folders_data:
-                lines.append("⚠️ Папки не найдены. Сделай /sync.")
-            else:
-                for f in folders_data:
-                    icon = "✅" if f.title in monitored else "⬜"
-                    lines.append(f"{icon} {f.emoji or '📂'} {f.title}")
-                lines.append("")
-                lines.append("Нажимай на папку чтобы включить/выключить мониторинг.")
-
-            monitor_only = "✅" if s.monitor_only_selected_folders else "⬜"
-            lines.append(f"{monitor_only} Мониторить ТОЛЬКО выбранные папки")
-
-            text = "\n".join(lines)
-
-            for f in folders_data:
-                icon = "✅" if f.title in monitored else "⬜"
-                kb.button(
-                    text=f"{icon} {f.emoji or '📂'} {f.title}",
-                    callback_data=f"set:folder:tog:{f.title}",
-                )
-
-            kb.row(
-                InlineKeyboardButton(
-                    text=f"{'✅' if s.monitor_only_selected_folders else '⬜'} Только выбранные",
-                    callback_data="set:tog:monitor_only_selected_folders",
-                )
-            )
-            kb.row(
-                InlineKeyboardButton(
-                    text="🔄 Обновить папки", callback_data="set:folder:refresh"
-                )
-            )
-            kb.row(*_back_row())
-
         elif section == "personality":
             from src.db.repo import get_persona
 
@@ -1321,6 +1557,7 @@ async def _render_section(
                 "cynical": "Циничный",
             }
             level_labels = {"low": "Менее", "normal": "По умолчанию", "high": "Более"}
+            anti_ai_mode_labels = {"off": "Выкл", "log": "Лог", "fix": "Исправлять"}
             current_tone = tone_labels.get(p.base_tone, "По умолчанию")
 
             text = (
@@ -1334,7 +1571,9 @@ async def _render_section(
                 f"😊 Эмодзи: <b>{level_labels.get(p.emoji_level, '—')}</b>\n\n"
                 f"📝 Инструкции: {'есть' if p.custom_instructions else 'нет'}\n"
                 f"👤 Псевдоним: {p.alias or 'не задан'}\n"
-                f"🧠 Адаптивный режим: <b>{'ВКЛ' if p.adaptive_mode_enabled else 'ВЫКЛ'}</b>"
+                f"🧠 Адаптивный режим: <b>{'ВКЛ' if p.adaptive_mode_enabled else 'ВЫКЛ'}</b>\n"
+                f"🛡️ Anti-AI: <b>{'ВКЛ' if s.anti_ai_enabled else 'ВЫКЛ'}</b>"
+                f" ({anti_ai_mode_labels.get(s.anti_ai_mode, '—')})"
             )
 
             # -- Базовый тон (выпадающий список) --
@@ -1452,6 +1691,35 @@ async def _render_section(
                     text=f"{'✅' if p.adaptive_mode_enabled else '❌'} Адаптивный режим",
                     callback_data="set:tog:adaptive_mode_enabled",
                 )
+            )
+
+            # -- Anti-AI защита --
+            kb.row(
+                InlineKeyboardButton(
+                    text=f"{'✅' if s.anti_ai_enabled else '❌'} Anti-AI защита",
+                    callback_data="set:tog:anti_ai_enabled",
+                )
+            )
+
+            # -- Anti-AI режим --
+            kb.row(
+                InlineKeyboardButton(
+                    text="⚙️ Режим Anti-AI",
+                    callback_data="set:noop:anti_ai_mode",
+                )
+            )
+            kb.row(
+                *[
+                    InlineKeyboardButton(
+                        text=("\u2022 " if s.anti_ai_mode == mode else "") + label,
+                        callback_data=f"set:choose:anti_ai_mode:{mode}",
+                    )
+                    for mode, label in [
+                        ("off", "Выкл"),
+                        ("log", "Лог"),
+                        ("fix", "Исправлять"),
+                    ]
+                ]
             )
 
             # -- Сброс --
@@ -1628,7 +1896,7 @@ async def cb_folder_toggle(callback: CallbackQuery) -> None:
         s.monitored_folders = json.dumps(monitored, ensure_ascii=False)
         await session.flush()
 
-    await _refresh_section(callback, "folders")
+    await _refresh_section(callback, "privacy")
     await callback.answer()
 
 
@@ -1647,7 +1915,7 @@ async def cb_folder_refresh(callback: CallbackQuery) -> None:
         else:
             await callback.answer("❌ Сначала /login", show_alert=True)
 
-    await _refresh_section(callback, "folders")
+    await _refresh_section(callback, "privacy")
 
 
 # ---------- Модели: callback'и ----------
@@ -2053,7 +2321,7 @@ async def step_grok_key(message: Message, state: FSMContext) -> None:
 
 @router.message(SettingsStates.waiting_mimo_key)
 async def step_mimo_key(message: Message, state: FSMContext) -> None:
-    """Сохраняет MiMo API ключ."""
+    """Сохраняет MiMo API ключ, затем спрашивает регион."""
     raw = (message.text or "").strip()
     if not raw:
         await message.answer("Пустой ключ. Повтори или /cancel.")
@@ -2069,9 +2337,73 @@ async def step_mimo_key(message: Message, state: FSMContext) -> None:
     if not await MiMoProvider(parts[0]).validate_key():
         await message.answer("❌ Ключ не работает. Повтори или /cancel.")
         return
+    # Сохраняем ключ в state для последующего использования с регионом
+    await state.update_data(mimo_key=",".join(parts))
+    await state.set_state(SettingsStates.waiting_mimo_region)
+    kb = InlineKeyboardBuilder()
+    for region_key, region_url in MIMO_REGIONS.items():
+        label = {"eu": "🇪🇺 EU", "us": "🇺🇸 US", "asia": "🌏 Asia"}.get(
+            region_key, region_key.upper()
+        )
+        kb.button(text=label, callback_data=f"set:mimo_region:{region_key}")
+    kb.button(text="⏭ Пропустить (Asia)", callback_data="set:mimo_region:skip")
+    kb.adjust(2)
+    await message.answer(
+        "🌍 <b>Выбери регион MiMo API:</b>\n\n"
+        "MiMo имеет региональные endpoint'ы. Выбери ближайший к тебе регион "
+        "для минимальной задержки.\n\n"
+        "• 🇪🇺 EU — Европа\n"
+        "• 🇺🇸 US — США\n"
+        "• 🌏 Asia — Азия (по умолчанию)\n\n"
+        "/cancel — отмена.",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("set:mimo_region:"))
+async def cb_mimo_region(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает выбор региона MiMo — сохраняет ключ с endpoint."""
+    region_raw = callback.data.split(":", 2)[2]
+    await callback.answer()
+
+    if region_raw == "skip":
+        endpoint = MIMO_REGIONS["asia"]
+        region_label = "Asia (по умолчанию)"
+    else:
+        endpoint = MIMO_REGIONS.get(region_raw, MIMO_REGIONS["asia"])
+        region_label = {"eu": "EU", "us": "US", "asia": "Asia"}.get(
+            region_raw, region_raw
+        )
+
+    data = await state.get_data()
+    mimo_key = data.get("mimo_key", "")
+    if not mimo_key:
+        await callback.message.answer(
+            "❌ Ключ не найден. Начни заново: /settings → API-ключи → MiMo key."
+        )
+        await state.clear()
+        return
+
+    parts = [k.strip() for k in mimo_key.split(",") if k.strip()]
     async with get_session() as session:
-        owner = await get_or_create_user(session, message.from_user.id)
-        await upsert_api_key(session, owner, "mimo", ",".join(parts))
+        owner = await get_or_create_user(session, callback.from_user.id)
+        # Сохраняем в ApiKey (старое хранилище)
+        await upsert_api_key(session, owner, "mimo", mimo_key)
+        # Сохраняем в LlmKeySlot с endpoint (новое хранилище)
+        for i, single_key in enumerate(parts):
+            slot, _is_new = await add_key_slot(
+                session,
+                owner,
+                "mimo",
+                single_key,
+                purpose="main",
+                priority=i,
+                endpoint=endpoint,
+            )
+            # upsert_api_key мог создать слот без endpoint — обновляем
+            if not slot.endpoint:
+                slot.endpoint = endpoint
+        await session.flush()
         total = await _count_slots_for_provider(session, owner, "mimo")
     await state.clear()
     count = len(parts)
@@ -2079,11 +2411,13 @@ async def step_mimo_key(message: Message, state: FSMContext) -> None:
     kb.button(text="➕ Ещё ключ", callback_data="set:input:mimo_key")
     kb.button(text="✅ Назад", callback_data="set:done:key")
     kb.adjust(2)
-    await message.answer(
-        f"✅ Сохранено MiMo ключей: {count}.\n🔑 В базе MiMo ключей: {total}.\n\n"
-        "Добавить ещё?",
-        reply_markup=kb.as_markup(),
-    )
+    if callback.message:
+        await callback.message.edit_text(
+            f"✅ Сохранено MiMo ключей: {count} (регион: {region_label}).\n"
+            f"🔑 В базе MiMo ключей: {total}.\n\n"
+            "Добавить ещё?",
+            reply_markup=kb.as_markup(),
+        )
 
 
 @router.message(SettingsStates.waiting_groq_key)

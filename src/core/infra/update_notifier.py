@@ -20,7 +20,7 @@ async def check_and_notify_update() -> None:
     try:
         current = _read_current_version()
         previous = _read_stored_version()
-        if current != previous:
+        if current and current != previous:
             logger.info("Update detected: %s → %s", previous or "none", current)
             changelog = _extract_changelog(previous)
             _save_version(current)
@@ -29,16 +29,17 @@ async def check_and_notify_update() -> None:
         logger.exception("Update notification failed")
 
 
-def _read_current_version() -> str:
-    """Читает версию из CHANGELOG.md (первая строка после '## v')."""
+def _read_current_version() -> str | None:
+    """Читает версию из CHANGELOG.md (первая строка после '## v').
+    Возвращает None если файл не найден или версия не определена."""
     try:
         cl = Path("CHANGELOG.md").read_text(encoding="utf-8")
         for line in cl.split("\n"):
             if line.startswith("## v"):
                 return line.strip()
     except OSError:
-        return "unknown"
-    return "unknown"
+        pass
+    return None
 
 
 def _read_stored_version() -> str | None:

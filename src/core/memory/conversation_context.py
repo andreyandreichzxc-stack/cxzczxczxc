@@ -29,6 +29,10 @@ class _Ctx:
     last_peer_name: str | None = None
     last_peer_at: float = 0.0
     last_purpose: str | None = None
+    transcription_meta: dict | None = (
+        None  # метаданные последней голосовой транскрипции
+    )
+    created_at: float = field(default_factory=time)
 
 
 _STORE: dict[int, _Ctx] = {}
@@ -36,12 +40,12 @@ _ctx_lock = asyncio.Lock()
 
 
 def _cleanup_stale_contexts() -> None:
-    """Удаляет контексты, где last_peer_at == 0 или last_peer_at старше 1 часа."""
+    """Удаляет контексты, где created_at старше _STALE_CTX_TTL."""
     now = time()
     stale = [
         uid
         for uid, ctx in list(_STORE.items())
-        if ctx.last_peer_at == 0 or (now - ctx.last_peer_at) > _STALE_CTX_TTL
+        if (now - ctx.created_at) > _STALE_CTX_TTL
     ]
     for uid in stale:
         del _STORE[uid]
@@ -227,6 +231,22 @@ async def load_recent_summaries(user_id: int) -> str | None:
             "Failed to load conversation summaries", exc_info=True
         )
         return None
+
+
+async def set_transcription_meta(user_id: int, meta: dict) -> None:
+    """Сохраняет метаданные транскрипции голосового сообщения для инжекта в промпт."""
+    ctx = await _get(user_id)
+    async with _ctx_lock:
+        ctx.transcription_meta = meta
+
+
+async def get_and_clear_transcription_meta(user_id: int) -> dict | None:
+    """Читает и очищает метаданные транскрипции (одноразовое использование)."""
+    ctx = await _get(user_id)
+    async with _ctx_lock:
+        meta = ctx.transcription_meta
+        ctx.transcription_meta = None
+        return meta
 
 
 async def cleanup_old_summaries() -> None:

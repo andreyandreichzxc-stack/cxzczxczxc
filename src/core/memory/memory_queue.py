@@ -69,7 +69,7 @@ async def _handle_save(session, owner, job: MemoryJob) -> None:
                     fact=fact_data.get("fact", ""),
                     contact_id=job.contact_id,
                     sentiment=fact_data.get("sentiment"),
-                    source=fact_data.get("source", "chat"),
+                    source=fact_data.get("source") or job.source or "chat",
                     importance=fact_data.get("importance", 0.5),
                     decay_rate=fact_data.get("decay_rate", 0.07),
                     memory_type=fact_data.get("memory_type"),

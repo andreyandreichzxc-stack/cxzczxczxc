@@ -2,11 +2,18 @@
 чтобы команды и FSM перехватывали свои события раньше."""
 
 import asyncio
+import hashlib
+import io
+import ipaddress
 import logging
 import random
+import re
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
+from urllib.parse import urlparse
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -15,9 +22,11 @@ from aiogram.types import Message
 from src.bot.filters import OwnerOnly
 from src.config import settings
 from src.core.actions.trajectory import actions_from_intent
+from src.core.infra.key_guard import safe_str
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.infra.task_manager import track_ff
 from src.core.intelligence.agent import route_intent
+from src.core.intelligence.schedule_parser import parse_schedule_message
 from src.core.intelligence.smart_autorouter import make_plan
 from src.core.memory import conversation_context as ctx_store
 from src.core.infra.timeutil import now_in_tz
@@ -27,8 +36,9 @@ from src.db.repo import (
     get_or_create_user,
 )
 from src.db.session import get_session
-from src.llm.base import TaskType
+from src.llm.base import ChatMessage, TaskType
 from src.llm.router import build_provider
+from src.llm.vision_provider import OpenAIVisionProvider, VisionResult
 from src.userbot.manager import UserbotManager
 
 from .free_text_common import (
@@ -58,12 +68,80 @@ logger = logging.getLogger(__name__)
 router = Router(name="free_text")
 router.message.filter(OwnerOnly())
 
+# ── URL detection & auto-summary ───────────────────────────────────────
+
+_URL_RE = re.compile(r'https?://[^\s<>"]+')
+
+
+def _is_safe_url(url: str) -> bool:
+    """Проверяет что URL не ведёт на localhost/private IP."""
+    try:
+        host = urlparse(url).hostname
+        if not host:
+            return False
+        addr = ipaddress.ip_address(host)
+        if addr.is_loopback or addr.is_private or addr.is_link_local:
+            return False
+        return True
+    except ValueError:
+        return False  # невалидный IP — вероятно домен, разрешаем
+
+
+async def _fetch_url_content(url: str) -> str | None:
+    """Фетчит содержимое URL через httpx."""
+    if not _is_safe_url(url):
+        logger.warning("Blocked unsafe URL fetch: %s", url[:100])
+        return None
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(url, headers={"User-Agent": "TelegramHelper/1.0"})
+            if resp.status_code != 200:
+                return None
+            html = resp.text[:50000]
+            text = re.sub(r"<[^>]+>", " ", html)
+            text = re.sub(r"\s+", " ", text).strip()
+            title_m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE)
+            title = title_m.group(1).strip()[:200] if title_m else url
+            return f"Заголовок: {title}\n\n{text[:3000]}"
+    except Exception:
+        return None
+
+
+async def _summarize_url(url: str, content: str, provider) -> str:
+    """Саммаризирует содержимое URL через LLM."""
+    prompt = f"""Сделай краткое саммари этой страницы (2-4 предложения). Укажи самое важное.
+
+URL: {url}
+
+СОДЕРЖИМОЕ:
+{content[:3000]}
+
+Саммари:"""
+    resp = await provider.chat([ChatMessage(role="user", content=prompt)])
+    return resp[:1000]
+
+
+def _extract_correction_pattern(original: str, edited: str) -> tuple[str, str] | None:
+    """Извлекает паттерн исправления: (что_было, что_стало)."""
+    if len(original) < 10 or len(edited) < 10:
+        return None
+    common = sum(1 for a, b in zip(original, edited) if a == b)
+    similarity = common / max(len(original), len(edited))
+    if similarity > 0.5:
+        return (original[:200], edited[:200])
+    return None
+
+
 # Singalong search cache: user_id → list of search result dicts
 _singalong_search_cache: dict = {}
 
 
 # Voice transcription queue (non-blocking background processing)
-_voice_queue: asyncio.Queue = asyncio.Queue(maxsize=settings.max_voice_queue_size)
+_voice_queue: asyncio.Queue = asyncio.Queue(
+    maxsize=max(settings.max_voice_queue_size, 1)
+)
 _voice_worker_task: asyncio.Task | None = None
 
 # Per-user active tasks for priority preemption
@@ -187,6 +265,22 @@ async def _voice_worker() -> None:
                     except Exception:
                         logger.exception("failed to send transcription result")
 
+                    # ── Сохраняем метаданные транскрипции для контекста ──
+                    transcription_meta = {
+                        "is_transcription": True,
+                        "provider": api_provider,
+                        "language": "ru",
+                        "length": len(text),
+                    }
+                    try:
+                        from src.core.memory import conversation_context as _cc
+
+                        await _cc.set_transcription_meta(
+                            message.from_user.id, transcription_meta
+                        )
+                    except Exception:
+                        logger.debug("Failed to save transcription_meta", exc_info=True)
+
                     try:
                         # State is stale in background worker — pass None.
                         # Any code needing FSMContext methods will log a warning and skip.
@@ -283,7 +377,7 @@ async def _process_text_fallback(
         )
     except Exception as e:
         logger.exception("agent route_intent failed")
-        err_msg = str(e)
+        err_msg = safe_str(e)
         _fire_record_trajectory(
             owner_telegram_id,
             request_text=raw,
@@ -347,6 +441,7 @@ async def _process_text(
     state: FSMContext,
     userbot_manager: UserbotManager,
 ) -> None:
+
     turn_started = time.monotonic()
 
     # Rate-limit: не чаще 1 запроса в 3 секунды на пользователя
@@ -368,6 +463,18 @@ async def _process_text(
     emoji_reply = get_simple_reply(raw)
     if emoji_reply:
         await message.answer(emoji_reply)
+        # Сохраняем в историю диалога
+        try:
+            from src.core.memory.session_recorder import record_turn
+            from src.db.session import get_session
+
+            async with get_session() as rec_session:
+                await record_turn(rec_session, message.from_user.id, "user", raw[:100])
+                await record_turn(
+                    rec_session, message.from_user.id, "assistant", emoji_reply[:100]
+                )
+        except Exception:
+            pass
         _fire_record_trajectory(
             owner_telegram_id,
             request_text=raw,
@@ -441,8 +548,10 @@ async def _process_text(
     if contradiction:
         await store_pending_contradiction(owner_telegram_id, contradiction)
         await message.answer(
-            f"🤔 {contradiction['suggestion']}\n"
-            f"(уверенность: {contradiction['confidence']:.0%})"
+            sanitize_html(
+                f"🤔 {contradiction['suggestion']}\n"
+                f"(уверенность: {contradiction['confidence']:.0%})"
+            )
         )
         _fire_record_trajectory(
             owner_telegram_id,
@@ -906,7 +1015,7 @@ async def _process_text(
                 logger.exception(
                     "Maestro background task failed for user %s", owner_telegram_id
                 )
-                err_msg = str(e)
+                err_msg = safe_str(e)
                 if len(err_msg) > 300:
                     err_msg = err_msg[:300] + "…"
                 await message.answer(
@@ -1026,7 +1135,88 @@ async def free_text(
         return
 
     if len(raw) > 2000:
-        raw = raw[:1997] + "...(truncated)"
+        raw = raw[:1987] + "...(truncated)"
+
+    # ── Stage -1: Scheduled message NL intent ─────────────────────────
+    # "напомни Маше про встречу завтра в 10:00" → создаём ScheduledMessage
+    try:
+        ctx_sched = await _get_owner_context(message.from_user.id)
+        sched_tz = str(ctx_sched["tz_name"])
+    except Exception:
+        sched_tz = None
+    scheduled = parse_schedule_message(raw, sched_tz)
+    if scheduled:
+        try:
+            async with get_session() as session:
+                owner = await get_or_create_user(session, uid)
+                from src.db.repo import create_scheduled as _create_scheduled
+
+                await _create_scheduled(
+                    session,
+                    owner.id,
+                    scheduled["contact"],
+                    scheduled["text"],
+                    scheduled["send_at"],
+                )
+                await session.commit()
+        except Exception as e:
+            await message.answer(sanitize_html(f"❌ Ошибка: {safe_str(e)}"))
+            return
+
+        send_at_str = scheduled["send_at"].strftime("%d.%m в %H:%M")
+        await message.answer(
+            sanitize_html(
+                f"✅ Запланировано:\n"
+                f"📤 <b>{scheduled['contact']}</b>\n"
+                f"📝 {scheduled['text'][:100]}\n"
+                f"🕐 {send_at_str}"
+            )
+        )
+        return
+
+    # ── URL detection ──
+    urls = _URL_RE.findall(raw)
+    if urls:
+        url = urls[0]
+        is_pure_url = raw.strip() == url.strip()
+
+        if is_pure_url:
+            try:
+                await message.answer(f"🔍 Читаю {url[:50]}...")
+            except Exception:
+                pass
+            content = await _fetch_url_content(url)
+            if content:
+                try:
+                    async with get_session() as session:
+                        owner_db = await get_or_create_user(
+                            session, message.from_user.id
+                        )
+                        provider = await build_provider(
+                            session, owner_db, task_type=TaskType.SUMMARIZE
+                        )
+                except Exception:
+                    provider = None
+
+                if provider:
+                    try:
+                        summary = await _summarize_url(url, content, provider)
+                        await message.answer(sanitize_html(f"📄 {summary}\n\n🔗 {url}"))
+                    except Exception:
+                        await message.answer(
+                            sanitize_html(f"📄 {content[:1000]}...\n\n🔗 {url}")
+                        )
+                else:
+                    await message.answer(
+                        sanitize_html(f"📄 {content[:1000]}...\n\n🔗 {url}")
+                    )
+            else:
+                try:
+                    await message.answer(f"❌ Не удалось загрузить {url}")
+                except Exception:
+                    pass
+            return
+
     # Priority preemption: if a heavy task is running, cancel it for the new request
     uid = message.from_user.id
     async with _active_tasks_lock:
@@ -1146,3 +1336,200 @@ async def free_voice(
 
     # 4. Мгновенный ответ — пользователь не ждёт транскрипцию
     await message.answer("🎙 Принял, расшифровываю…")
+
+
+# ── C3: Photo cache ──────────────────────────────────────────────────────
+
+
+class _CacheEntry(NamedTuple):
+    description: str
+    tokens: int
+    expire_ts: float
+
+
+class _PhotoCache:
+    """LRU-кэш результатов анализа фото с TTL."""
+
+    def __init__(self, max_size: int = 200, ttl_sec: int = 300):
+        self._cache: dict[str, _CacheEntry] = {}
+        self._max_size = max_size
+        self._ttl = ttl_sec
+        self._lock = asyncio.Lock()
+
+    async def _key(self, data: bytes) -> str:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: hashlib.sha256(data, usedforsecurity=False).hexdigest()
+        )
+
+    async def get(self, data: bytes) -> _CacheEntry | None:
+        async with self._lock:
+            key = await self._key(data)
+            entry = self._cache.get(key)
+            if entry is None:
+                return None
+            if time.time() > entry.expire_ts:
+                del self._cache[key]
+                return None
+            return entry
+
+    async def set(self, data: bytes, description: str, tokens: int):
+        async with self._lock:
+            key = await self._key(data)
+            # LRU-вытеснение если переполнен
+            if len(self._cache) >= self._max_size:
+                oldest_key = min(self._cache, key=lambda k: self._cache[k].expire_ts)
+                del self._cache[oldest_key]
+            self._cache[key] = _CacheEntry(description, tokens, time.time() + self._ttl)
+
+
+# Глобальный экземпляр кэша фотографий (синглтон в памяти процесса)
+_photo_cache = _PhotoCache()
+
+
+# ── C3: Photo handler ───────────────────────────────────────────────────
+
+
+@router.message(F.photo)
+async def handle_photo(message: Message, state: FSMContext) -> None:
+    """Обрабатывает фото — анализирует с кэшированием и сохраняет описание в память."""
+    if not message.photo:
+        return
+
+    # Проверяем глобальный тоггл vision_enabled
+    if not settings.vision_enabled:
+        await message.answer(
+            "🔍 Vision отключён. Включи в /settings → 🧠 LLM и модели."
+        )
+        return
+
+    try:
+        # Берём самое большое фото
+        photo = message.photo[-1]
+
+        # Скачиваем фото в память
+        file = await message.bot.get_file(photo.file_id)
+        if not file.file_path:
+            await message.answer("⚠️ Не удалось получить файл изображения.")
+            return
+        bio = io.BytesIO()
+        await message.bot.download_file(file.file_path, bio)
+        image_data = bio.getvalue()
+
+        # Проверяем кэш
+        cache_entry = await _photo_cache.get(image_data)
+        if cache_entry:
+            await message.answer(
+                sanitize_html(
+                    f"🖼 {cache_entry.description}\n\n⚡ Из кэша (сэкономлено ~{cache_entry.tokens} токенов)"
+                )
+            )
+            return
+
+        # Показываем статус «печатает»
+        await message.bot.send_chat_action(message.chat.id, "upload_photo")
+
+        # Получаем API-ключ для vision
+        async with get_session() as session:
+            owner = await get_or_create_user(session, message.from_user.id)
+            vision_key = await get_api_key(session, owner, "openai")
+
+        if not vision_key:
+            await message.answer(
+                "⚠️ Нет ключа для Vision. Добавь OpenAI ключ в /settings."
+            )
+            return
+
+        # Анализируем изображение
+        provider = OpenAIVisionProvider(vision_key)
+        try:
+            result = await provider.chat_with_image(image_data, "image/jpeg")
+        finally:
+            await provider.close()
+
+        # Сохраняем в кэш
+        await _photo_cache.set(image_data, result.description, result.total_tokens)
+
+        # Humanize vision output
+        desc = result.description
+        try:
+            from src.core.humanizer.humanizer import humanize_response
+
+            desc = humanize_response(desc)
+        except Exception:
+            pass  # best-effort, не ломаем если humanizer упал
+
+        await message.answer(
+            sanitize_html(f"🖼 {desc[:2000]}\n\n📊 Токенов: {result.total_tokens}")
+        )
+
+        # Сохраняем в память (best-effort)
+        try:
+            from src.core.memory.session_recorder import record_turn
+
+            async with get_session() as rec_session:
+                await record_turn(
+                    rec_session,
+                    message.from_user.id,
+                    "user",
+                    f"[Фото] {result.description[:500]}",
+                )
+                await record_turn(
+                    rec_session,
+                    message.from_user.id,
+                    "assistant",
+                    "(фото проанализировано)",
+                )
+        except Exception:
+            pass
+
+    except Exception as e:
+        await message.answer(sanitize_html(f"❌ Ошибка анализа: {safe_str(e)}"))
+
+
+@router.message(F.video_note | F.video)
+async def handle_video(message: Message) -> None:
+    """Заглушка для видео — берём первый кадр и анализируем как фото (TBD)."""
+    await message.answer("🎬 Видео пока не анализируются. Отправь фото.")
+
+
+# ── Edit feedback handler ────────────────────────────────────────────
+
+
+@router.edited_message(OwnerOnly())
+async def handle_edited_message(message: Message, state: FSMContext = None) -> None:  # type: ignore[assignment]
+    """Ловит правку ответа бота — сохраняет как фидбек."""
+    if not message.text:
+        return
+
+    edited_text = message.text.strip()
+    if not edited_text:
+        return
+
+    try:
+        from src.core.memory.session_recorder import get_session_history
+
+        async with get_session() as session:
+            history = await get_session_history(session, message.from_user.id, limit=5)
+            all_messages = []
+            for s in history:
+                all_messages.extend(s.get("messages", []))
+            bot_messages = [m for m in all_messages if m.get("role") == "assistant"]
+
+            if bot_messages:
+                last_bot_msg = bot_messages[0]
+                original = last_bot_msg.get("content", "")
+
+                if original and edited_text != original:
+                    from src.core.humanizer.humanizer import store_feedback
+
+                    pattern = _extract_correction_pattern(original, edited_text)
+                    if pattern:
+                        store_feedback(message.from_user.id, pattern[0], pattern[1])
+                        logger.debug(
+                            "Feedback stored: %s → %s",
+                            pattern[0][:50],
+                            pattern[1][:50],
+                        )
+    except Exception:
+        pass  # best-effort

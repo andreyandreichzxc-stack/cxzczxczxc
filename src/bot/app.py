@@ -27,6 +27,7 @@ from src.bot.handlers import (
     help_cmd,
     humanize_cmd,
     inbox_cmd,
+    inline_query,
     install_cmd,
     mode_cmd,
     free_text,
@@ -178,6 +179,8 @@ async def run_bot(userbot_manager: UserbotManager) -> None:
             pass
         return
 
+    # Inline-режим — самый первый, чтобы ловить @botname до команд
+    dp.include_router(inline_query.router)
     dp.include_router(approve_cmd.router)
     dp.include_router(ask_cmd.router)
     dp.include_router(gates_cmd.router)

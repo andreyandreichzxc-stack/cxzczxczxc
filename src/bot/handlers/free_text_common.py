@@ -12,6 +12,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from src.bot.reply_dedup import dedup
 from src.config import settings
 from src.core.infra.formatting import auto_format
+from src.core.contacts.smart_reply import get_reaction
 
 # ── Telegram message length safety ─────────────────────────────────────
 TELEGRAM_SAFE_MAX = settings.safe_message_length  # Telegram hard limit is 4096 chars
@@ -88,27 +89,18 @@ async def safe_answer(
     ``reply_markup`` (if any) is attached only to the last message.
     """
     # Reaction engine: short responses → emoji reaction instead of text
-    _REACTION_MAP = {
-        "👍": ["ок", "ладно", "хорошо", "принято", "да", "ага", "угу"],
-        "👎": ["нет", "не", "не надо", "отмена", "не так"],
-        "❤️": ["спасибо", "благодарю", "отлично", "супер", "круто"],
-        "😢": ["жаль", "грустно", "печаль", "сочувствую"],
-        "😡": ["бесит", "злюсь", "раздражён"],
-        "🎉": ["ура", "поздравляю", "йоу"],
-    }
     if len(text) < 50 and "```" not in text:
-        text_lower = text.lower().rstrip(".!,?;: \n")
-        for emoji, triggers in _REACTION_MAP.items():
-            if text_lower in triggers:
-                try:
-                    from aiogram.types import ReactionTypeEmoji
+        emoji = get_reaction(text)
+        if emoji:
+            try:
+                from aiogram.types import ReactionTypeEmoji
 
-                    await message.react([ReactionTypeEmoji(emoji=emoji)])
-                    return  # Don't send text
-                except Exception:
-                    break  # Fall through to normal text send
+                await message.react([ReactionTypeEmoji(emoji=emoji)])
+                return
+            except Exception:
+                pass  # Fall through to normal text send
 
-    if dedup.is_duplicate(message.chat.id, text):
+    if await dedup.is_duplicate(message.chat.id, text):
         return
     # Apply auto-formatting for Telegram HTML
     text = auto_format(text)

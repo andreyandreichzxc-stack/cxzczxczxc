@@ -1,8 +1,11 @@
 """Humanizer — заменяет AI-маркеры на человеческие аналоги."""
 
 import logging
+import random
 import re
 import time
+
+from src.config import settings
 
 from .scorer import analyze_ai_score
 from .stats import record_check
@@ -15,8 +18,8 @@ _REPLACEMENTS: dict[str, str] = {
     "конечно": "",  # удаляем
     "разумеется": "",
     "безусловно": "",
-    "я понимаю": "понимаю",
     "я понимаю вашу": "понимаю твою",
+    "я понимаю": "понимаю",
     "я здесь чтобы помочь": "",
     "я здесь чтобы поддержать": "",
     "это совершенно нормально": "это нормально",
@@ -42,9 +45,53 @@ _REPLACEMENTS: dict[str, str] = {
     "приношу извинения": "сорри",
     "прошу прощения за": "сорри за",
     "благодарю за": "спасибо за",
+    "я ценю": "спасибо",
     "стоит отметить": "",
     "важно помнить": "",
+    # ── GPT-5/новые ──
+    "я бы посоветовал": "советую",
+    "я бы рекомендовал": "рекомендую",
+    "важно подчеркнуть": "главное",
+    "хочу обратить внимание": "обрати внимание",
+    "позвольте заметить": "замечу",
+    "не могу не отметить": "отмечу",
+    "следует упомянуть": "упомяну",
+    # ── Claude ──
+    "я стремлюсь": "хочу",
+    "я стараюсь": "пытаюсь",
+    "позвольте уточнить": "уточню",
+    "я бы с радостью": "с радостью",
+    "не стесняйтесь обращаться": "обращайся",
+    "чем могу быть полезен": "чем помочь",
+    # ── Gemini ──
+    "вот что я нашел": "смотри что нашёл",
+    "давайте разберем": "разберём",
+    "рад был помочь": "помог",
+    # ── Mistral ──
+    "я полагаю": "думаю",
+    "по всей видимости": "видимо",
+    # ── Grok ──
+    "жду твоего мнения": "что думаешь",
+    "жду вашего мнения": "что думаете",
+    "я рад что": "круто что",
+    "я рада что": "круто что",
+    "рад помочь": "помогу",
+    "рада помочь": "помогу",
+    "я рекомендую": "советую",
+    "ты абсолютно прав": "точно",
+    "отличный вопрос": "хороший вопрос",
+    # Английские (для смешанных текстов):
+    "i'm glad you asked": "good question",
+    "that's a great question": "good question",
+    "i'd recommend": "try",
+    "you're absolutely right": "true",
 }
+
+# Pre-compiled replacements для производительности (избегаем re.compile на каждый вызов)
+_COMPILED_REPLACEMENTS: list[tuple[re.Pattern, str]] = [
+    (re.compile(re.escape(phrase), re.IGNORECASE), replacement)
+    for phrase, replacement in _REPLACEMENTS.items()
+]
 
 
 def humanize_text(text: str, user_id: int = 0) -> str:
@@ -52,10 +99,9 @@ def humanize_text(text: str, user_id: int = 0) -> str:
     if not text:
         return text or ""
     result = text
-    for phrase, replacement in _REPLACEMENTS.items():
-        if phrase.lower() in result.lower():
-            # Case-insensitive replace preserving original case where possible
-            result = re.sub(re.escape(phrase), replacement, result, flags=re.IGNORECASE)
+    for pattern, replacement in _COMPILED_REPLACEMENTS:
+        if pattern.search(result):
+            result = pattern.sub(replacement, result)
     # Learned replacements from feedback
     if user_id:
         learned = _get_learned_replacements(user_id)
@@ -79,6 +125,28 @@ _CLICHÉ_ENDINGS: list[str] = [
     "если будут вопросы",
     "если понадобится",
 ]
+
+# Pre-compiled cliché endings для производительности (избегаем re.compile 27 раз на вызов)
+_COMPILED_CLICHE_REGEX: list[re.Pattern] = [
+    re.compile(
+        r"[\s,.\!?;:\-–—]*" + re.escape(ending) + r"(?:[\s,.\!?;:\-–—]*(?:\n|$))",
+        re.IGNORECASE,
+    )
+    for ending in _CLICHÉ_ENDINGS
+]
+
+# Pre-compiled patterns for _preservation_check (избегаем re.compile на каждый вызов)
+_PRESERVE_URL_RE = re.compile(r'https?://[^\s<>"]+')
+_PRESERVE_MENTION_RE = re.compile(r"@\w+")
+_PRESERVE_DATE_RE = re.compile(
+    r"\b(?:\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?|\d{1,2}\s+(?:янв|фев|мар|апр|ма[йя]|июн|июл|авг|сен|окт|ноя|дек)\w*\s+\d{4}?)\b",
+    re.IGNORECASE,
+)
+_PRESERVE_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
+_PRESERVE_BIG_NUM_RE = re.compile(r"\b\d{3,}\b")
+_PRESERVE_NAME_RE = re.compile(r"(?<![.!?] )[А-ЯЁ][а-яё]+")
+_PRESERVE_QUOTED_RE = re.compile(r'["«][^"»]+["»]')
+_PRESERVE_LIST_ITEM_RE = re.compile(r"^[\d•\-]\s", re.MULTILINE)
 
 # Контекстные дополнения к ответу (текст без эмодзи — эмодзи добавляет _pick_context_emoji)
 _CONTEXT_FOLLOWUPS: dict[str, str] = {
@@ -203,7 +271,24 @@ DEEP_HUMANIZE_PROMPT = """Перепиши текст как человек, а 
 Сохрани ВСЕ факты и смысл.
 Не добавляй эмодзи без причины.
 {style_hint}
-Пиши естественно, как в переписке с другом."""
+{tone_hint}
+Пиши естественно, как в переписке с другом.
+
+ПРАВИЛА ТОНА:
+- Если агрессия → отвечай с лёгкой иронией, не оправдывайся
+- Если "ты робот?" → самоирония, не доказывай что ты человек
+- Если спрашивают цену → не называй цифру сразу, спроси контекст
+- Короткие фразы лучше длинных
+- Одно предложение = один смысл
+- Не начинай с "Конечно!", "Безусловно!", "Разумеется!"
+"""
+
+# Tone descriptions for deep humanization prompt
+_TONE_DESCRIPTIONS: dict[str, str] = {
+    "natural": "Тон: обычный разговорный стиль, без крайностей.",
+    "formal": "Тон: деловой, официальный, сдержанный. Избегай сленга и панибратства.",
+    "friendly": "Тон: дружеский, тёплый, с лёгкой неформальностью. Можно использовать простые разговорные обороты.",
+}
 
 
 def humanize_response(
@@ -211,6 +296,8 @@ def humanize_response(
     context_hint: str | None = None,
     style_profile: str = "",
     user_id: int = 0,
+    tone: str = "natural",
+    user_slots: list | None = None,
 ) -> str:
     """Улучшить ответ бота: убрать шаблонные концовки и добавить естественное
     завершение в зависимости от контекста.
@@ -224,6 +311,8 @@ def humanize_response(
             (из get_or_update_style_profile). Если содержит указания
             «без эмодзи» — эмодзи из контекстных фраз убираются.
         user_id: ID пользователя для персонализированных замен (0=нет).
+        tone: Тон ответа — "natural", "formal", "friendly".
+        user_slots: Список LlmKeySlot для динамических AI-маркеров (None=базовые).
 
     Returns:
         Текст с более естественным тоном.
@@ -232,7 +321,7 @@ def humanize_response(
         return text or ""
 
     # 1. Оценка AI-шности
-    score, breakdown = analyze_ai_score(text)
+    score, breakdown = analyze_ai_score(text, user_slots=user_slots)
     ai_threshold = _get_humanize_threshold(len(text))
     has_ai_patterns = (
         score > ai_threshold
@@ -253,14 +342,7 @@ def humanize_response(
 
     # 4. Удаление шаблонных концовок
     for _ in range(3):
-        for ending in _CLICHÉ_ENDINGS:
-            # Ищем фразу как концовку (опционально с пунктуацией перед/после)
-            pattern = re.compile(
-                r"[\s,.\!?;:\-–—]*"
-                + re.escape(ending)
-                + r"(?:[\s,.\!?;:\-–—]*(?:\n|$))",
-                re.IGNORECASE,
-            )
+        for pattern in _COMPILED_CLICHE_REGEX:
             result = pattern.sub("", result)
 
     # Очистка хвостовой пунктуации после удаления
@@ -271,7 +353,8 @@ def humanize_response(
     if context_hint and context_hint in _CONTEXT_FOLLOWUPS:
         stripped = result.rstrip(".!?,;: \n")
         short_answer = len(stripped) < 50 and not any(
-            kw in stripped.lower() for kw in ["вот", "смотри", "рецепт", "список"]
+            stripped.lower().startswith(kw)
+            for kw in ["вот", "смотри", "рецепт", "список"]
         )
         code_or_json = "```" in result or result.strip().startswith("{")
         if code_or_json or (
@@ -291,14 +374,27 @@ def humanize_response(
             else:
                 result = followup
 
-    # 6. Filler words — casual style, low AI score, moderate length
-    result = _maybe_add_fillers(result, score, style_profile)
-
-    # 7. Learned replacements from feedback
+    # 6. Learned replacements from feedback
     if user_id:
         learned = _get_learned_replacements(user_id)
         for phrase, replacement in learned.items():
             result = re.sub(re.escape(phrase), replacement, result, flags=re.IGNORECASE)
+
+    # 7. Filler injection (разговорные filler-слова)
+    # Добавляем fillers только когда текст AI-шный (score > 0.3),
+    # иначе текст уже человечный — fillers не нужны.
+    if score > 0.3:
+        result = _maybe_add_fillers(result)
+
+    # 8. Taboo detector (только логирование)
+    taboos = _detect_taboos(result)
+    if taboos:
+        logger.debug("Humanizer taboos: %s", taboos)
+
+    # 9. Final quality check (только логирование)
+    quality = _final_quality_check(result)
+    if quality:
+        logger.debug("Humanizer quality issues: %s", quality)
 
     return result
 
@@ -326,6 +422,7 @@ def apply_anti_ai_mode(
     style_profile: str = "",
     user_id: int = 0,
     source: str = "assistant_response",
+    user_slots: list | None = None,
 ) -> str:
     """Apply Anti-AI runtime semantics to assistant responses.
 
@@ -335,7 +432,7 @@ def apply_anti_ai_mode(
         return text or ""
 
     normalized_mode = normalize_anti_ai_mode(mode)
-    score_before, breakdown = analyze_ai_score(text)
+    score_before, breakdown = analyze_ai_score(text, user_slots=user_slots)
 
     if normalized_mode == "off":
         record_check(score_before, score_before, False)
@@ -357,8 +454,9 @@ def apply_anti_ai_mode(
         context_hint=context_hint,
         style_profile=style_profile,
         user_id=user_id,
+        user_slots=user_slots,
     )
-    score_after, _ = analyze_ai_score(fixed)
+    score_after, _ = analyze_ai_score(fixed, user_slots=user_slots)
     changed = fixed != text
     record_check(score_before, score_after, changed)
     if changed:
@@ -371,55 +469,146 @@ def apply_anti_ai_mode(
     return fixed
 
 
-# Filler words for casual/friendly style
-_FILLERS_START = ["ну", "короче", "слушай", "так"]
-_FILLERS_MID = ["кстати", ", блин", ", как бы"]
-_FILLERS_END = [", короче", ", ну такое"]
+# Filler words for casual/friendly style — разбиты по позиции в тексте
+_FILLERS_START = ["ну", "короче", "слушай", "так", "эм", "ой", "блин", "ща"]
+_FILLERS_MID = ["кстати", ", блин", ", как бы", ", хех", ", в общем"]
+_FILLERS_END = [", короче", ", ну такое", ")", ", похоже"]
 
 
-def _maybe_add_fillers(text: str, ai_score: float, style_profile: str) -> str:
-    """Add natural filler words for casual/friendly style. Only when:
-    - AI score is low (already natural)
-    - Style is casual (not formal/business)
-    - Text is moderate length (30-300 chars)
-    - Random 30% chance — not every message
+def _maybe_add_fillers(text: str, probability: float = 0.15) -> str:
+    """Добавляет разговорные filler-слова с заданной вероятностью.
+
+    Стратегия: 60% шанс — вставить в начало, 30% — в середину,
+    10% — в конец предложения.
     """
-    if not text or len(text) < 30 or len(text) > 300:
-        return text
-    if ai_score > 0.2:  # only enhance already-natural text
-        return text
-    casual_keywords = (
-        "коротко",
-        "кратко",
-        "разговорный",
-        "дружеский",
-        "casual",
-        "warm",
-    )
-    if style_profile and not any(kw in style_profile.lower() for kw in casual_keywords):
-        return text
-    import random
-
-    if random.random() > 0.3:
+    if not text or random.random() > probability:
         return text
 
-    # Choose position: start, mid, or end
-    r = random.random()
-    if r < 0.35 and text[0].isupper():
+    position = random.random()
+    if position < 0.6:
+        # В начало предложения
         filler = random.choice(_FILLERS_START)
-        return f"{filler}, {text[0].lower()}{text[1:]}"
-    elif r < 0.70:
+        return f"{filler}, {text[0].lower()}{text[1:]}" if text else text
+    elif position < 0.9:
+        # В середину: после первого предложения или первой запятой
         filler = random.choice(_FILLERS_MID)
-        # Insert after first sentence
-        dot = text.find(". ")
-        if dot > 10 and dot < len(text) - 5:
-            return (
-                text[: dot + 1] + f" {filler}, {text[dot + 2].lower()}{text[dot + 3 :]}"
-            )
+        for sep in [". ", "! ", "? "]:
+            idx = text.find(sep)
+            if idx > 10:
+                return text[: idx + 1] + filler + text[idx + len(sep) :]
+        # Fallback: после первой запятой
+        idx = text.find(", ")
+        if idx > 5:
+            return text[:idx] + filler + " " + text[idx + 2 :]
+        return text
     else:
+        # В конец
         filler = random.choice(_FILLERS_END)
-        return text.rstrip(".!?") + filler
-    return text
+        return text.rstrip() + filler
+
+
+def _detect_taboos(text: str) -> list[str]:
+    """Проверяет текст на taboo-паттерны."""
+    issues: list[str] = []
+    # Режим допроса: 3+ вопросов подряд
+    sentences = [
+        s.strip()
+        for s in text.replace("!", ".").replace("?", ".").split(".")
+        if s.strip()
+    ]
+    question_count = sum(1 for s in sentences if s.strip().endswith("?"))
+    if question_count >= 3:
+        issues.append("режим допроса (3+ вопросов)")
+
+    # Профессиональный сленг
+    slang = [
+        "трафик",
+        "лиды",
+        "конверсия",
+        "воронка",
+        "прогрев",
+        "скрипт",
+        "упаковка",
+        "ниша",
+        "целевая",
+        "аудитория",
+        "охват",
+        "вовлечённость",
+    ]
+    found_slang = [w for w in slang if w in text.lower()]
+    if found_slang:
+        issues.append(f"проф. сленг: {', '.join(found_slang[:3])}")
+
+    # Канцелярит
+    bureaucratic = [
+        "во-первых",
+        "во-вторых",
+        "в-третьих",
+        "следует отметить",
+        "необходимо подчеркнуть",
+        "в заключение",
+        "таким образом",
+        "вследствие",
+        "ввиду",
+    ]
+    found_bur = [w for w in bureaucratic if w in text.lower()]
+    if found_bur:
+        issues.append(f"канцелярит: {', '.join(found_bur[:3])}")
+
+    return issues
+
+
+def _final_quality_check(text: str) -> list[str]:
+    """5-пунктовая проверка качества."""
+    issues: list[str] = []
+    text_lower = text.lower()
+
+    # 1. Маркеры идеального ИИ
+    ai_ideal = [
+        "я стремлюсь",
+        "я всегда рад",
+        "я здесь чтобы",
+        "позвольте мне",
+        "я понимаю вашу",
+        "я осознаю",
+        "могу я предложить",
+        "я бы посоветовал",
+    ]
+    for marker in ai_ideal:
+        if marker in text_lower:
+            issues.append(f"AI-идеал: '{marker}'")
+            break
+
+    # 2. Скрытая лесть
+    flattery = [
+        "ты абсолютно прав",
+        "отличный вопрос",
+        "прекрасная мысль",
+        "замечательная идея",
+        "ты очень точно",
+        "великолепно подмечено",
+        "ты гениален",
+        "ты невероятен",
+    ]
+    for f in flattery:
+        if f in text_lower:
+            issues.append(f"лесть: '{f}'")
+            break
+
+    # 3. Ссылки не к месту
+    if text.count("http") > 1:
+        issues.append("много ссылок")
+
+    # 4. Проф. сленг
+    slang = ["трафик", "лиды", "конверсия", "воронка"]
+    if any(w in text_lower for w in slang):
+        issues.append("проф. сленг")
+
+    # 5. Слишком длинный ответ для мессенджера
+    if len(text) > 1500:
+        issues.append(f"длинный ответ ({len(text)} символов)")
+
+    return issues
 
 
 def _preservation_check(original: str, humanized: str) -> str:
@@ -434,27 +623,23 @@ def _preservation_check(original: str, humanized: str) -> str:
     critical: list[str] = []
 
     # URLs
-    urls = re.findall(r'https?://[^\s<>"]+', original)
+    urls = _PRESERVE_URL_RE.findall(original)
     critical.extend(urls)
 
     # @mentions
-    mentions = re.findall(r"@\w+", original)
+    mentions = _PRESERVE_MENTION_RE.findall(original)
     critical.extend(mentions[:3])
 
     # Даты в разных форматах
-    dates = re.findall(
-        r"\b(?:\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?|\d{1,2}\s+(?:янв|фев|мар|апр|ма[йя]|июн|июл|авг|сен|окт|ноя|дек)\w*\s+\d{4}?)\b",
-        original,
-        re.IGNORECASE,
-    )
+    dates = _PRESERVE_DATE_RE.findall(original)
     critical.extend(dates[:3])
 
     # Кодовые блоки (тройные обратные кавычки)
-    code_blocks = re.findall(r"```[\s\S]*?```", original)
+    code_blocks = _PRESERVE_CODE_BLOCK_RE.findall(original)
     critical.extend(code_blocks[:2])
 
     # Числа > 4 цифр (телефоны, суммы и т.п.)
-    big_nums = re.findall(r"\b\d{3,}\b", original)
+    big_nums = _PRESERVE_BIG_NUM_RE.findall(original)
     critical.extend([n for n in big_nums if len(n) >= 5][:3])
 
     # Names (capitalized Russian words not at sentence start). Do not preserve
@@ -464,18 +649,18 @@ def _preservation_check(original: str, humanized: str) -> str:
     removable_words.update(phrase.split()[0].lower() for phrase in _CLICHÉ_ENDINGS)
     names = [
         word
-        for word in re.findall(r"(?<![.!?] )(?<![.!?] )[А-ЯЁ][а-яё]+", original)
+        for word in _PRESERVE_NAME_RE.findall(original)
         if word.lower() not in removable_words
     ]
     critical.extend(names[:5])
 
     # Quoted text
-    quoted = re.findall(r'["«][^"»]+["»]', original)
+    quoted = _PRESERVE_QUOTED_RE.findall(original)
     critical.extend(quoted[:3])
 
     # List structure
-    orig_list_items = len(re.findall(r"^[\d•\-]\s", original, re.MULTILINE))
-    human_list_items = len(re.findall(r"^[\d•\-]\s", humanized, re.MULTILINE))
+    orig_list_items = len(_PRESERVE_LIST_ITEM_RE.findall(original))
+    human_list_items = len(_PRESERVE_LIST_ITEM_RE.findall(humanized))
     if orig_list_items > 2 and human_list_items < orig_list_items * 0.5:
         return original
 
@@ -492,7 +677,12 @@ def _preservation_check(original: str, humanized: str) -> str:
 
 
 async def humanize_deep(
-    text: str, provider, user_style: str = "", user_id: int = 0
+    text: str,
+    provider,
+    user_style: str = "",
+    user_id: int = 0,
+    tone: str = "natural",
+    user_slots: list | None = None,
 ) -> str:
     """LLM-based глубокое очеловечивание текста.
 
@@ -505,19 +695,22 @@ async def humanize_deep(
         provider: LLM-провайдер (должен иметь метод chat).
         user_style: Дополнительная подсказка о стиле пользователя.
         user_id: ID пользователя для персонализированных замен (0=нет).
+        tone: Тон ответа — "natural", "formal" или "friendly".
+        user_slots: Список LlmKeySlot для динамических AI-маркеров (None=базовые).
 
     Returns:
         Переписанный текст. При ошибке возвращает оригинал.
     """
-    if not text or len(text) < 50:
+    if not text or len(text) < settings.humanizer_deep_min_length:
         return text
     # Self-contained adaptive threshold check
-    score, _ = analyze_ai_score(text)
+    score, _ = analyze_ai_score(text, user_slots=user_slots)
     if score <= _get_humanize_threshold(len(text)):
         # Not AI-like enough to warrant deep humanization
         return text
     style_hint = f"Стиль: {user_style}" if user_style else ""
-    prompt = DEEP_HUMANIZE_PROMPT.format(style_hint=style_hint)
+    tone_hint = _TONE_DESCRIPTIONS.get(tone, _TONE_DESCRIPTIONS["natural"])
+    prompt = DEEP_HUMANIZE_PROMPT.format(style_hint=style_hint, tone_hint=tone_hint)
     try:
         from src.llm.base import ChatMessage, TaskType
 
@@ -532,6 +725,20 @@ async def humanize_deep(
         return _preservation_check(text, result)
     except Exception:
         return text  # fallback to original
+
+
+def store_feedback(user_id: int, original: str, corrected: str) -> None:
+    """Сохраняет пользовательское исправление для обучения humanizer."""
+    entry = {
+        "original": original[:300],
+        "corrected": corrected[:300],
+        "accepted": False,
+        "time": time.time(),
+    }
+    _feedback_store.setdefault(user_id, []).append(entry)
+    # Ограничиваем 100 записей на пользователя
+    if len(_feedback_store[user_id]) > 100:
+        _feedback_store[user_id] = _feedback_store[user_id][-50:]
 
 
 def record_humanizer_feedback(
@@ -591,7 +798,7 @@ def _get_learned_replacements(user_id: int) -> dict[str, str]:
     replacements: dict[str, str] = {}
     entries = _feedback_store.get(user_id, [])
     for entry in entries:
-        if entry.get("accepted", True):
+        if entry.get("accepted") is True:
             continue  # только rejected
         original_words = set(entry.get("original", "").lower().split())
         corrected_words = set(entry.get("corrected", "").lower().split())
@@ -616,7 +823,7 @@ def get_few_shot_examples(user_id: int) -> str:
     rejected = [
         f
         for f in feedbacks
-        if not f.get("accepted", True) and f.get("original") and f.get("corrected")
+        if f.get("accepted") is not True and f.get("original") and f.get("corrected")
     ]
     if not rejected:
         return ""

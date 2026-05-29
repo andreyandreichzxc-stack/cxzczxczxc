@@ -24,6 +24,7 @@ from src.bot.filters import OwnerOnly
 from src.core.actions.action_guard import guard_intent
 from src.core.actions.tool_registry import tool_registry
 from src.core.actions.trajectory import actions_from_intent
+from src.core.infra.key_guard import safe_str
 from src.core.infra.task_manager import track_ff
 from src.core.infra.text_sanitizer import sanitize_html
 from src.core.intelligence.agent import route_intent
@@ -325,7 +326,7 @@ async def _cb_tool_confirm(
         await callback.answer("✅ Выполнено")
     except Exception as e:
         logger.exception("Tool %s confirmation execution failed", tool_name)
-        await callback.answer(f"❌ Ошибка: {str(e)[:80]}", show_alert=True)
+        await callback.answer(f"❌ Ошибка: {safe_str(e)[:80]}", show_alert=True)
         if callback.message:
             await callback.message.edit_text(
                 sanitize_html(f"❌ Ошибка при выполнении: {e}")
@@ -1246,7 +1247,7 @@ async def execute_fast_route(
     except Exception as e:
         logger.exception("fast_route route_intent failed")
         plan.metrics["llm_ms"] = -1
-        err_msg = str(e)
+        err_msg = safe_str(e)
         _fire_record_trajectory(
             owner_telegram_id,
             request_text=raw,
@@ -1490,24 +1491,37 @@ async def execute_maestro(
             except Exception:
                 style_block = None
 
-            # Send initial message with cursor
-            sent_msg = await message.answer("▌")
-            full_text = ""
-            last_update = asyncio.get_event_loop().time()
+            if settings.streaming_enabled:
+                cursor = settings.streaming_cursor.strip()
+                interval = settings.streaming_edit_interval
 
-            try:
-                async for chunk in stream:
-                    full_text += chunk
-                    now = asyncio.get_event_loop().time()
-                    if now - last_update >= 0.5:
-                        display_text = full_text + " ▌"
-                        try:
-                            await sent_msg.edit_text(display_text[:4000])
-                        except Exception:
-                            pass  # message deleted or too old
-                        last_update = now
-            except Exception:
-                logger.debug("Stream interrupted", exc_info=True)
+                # Send initial message with cursor
+                sent_msg = await message.answer(cursor)
+                full_text = ""
+                last_update = asyncio.get_event_loop().time()
+
+                try:
+                    async for chunk in stream:
+                        full_text += chunk
+                        now = asyncio.get_event_loop().time()
+                        if now - last_update >= interval:
+                            display_text = full_text + settings.streaming_cursor
+                            try:
+                                await sent_msg.edit_text(display_text[:4000])
+                            except Exception:
+                                pass  # message deleted or too old
+                            last_update = now
+                except Exception:
+                    logger.debug("Stream interrupted", exc_info=True)
+            else:
+                # Non-streaming: accumulate text silently
+                sent_msg = await message.answer("⏳")
+                full_text = ""
+                try:
+                    async for chunk in stream:
+                        full_text += chunk
+                except Exception:
+                    logger.debug("Stream interrupted", exc_info=True)
 
             if not full_text.strip():
                 try:

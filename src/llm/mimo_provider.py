@@ -1,7 +1,7 @@
 """MiMo (Xiaomi) провайдер — OpenAI-совместимый API.
 
 Модели: mimo-v2.5-pro, mimo-v2.5, mimo-v2-flash, mimo-v2-omni.
-Base URL: https://api.xiaomimimo.com/v1
+Regional endpoints: EU, US, Asia (default).
 API docs: https://platform.xiaomimimo.com/docs/en-US/welcome
 """
 
@@ -9,13 +9,20 @@ import httpx
 from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI
 
-from src.config import LLMDefaults
 from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin
 from src.llm._ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
 
-MIMO_BASE_URL = "https://api.xiaomimimo.com/v1"
+MIMO_REGIONS: dict[str, str] = {
+    "eu": "https://eu.api.xiaomimimo.com/v1",
+    "us": "https://us.api.xiaomimimo.com/v1",
+    "asia": "https://api.xiaomimimo.com/v1",
+}
+MIMO_DEFAULT_REGION = "asia"
+MIMO_BASE_URL = MIMO_REGIONS[MIMO_DEFAULT_REGION]
+MIMO_CHAT_LIGHT = "mimo-v2-flash"
+MIMO_CHAT_HEAVY = "mimo-v2.5-pro"
 
 
 class MiMoProvider(OpenAICompatEmbedMixin):
@@ -28,9 +35,13 @@ class MiMoProvider(OpenAICompatEmbedMixin):
         api_key: str,
         *,
         base_url: str | None = None,
+        region: str | None = None,
         model: str | None = None,
         embed_model: str | None = None,
     ) -> None:
+        # Resolve base_url: explicit base_url > region > default
+        if base_url is None and region is not None:
+            base_url = MIMO_REGIONS.get(region.lower(), MIMO_BASE_URL)
         base_url = _validate_base_url(base_url)
         kwargs: dict = dict(
             api_key=api_key,
@@ -42,9 +53,7 @@ class MiMoProvider(OpenAICompatEmbedMixin):
         self._embed_model = embed_model
 
     def _resolve_model(self, heavy: bool) -> str:
-        return self._model or (
-            LLMDefaults.MIMO_CHAT_HEAVY if heavy else LLMDefaults.MIMO_CHAT_LIGHT
-        )
+        return self._model or (MIMO_CHAT_HEAVY if heavy else MIMO_CHAT_LIGHT)
 
     async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
         model = self._resolve_model(heavy)

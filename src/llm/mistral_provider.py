@@ -1,13 +1,14 @@
 import httpx
 from openai import AsyncOpenAI
 
-from src.config import LLMDefaults
 from src.llm._openai_compat_mixin import OpenAICompatEmbedMixin
 from src.llm._ssrf_guard import validate_base_url as _validate_base_url
 from src.llm.base import ChatMessage
 
 
 MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
+MISTRAL_CHAT_LIGHT = "mistral-small-latest"
+MISTRAL_CHAT_HEAVY = "mistral-medium-latest"
 
 
 class MistralProvider(OpenAICompatEmbedMixin):
@@ -32,9 +33,7 @@ class MistralProvider(OpenAICompatEmbedMixin):
         self._embed_model = embed_model
 
     def _resolve_model(self, heavy: bool) -> str:
-        return self._model or (
-            LLMDefaults.MISTRAL_CHAT_HEAVY if heavy else LLMDefaults.MISTRAL_CHAT_LIGHT
-        )
+        return self._model or (MISTRAL_CHAT_HEAVY if heavy else MISTRAL_CHAT_LIGHT)
 
     async def chat(self, messages: list[ChatMessage], *, heavy: bool = False) -> str:
         model = self._resolve_model(heavy)
