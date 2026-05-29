@@ -45,6 +45,7 @@ def _register_background_tasks() -> None:
     import src.core.scheduling.proactive_nudge  # noqa: F401
     import src.core.scheduling.avito  # noqa: F401
     import src.core.scheduling.message_scheduler  # noqa: F401
+    import src.core.rag.ingest  # noqa: F401 — rag_watchdog
 
 
 async def main() -> None:
@@ -108,9 +109,12 @@ async def main() -> None:
     from src.core.context.providers.frozen_provider import frozen_provider
     from src.core.context.providers.subdirectory_hints import subdirectory_provider
 
+    from src.core.context.providers.document_provider import DocumentProvider
+
     engine.register(MemoryProvider())
     engine.register(VectorProvider())
     engine.register(WikiContextProvider())
+    engine.register(DocumentProvider())
     engine.register(frozen_provider)
     logger.info("Context engine registered %d providers", len(engine.providers))
 
