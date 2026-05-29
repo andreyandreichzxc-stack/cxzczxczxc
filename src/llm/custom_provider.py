@@ -27,12 +27,16 @@ class CustomProvider(OpenAICompatEmbedMixin):
         self,
         api_key: str,
         *,
-        endpoint: str,
+        endpoint: str = "",
+        base_url: str = "",
         model: str | None = None,
         embed_model: str | None = None,
         label: str = "Custom",
     ) -> None:
-        endpoint_safe = _validate_base_url(endpoint)
+        url = base_url or endpoint
+        if not url:
+            raise ValueError("CustomProvider requires base_url or endpoint")
+        endpoint_safe = _validate_base_url(url)
         self._label = label
         self._model = model
         self._embed_model = embed_model

@@ -150,6 +150,29 @@ async def _render_menu(telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
         groq_key = await get_api_key(session, owner, "groq")
         custom_key = await get_api_key(session, owner, "custom")
 
+        # Also check LlmKeySlot for custom providers
+        try:
+            all_slots = await list_key_slots(session, owner)
+            has_custom_slots = any(
+                s.provider
+                not in {
+                    "openai",
+                    "gemini",
+                    "mistral",
+                    "deepseek",
+                    "cloudflare",
+                    "grok",
+                    "mimo",
+                    "groq",
+                }
+                and s.enabled
+                for s in all_slots
+            )
+        except Exception:
+            has_custom_slots = False
+
+        custom_ok = bool(custom_key) or has_custom_slots
+
         # ── Extract ORM values to local vars (session-safe) ──────────
         _tz = s.timezone
         _auto_reply_enabled = s.auto_reply_enabled
@@ -2602,7 +2625,7 @@ async def step_custom_key(message: Message, state: FSMContext) -> None:
     if raw == "/cancel":
         await state.clear()
         text, kb = await _render_menu(message.from_user.id)
-        await message.answer("🚫 Отменено.", reply_markup=kb)
+        await message.answer("🚫 Отменено.")
         await message.answer(text, reply_markup=kb)
         return
     if not raw:
@@ -2645,7 +2668,7 @@ async def step_custom_models(message: Message, state: FSMContext) -> None:
     if raw_models == "/cancel":
         await state.clear()
         text, kb = await _render_menu(message.from_user.id)
-        await message.answer("🚫 Отменено.", reply_markup=kb)
+        await message.answer("🚫 Отменено.")
         await message.answer(text, reply_markup=kb)
         return
     if not raw_models:

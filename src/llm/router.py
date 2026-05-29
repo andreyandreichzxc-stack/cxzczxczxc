@@ -1297,7 +1297,7 @@ def _resolve_model_for_task(
                 from src.llm.provider_catalog import get_provider as _gp
 
                 maybe_provider = model.split("/", 1)[0]
-                if _gp(maybe_provider):
+                if _gp(maybe_provider) or _provider_class_for(maybe_provider):
                     model = model.split("/", 1)[1]
             return model
 
