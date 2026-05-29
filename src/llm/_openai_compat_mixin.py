@@ -30,6 +30,7 @@ class OpenAICompatBaseMixin:
     _client: Any  # AsyncOpenAI
 
     async def validate_key(self) -> bool:
+        """Validate key — models.list() first, fallback to minimal chat."""
         try:
             await self._client.models.list()
             return True
@@ -39,6 +40,18 @@ class OpenAICompatBaseMixin:
             return False
         except APIConnectionError:
             raise
+        except Exception:
+            pass  # fall through to chat-based fallback
+
+        # Fallback: try a minimal chat completion for endpoints without /models
+        try:
+            model = getattr(self, "_model", None) or "gpt-3.5-turbo"
+            await self._client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=1,
+            )
+            return True
         except Exception:
             return False
 

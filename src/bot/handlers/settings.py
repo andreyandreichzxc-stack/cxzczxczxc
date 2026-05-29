@@ -10,6 +10,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     FSInputFile,
     InlineKeyboardButton,
@@ -421,7 +422,9 @@ async def cb_export_config(callback: CallbackQuery) -> None:
         bio.seek(0)
 
         await callback.message.answer_document(
-            FSInputFile(bio, "telegram_helper_config.json"),
+            BufferedInputFile(
+                json_str.encode("utf-8"), filename="telegram_helper_config.json"
+            ),
             caption="📤 Твой конфиг бота. Сохрани этот файл.\n\n"
             "Для восстановления используй 📥 Импорт конфига в настройках.",
         )
@@ -1007,7 +1010,17 @@ async def _render_section(
                 "mimo": ("mimo-v2-flash", "mimo-v2.5-pro"),
                 "groq": ("llama-3.3-70b-versatile", "mixtral-8x7b-32768"),
             }
-            _names = _provider_model_names.get(s.llm_provider, ("?", "?"))
+            _names = _provider_model_names.get(s.llm_provider)
+            if _names is None:
+                # For custom/unknown providers, show models from slots
+                try:
+                    slots = await list_key_slots(
+                        session, owner, provider=s.llm_provider
+                    )
+                    models = [slot.model for slot in slots if slot.model]
+                    _names = (", ".join(models[:3]), "") if models else ("?", "?")
+                except Exception:
+                    _names = ("?", "?")
             active = (
                 "DeepSeek V4 Flash (бесплатно)"
                 if s.llm_provider == "openrouter"
@@ -2152,8 +2165,10 @@ async def step_custom_model_name(message: Message, state: FSMContext) -> None:
     try:
         from src.llm.provider_catalog import get_provider, LLM_PROVIDERS
 
+        current_provider = None
         async with get_session() as session:
             owner = await get_or_create_user(session, message.from_user.id)
+            current_provider = owner.settings.llm_provider
             slots = await list_key_slots(session, owner)
             user_providers = {s.provider for s in slots if s.enabled}
         # Ищем модель во всех каталогах, для которых есть ключи
@@ -2162,8 +2177,7 @@ async def step_custom_model_name(message: Message, state: FSMContext) -> None:
             if pi.name in user_providers and pi.models and model_name in pi.models:
                 found_in = pi
                 break
-        if found_in is None:
-            current_provider = owner.settings.llm_provider
+        if found_in is None and current_provider:
             provider_info = get_provider(current_provider)
             if provider_info and provider_info.models:
                 catalog_warning = (
@@ -2608,6 +2622,12 @@ async def step_custom_name(message: Message, state: FSMContext) -> None:
 async def step_custom_endpoint(message: Message, state: FSMContext) -> None:
     """Шаг 2/4: endpoint."""
     endpoint = (message.text or "").strip()
+    if endpoint == "/cancel":
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("🚫 Отменено.")
+        await message.answer(text, reply_markup=kb)
+        return
     if not endpoint:
         await message.answer("Введи URL. /cancel — отмена.")
         return
