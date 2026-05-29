@@ -1,7 +1,7 @@
 """Merge contact profile migration heads.
 
 Revision ID: i2j3k4l5m6n7
-Revises: c7d8e9f0a1b2, h1i2j3k4l5m6
+Revises: c7d8e9f0a1b2, h1i2j3k4l5m6, e1d7c0f3ac9c
 Create Date: 2026-05-24
 """
 
@@ -13,6 +13,7 @@ revision: str = "i2j3k4l5m6n7"
 down_revision: Union[str, Sequence[str], None] = (
     "c7d8e9f0a1b2",
     "h1i2j3k4l5m6",
+    "e1d7c0f3ac9c",
 )
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
