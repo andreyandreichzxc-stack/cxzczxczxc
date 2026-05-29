@@ -2585,6 +2585,12 @@ async def step_groq_key(message: Message, state: FSMContext) -> None:
 async def step_custom_name(message: Message, state: FSMContext) -> None:
     """Шаг 1/4: название провайдера."""
     name = (message.text or "").strip()
+    if name == "/cancel":
+        await state.clear()
+        text, kb = await _render_menu(message.from_user.id)
+        await message.answer("🚫 Отменено.")
+        await message.answer(text, reply_markup=kb)
+        return
     if not name:
         await message.answer("Введи название. /cancel — отмена.")
         return
@@ -2686,7 +2692,7 @@ async def step_custom_models(message: Message, state: FSMContext) -> None:
                 session,
                 owner,
                 provider="custom",
-                purpose="chat_light",
+                purpose="main",
                 model=model,
                 label=f"{name}:{model}",
                 endpoint=endpoint,
